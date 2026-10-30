@@ -1,0 +1,21 @@
+branch: fix/promotion-reload
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-03T07:44:38.000Z'
+      title: Reload shared state from disk when a Standby is promoted to Active
+      description: >-
+        A promoted Standby now re-reads Members, Teams, dashboard users and sessions,
+        policy engines, usage and monitoring series, the request log, system metrics,
+        dashboard settings, credential revocations, governance chains, prompts, terms,
+        provisioning and drift records, so data written on the previous Active is kept.
+    - timestamp: '2026-11-03T07:44:38.000Z'
+      title: Stop a Standby from writing shared monitoring, governance and drift state
+      description: >-
+        Metrics persistence, governance and drift retention, and drift evaluation now
+        run only on the Active, so a Standby sharing storage no longer overwrites what
+        the Active writes.
+  removed: []
+  security: []
+  breaking: []

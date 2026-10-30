@@ -262,8 +262,8 @@ earlier runs of this one. It reads the other files at startup, after each of its
 writes, and on promotion before `/api/v1/health` reports ready
 ([CONFIGURATION_RELOAD.md](CONFIGURATION_RELOAD.md#what-promotion-does)). Spend recorded
 before a restart, a crash, or a failover therefore still counts, as long as its write
-completed, and spend from a Standby (drift jobs run in every mode) adds to what the
-Active recorded. A budget alert any instance raised this month is not raised again.
+completed. Scheduled drift runs, which also record spend, run only on the Active
+instance. A budget alert any instance raised this month is not raised again.
 
 Only the current month (or budget period) counts. A stored month that has ended, or one
 that has not started yet (a peer with a skewed clock, a hand-edited file), is ignored,

@@ -189,7 +189,8 @@ verification rather than replacing a valid cache with a partial one. Validation 
 publication invariants, immutable URLs, and every Customer Terms acceptance against its
 published version. After initialisation, Customer Terms and Acceptance Records are served
 from validated memory; writes persist atomically before the cache changes. Manual edits to
-healthy Terms storage need a restart to load; `config.reload` does not reload these stores.
+healthy Terms storage need a restart or a promotion to load; `config.reload` does not reload
+these stores. Promotion to Active re-opens and validates them on their next use.
 A store that failed to initialise retries on later Terms operations.
 
 To recover an invalid Affinidi cache, restore a known-good copy from backup or repair it
