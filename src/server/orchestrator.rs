@@ -2541,6 +2541,13 @@ pub async fn run_axum_proxy(
         if let Some(store) = &identity_state.team_store {
             promotion_reloads.push(store.clone());
         }
+        if let Some(store) = &identity_state.prompt_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(provisioner) = &identity_state.member_provisioner {
+            promotion_reloads.push(provisioner.clone());
+        }
+        promotion_reloads.push(terms_manager.clone());
         if let Some(state) = &auth_state {
             promotion_reloads.push(state.storage.clone());
             promotion_reloads.push(state.session_manager.clone());
@@ -2551,6 +2558,19 @@ pub async fn run_axum_proxy(
         }
         promotion_reloads.push(budget_tracker.clone());
         promotion_reloads.push(team_usage_tracker.clone());
+        if let Some(store) = &metrics_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(store) = &system_metrics_store {
+            promotion_reloads.push(store.clone());
+        }
+        promotion_reloads.push(settings_store.clone());
+        if let Some(issuer) = &vc_issuer {
+            promotion_reloads.push(issuer.clone());
+        }
+        if let Some(store) = crate::governance::store() {
+            promotion_reloads.push(Arc::new(store.clone()));
+        }
         let activation_policies = Arc::new(ActivationPolicies {
             definitions: policy_definition_store.clone(),
             global: global_policy_store.clone(),
@@ -2579,6 +2599,7 @@ pub async fn run_axum_proxy(
             .telemetry
             .clone();
         let telemetry_store = Arc::new(crate::telemetry::TelemetryStore::new(telemetry_path).await);
+        promotion_reloads.push(telemetry_store.clone());
         crate::telemetry::set_global_telemetry_store(telemetry_store);
         info!("✓ Usage telemetry store initialized (loaded on boot)");
 
@@ -2587,6 +2608,7 @@ pub async fn run_axum_proxy(
             .ops_telemetry
             .clone();
         let ops_metrics_store = Arc::new(crate::metrics::ops_telemetry::OpsMetricsStore::embedded(ops_path).await);
+        promotion_reloads.push(ops_metrics_store.clone());
         crate::metrics::ops_telemetry::set_global_ops_store(ops_metrics_store);
         info!("✓ Operational metrics store initialized");
 
@@ -2595,6 +2617,7 @@ pub async fn run_axum_proxy(
             .drift
             .clone();
         let drift_store = Arc::new(crate::drift::DriftStore::new(drift_path).await);
+        promotion_reloads.push(drift_store.clone());
         crate::drift::set_global_drift_store(drift_store);
         info!("✓ Drift dimension store initialized");
 
@@ -2607,7 +2630,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_baseline_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_baseline_store(store);
                 info!("✓ Drift baseline store initialized");
             }
             Err(e) => tracing::warn!("Drift baseline store init failed: {e}"),
@@ -2664,7 +2689,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_session_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_session_store(store);
                 info!("✓ Drift session store initialized");
             }
             Err(e) => tracing::warn!("Drift session store init failed: {e}"),
@@ -2680,7 +2707,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_run_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_run_store(store);
                 info!("✓ Drift run store initialized");
             }
             Err(e) => tracing::warn!("Drift run store init failed: {e}"),
@@ -2695,7 +2724,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_eval_state_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_eval_state_store(store);
                 info!("✓ Drift eval-state store initialized");
             }
             Err(e) => tracing::warn!("Drift eval-state store init failed: {e}"),

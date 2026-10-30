@@ -162,6 +162,18 @@ pub struct VCIssuer {
     status_list: Arc<StatusListRegistry>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for VCIssuer {
+    /// Re-read the revocation status list, so revocations the previous Active
+    /// made stay in force. An unreadable list holds readiness back.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.status_list
+            .reload()
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
 impl VCIssuer {
     pub async fn new(
         storage_path: impl AsRef<std::path::Path>,

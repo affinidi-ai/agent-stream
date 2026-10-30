@@ -471,6 +471,14 @@ impl<S: RrdSample> TimeSeriesBackend<S> for RrdStore<S> {
             d.store(false, Ordering::Relaxed);
         }
     }
+
+    async fn reload(&self) {
+        let mut inner = self.inner.write().await;
+        *inner = Self::load_from_disk(&self.storage_dir).await;
+        for d in &self.dirty {
+            d.store(false, Ordering::Relaxed);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -787,6 +795,35 @@ mod tests {
             .await;
         assert_eq!(resp.points.len(), 1);
         assert_eq!(resp.points[0].value, Counter { n: 7, peak: 3 });
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_series_another_instance_persisted() {
+        let dir = std::env::temp_dir().join(format!("rrd-promote-{}", uuid::Uuid::new_v4()));
+        let now = Utc::now().timestamp();
+        let standby = RrdStore::<Counter>::new(&dir).await;
+        {
+            let active = RrdStore::<Counter>::new(&dir).await;
+            active
+                .record_many(vec![("surface:a".to_string(), Counter { n: 5, peak: 0 })], at(now - 120))
+                .await;
+            active.flush().await;
+        }
+
+        standby.reload().await;
+        standby
+            .record_many(vec![("surface:b".to_string(), Counter { n: 1, peak: 0 })], at(now))
+            .await;
+        standby.flush().await;
+
+        let restarted = RrdStore::<Counter>::new(&dir).await;
+        for key in ["surface:a", "surface:b"] {
+            let resp = restarted
+                .range(key, now - 600, now + 60, 500, None)
+                .await;
+            assert_eq!(resp.points.len(), 1, "{key} survives");
+        }
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

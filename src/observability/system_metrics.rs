@@ -85,6 +85,17 @@ pub struct SystemMetricsStore {
     last_persisted: Mutex<Option<Instant>>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for SystemMetricsStore {
+    /// Continue the history the previous Active wrote instead of overwriting
+    /// it with the samples this instance collected while Standby.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.load()
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
 impl SystemMetricsStore {
     pub fn new<P: AsRef<Path>>(storage_dir: P) -> Self {
         Self::with_persist_interval(storage_dir, PERSIST_INTERVAL)
@@ -563,6 +574,30 @@ mod tests {
             .map(|s| s.process_cpu_percent)
             .collect();
         assert_eq!(restored, vec![1.0, 2.0]);
+    }
+
+    #[tokio::test]
+    async fn reload_replaces_standby_samples_with_the_active_history() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let standby = SystemMetricsStore::with_persist_interval(dir.path(), Duration::ZERO);
+        standby
+            .append(sample(9.0))
+            .await;
+        let active = SystemMetricsStore::with_persist_interval(dir.path(), Duration::ZERO);
+        active.push(sample(1.0)).await;
+        active.push(sample(2.0)).await;
+
+        standby
+            .reload_from_storage()
+            .await
+            .expect("reload");
+        standby
+            .push(sample(3.0))
+            .await;
+
+        assert_eq!(persisted_cpu(dir.path()).await, vec![1.0, 2.0, 3.0]);
     }
 
     #[tokio::test]

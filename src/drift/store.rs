@@ -77,6 +77,16 @@ pub struct DriftStore {
     backend: Arc<dyn TimeSeriesBackend<DriftSample>>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for DriftStore {
+    /// Continue the drift series the previous Active wrote instead of
+    /// overwriting them with this instance's startup copy.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.backend.reload().await;
+        Ok(())
+    }
+}
+
 impl DriftStore {
     /// Wrap an arbitrary backend (embedded RRD engine or an external adapter).
     pub fn with_backend(backend: Arc<dyn TimeSeriesBackend<DriftSample>>) -> Self {

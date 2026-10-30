@@ -69,6 +69,21 @@ pub struct TermsManager {
     write_lock: Mutex<()>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for TermsManager {
+    /// Drop the opened Terms storage, so the next access re-opens and
+    /// validates the Terms and acceptances another instance stored.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        let _write = self.write_lock.lock().await;
+        let _verification = self
+            .verification_lock
+            .lock()
+            .await;
+        *self.storage.write().await = None;
+        Ok(())
+    }
+}
+
 impl TermsManager {
     pub fn disabled() -> Self {
         Self {
@@ -598,6 +613,39 @@ mod tests {
             .unwrap();
 
         assert!(!status.consent_required);
+    }
+
+    #[tokio::test]
+    async fn reload_sees_acceptances_another_instance_stored() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let directory = TempDir::new().unwrap();
+        let standby = manager(&directory, Some(affinidi("affinidi-v1", false))).await;
+        let before = standby
+            .status("user-1", AcceptanceContext::Login)
+            .await
+            .unwrap();
+        assert!(before.consent_required);
+        let active = manager(&directory, Some(affinidi("affinidi-v1", false))).await;
+        let status = active
+            .status("user-1", AcceptanceContext::Registration)
+            .await
+            .unwrap();
+        active
+            .accept("user-1", AcceptanceContext::Registration, acceptance(&status))
+            .await
+            .unwrap();
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        let after = standby
+            .status("user-1", AcceptanceContext::Login)
+            .await
+            .unwrap();
+        assert!(!after.consent_required);
     }
 
     #[tokio::test]

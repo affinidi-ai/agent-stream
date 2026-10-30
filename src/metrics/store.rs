@@ -3591,6 +3591,45 @@ impl Default for MetricsStore {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for MetricsStore {
+    /// Continue the request log the previous Active wrote instead of
+    /// overwriting it with this instance's startup copy. A log that cannot be
+    /// read starts empty, as at startup.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        let Some(ref backend) = self.backend else {
+            return Ok(());
+        };
+        let snapshot = backend
+            .load()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to reload metrics from {}: {}", backend.name(), e);
+                crate::metrics::backends::types::MetricsSnapshot {
+                    connections: Vec::new(),
+                    rule_validation_events: Vec::new(),
+                }
+            });
+        *self.connections.write().await = snapshot.connections;
+        *self
+            .rule_validation_events
+            .write()
+            .await = snapshot.rule_validation_events;
+        *self.dirty.write().await = false;
+        for cache_time in [
+            &self.pipe_stats_cache_time,
+            &self.channel_stats_cache_time,
+            &self.identity_channel_stats_cache_time,
+            &self.cached_scalar_metrics_time,
+            &self.cached_time_series_time,
+            &self.cached_recent_connections_time,
+        ] {
+            *cache_time.write().await = None;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MetricsStore;
@@ -3614,6 +3653,93 @@ mod tests {
             .get();
 
         assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_the_log_another_instance_saved() {
+        use crate::metrics::backends::MetricsBackend;
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().unwrap();
+        let open = || async {
+            MetricsStore::new_with_ws_and_retention(
+                100,
+                std::sync::Arc::new(crate::server::WsState::new(8)),
+                60,
+                dir.path()
+                    .to_string_lossy()
+                    .into_owned(),
+                None,
+                None,
+                None,
+                None,
+                1,
+            )
+            .await
+        };
+        let standby = open().await;
+        let active = open().await;
+        record_channel_round_trip(&active, "ch-promoted", "t1", 10, 20, ConnectionStatus::Success).await;
+        let connections = loop {
+            let connections = active
+                .connections
+                .read()
+                .await
+                .clone();
+            if connections.len() == 2 {
+                break connections;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        crate::metrics::backends::FileMetricsBackend::new(
+            dir.path()
+                .join("metrics.json"),
+        )
+        .persist(&connections, &std::collections::HashMap::new(), &[])
+        .await
+        .unwrap();
+        assert!(
+            standby
+                .connections
+                .read()
+                .await
+                .is_empty()
+        );
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        let reloaded = standby
+            .connections
+            .read()
+            .await
+            .clone();
+        assert_eq!(reloaded.len(), 2);
+        assert!(
+            reloaded
+                .iter()
+                .all(|c| c.channel_config_id == "ch-promoted")
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_without_a_backend_is_a_no_op() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let store = MetricsStore::new(10);
+        store
+            .reload_from_storage()
+            .await
+            .unwrap();
+        assert!(
+            store
+                .connections
+                .read()
+                .await
+                .is_empty()
+        );
     }
 
     // Records one channel round-trip: a Request datapoint carrying

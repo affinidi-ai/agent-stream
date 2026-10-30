@@ -47,6 +47,17 @@ pub struct RecordedSessionStore {
     retention: DriftRetention,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for RecordedSessionStore {
+    /// Re-read the recorded sessions another instance stored, so retention counts and prunes them.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
 impl RecordedSessionStore {
     pub async fn new(
         storage_dir: String,

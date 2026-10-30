@@ -377,6 +377,7 @@ enum Job {
     Prune { retention_days: u32, reply: oneshot::Sender<Result<Option<ChainAnchor>>> },
     Reconcile { rebuild: bool, reply: oneshot::Sender<Result<()>> },
     Archive { reply: oneshot::Sender<Result<Option<String>>> },
+    Invalidate { reply: oneshot::Sender<()> },
 }
 
 /// A key the appliance has signed governance credentials with.
@@ -492,6 +493,17 @@ pub struct GovernanceStore {
     encryption: Option<EncryptionService>,
     signer: GovernanceSigner,
     shared: Arc<Shared>,
+}
+
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for GovernanceStore {
+    /// Make each surface's next record link to the chain head on disk, which
+    /// the previous Active may have moved, instead of a head cached here.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.forget_cached_state()
+            .await
+            .map_err(std::io::Error::other)
+    }
 }
 
 impl GovernanceStore {
@@ -650,6 +662,35 @@ impl GovernanceStore {
         self.send(surface_id, Job::Reconcile { rebuild, reply })?;
         rx.await
             .map_err(|_| anyhow!("governance store worker dropped the job"))?
+    }
+
+    /// Drop every surface's cached chain head and retention window, and the
+    /// cached signing keys, so the next use reads them from disk. Each worker
+    /// applies it after the jobs already queued for it.
+    async fn forget_cached_state(&self) -> Result<()> {
+        let workers: Vec<_> = self
+            .shared
+            .workers
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?
+            .values()
+            .cloned()
+            .collect();
+        for tx in workers {
+            let (reply, rx) = oneshot::channel();
+            if tx
+                .send(Job::Invalidate { reply })
+                .is_ok()
+            {
+                let _ = rx.await;
+            }
+        }
+        *self
+            .shared
+            .keys
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))? = None;
+        Ok(())
     }
 
     fn surface_dir(
@@ -1327,6 +1368,11 @@ impl Worker {
                 }
                 Job::Archive { reply } => {
                     let _ = reply.send(self.archive().await);
+                }
+                Job::Invalidate { reply } => {
+                    self.invalidate();
+                    self.window = None;
+                    let _ = reply.send(());
                 }
             }
         }
@@ -3062,6 +3108,62 @@ mod tests {
                 .count,
             3
         );
+    }
+
+    #[tokio::test]
+    async fn a_promoted_instance_continues_the_chain_another_instance_extended() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let root = temp_root();
+        let standby = GovernanceStore::new(root.path(), signer(), None);
+        standby
+            .record(draft("surf-p", "before"), 0)
+            .await
+            .unwrap();
+        let active = GovernanceStore::new(root.path(), signer(), None);
+        let extended = active
+            .record(draft("surf-p", "on the active"), 0)
+            .await
+            .unwrap();
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        let next = standby
+            .record(draft("surf-p", "after promotion"), 0)
+            .await
+            .unwrap();
+
+        assert_eq!(next.seq, Some(3));
+        assert_eq!(Some(next.record.prev_record_hash), extended.record.content_hash);
+        let summary = standby
+            .verify_chain("surf-p")
+            .await
+            .unwrap();
+        assert_eq!(summary.count, 3);
+    }
+
+    #[tokio::test]
+    async fn without_a_reload_a_stale_head_forks_the_chain() {
+        let root = temp_root();
+        let standby = GovernanceStore::new(root.path(), signer(), None);
+        standby
+            .record(draft("surf-f", "before"), 0)
+            .await
+            .unwrap();
+        let active = GovernanceStore::new(root.path(), signer(), None);
+        active
+            .record(draft("surf-f", "on the active"), 0)
+            .await
+            .unwrap();
+
+        let forked = standby
+            .record(draft("surf-f", "stale"), 0)
+            .await
+            .unwrap();
+
+        assert_eq!(forked.seq, Some(2), "the cached head reuses a sequence number");
     }
 
     /// Two records from 2020 and two from now, with the 2020 ones prunable

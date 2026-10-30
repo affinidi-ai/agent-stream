@@ -253,6 +253,32 @@ impl Default for DashboardSettings {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for SettingsStore {
+    /// Re-read the settings the previous Active saved, so a later partial
+    /// update does not write this instance's startup copy back. Unlike
+    /// [`SettingsStore::load`], it never writes: a missing or unparsable file
+    /// keeps the current settings.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        let _persist = self.persist_lock.lock().await;
+        let content = match fs::read_to_string(&self.storage_path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        match serde_json::from_str::<DashboardSettings>(&content) {
+            Ok(settings) => {
+                *self
+                    .settings
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+            }
+            Err(e) => warn!("Failed to parse settings file on promotion, keeping current settings: {}", e),
+        }
+        Ok(())
+    }
+}
+
 /// Settings store that manages persistent dashboard settings
 #[derive(Clone)]
 pub struct SettingsStore {
@@ -740,6 +766,76 @@ impl UserSettingsStore {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn reload_picks_up_settings_another_instance_saved() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let temp_dir = TempDir::new().unwrap();
+        let standby = SettingsStore::new(temp_dir.path());
+        standby.load().await.unwrap();
+        let active = SettingsStore::new(temp_dir.path());
+        active
+            .persist(DashboardSettings {
+                badge_threshold_minutes: 42,
+                ..DashboardSettings::default()
+            })
+            .await
+            .unwrap();
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            standby
+                .get()
+                .badge_threshold_minutes,
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_settings_and_file_when_the_file_is_unusable() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(temp_dir.path());
+        store
+            .persist(DashboardSettings {
+                badge_threshold_minutes: 7,
+                ..DashboardSettings::default()
+            })
+            .await
+            .unwrap();
+        let path = temp_dir
+            .path()
+            .join("settings.json");
+        tokio::fs::write(&path, "not json")
+            .await
+            .unwrap();
+
+        store
+            .reload_from_storage()
+            .await
+            .unwrap();
+        tokio::fs::remove_file(&path)
+            .await
+            .unwrap();
+        store
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get()
+                .badge_threshold_minutes,
+            7
+        );
+        assert!(!path.exists(), "a reload never writes defaults");
+    }
 
     #[test]
     fn test_default_settings() {

@@ -8,7 +8,7 @@
 //! publicly at [`STATUS_LIST_PATH`].
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -67,11 +67,7 @@ impl StatusListRegistry {
         let path = storage_dir
             .into()
             .join(STATE_FILE);
-        let state = match tokio::fs::read(&path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("invalid {}", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StatusListState::default(),
-            Err(error) => return Err(error).with_context(|| format!("failed to read {}", path.display())),
-        };
+        let state = read_state(&path).await?;
         Ok(Self {
             path,
             url: format!("https://{domain}{STATUS_LIST_PATH}"),
@@ -79,6 +75,15 @@ impl StatusListRegistry {
             signer,
             state: Mutex::new(state),
         })
+    }
+
+    /// Replace the indexes and revocations with the stored list, so an
+    /// instance promoted to Active keeps the revocations the previous Active
+    /// made. The signed list is rebuilt on its next read.
+    pub async fn reload(&self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        *state = read_state(&self.path).await?;
+        Ok(())
     }
 
     pub fn url(&self) -> &str {
@@ -214,6 +219,14 @@ impl StatusListRegistry {
     }
 }
 
+async fn read_state(path: &Path) -> Result<StatusListState> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("invalid {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(StatusListState::default()),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
 /// Reads this appliance's own status list from the registry and fetches any
 /// other issuer's list over HTTPS, so verifying an own credential needs no
 /// network and works on hosts that are not publicly reachable.
@@ -317,6 +330,63 @@ mod tests {
         assert_eq!(first["statusPurpose"], "revocation");
         assert_eq!(first["statusListCredential"], "https://appliance.example/credentials/status/revocation");
         assert!(index_of(&first) < STATUS_LIST_BITS);
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_revocations_another_instance_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let standby = registry(dir.path()).await;
+        let entry = standby
+            .entry_for("did:example:agent")
+            .await
+            .unwrap();
+        let active = registry(dir.path()).await;
+        active
+            .revoke("did:example:agent")
+            .await
+            .unwrap();
+        assert_eq!(bit(&standby, index_of(&entry)).await, 0, "stale before the reload");
+
+        standby
+            .reload()
+            .await
+            .unwrap();
+
+        assert!(
+            standby
+                .is_revoked("did:example:agent")
+                .await
+        );
+        assert_eq!(bit(&standby, index_of(&entry)).await, 1, "the cached signed list is rebuilt");
+    }
+
+    #[tokio::test]
+    async fn reload_fails_and_keeps_state_when_the_file_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry(dir.path()).await;
+        registry
+            .entry_for("did:example:agent")
+            .await
+            .unwrap();
+        registry
+            .revoke("did:example:agent")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join(STATE_FILE), "not json")
+            .await
+            .unwrap();
+
+        assert!(
+            registry
+                .reload()
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .is_revoked("did:example:agent")
+                .await
+        );
     }
 
     #[tokio::test]

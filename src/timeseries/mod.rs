@@ -149,4 +149,9 @@ pub trait TimeSeriesBackend<S: RrdSample>: Send + Sync {
 
     /// Synchronously persist all pending state (graceful shutdown, post-delete).
     async fn flush(&self);
+
+    /// Replace in-memory state with what is persisted now, so an instance
+    /// promoted to Active continues the series the previous Active wrote. A
+    /// backend whose state is not held in this process has nothing to reload.
+    async fn reload(&self) {}
 }

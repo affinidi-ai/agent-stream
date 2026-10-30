@@ -578,6 +578,18 @@ pub struct MemberProvisioner {
     creation_window: Mutex<VecDeque<i64>>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for MemberProvisioner {
+    /// Re-read the provisioning config another instance saved. A missing or
+    /// invalid file keeps the current config.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        if let Some(config) = Self::load_from_disk(&self.storage_path).await {
+            *self.config.write().await = config;
+        }
+        Ok(())
+    }
+}
+
 impl MemberProvisioner {
     /// Construct a provisioner, loading the config from the `storage_dir`
     /// directory (the config is stored as `member_provisioning.json` inside it)
@@ -1147,6 +1159,37 @@ mod tests {
             .await
             .unwrap();
         p
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_the_config_another_instance_saved() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = std::env::temp_dir().join(format!("prov_shared_{}", uuid::Uuid::new_v4()));
+        let (m, t) = stores().await;
+        let standby = MemberProvisioner::new(dir.clone(), m.clone(), t.clone()).await;
+        let active = MemberProvisioner::new(dir.clone(), m, t).await;
+        active
+            .update_config(base_config())
+            .await
+            .unwrap();
+        assert!(!standby.config().await.enabled);
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        assert_eq!(standby.config().await, base_config());
+
+        tokio::fs::write(dir.join(PROVISIONING_CONFIG_FILENAME), "not json")
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        assert_eq!(standby.config().await, base_config(), "an invalid file keeps the current config");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]

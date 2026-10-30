@@ -149,6 +149,16 @@ impl TelemetryStore {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for TelemetryStore {
+    /// Continue the usage series the previous Active wrote instead of
+    /// overwriting them with this instance's startup copy.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.backend.reload().await;
+        Ok(())
+    }
+}
+
 /// Map the backend's generic range result onto the usage-facing wire shape.
 fn to_series_response(range: RrdRange<Sample>) -> SeriesResponse {
     SeriesResponse {
