@@ -40,6 +40,11 @@ pub async fn periodic_eval_scheduler(
     let last_run: DashMap<String, Instant> = DashMap::new();
     loop {
         interval.tick().await;
+        // A run writes drift and usage series to shared storage, which only
+        // the Active instance may do.
+        if !crate::server::mode::is_ready_to_serve() {
+            continue;
+        }
         run_due_surfaces(&pipe_store, &state, &last_run).await;
     }
 }

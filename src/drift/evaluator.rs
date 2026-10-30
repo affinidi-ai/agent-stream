@@ -47,6 +47,11 @@ pub async fn periodic_drift_evaluator(
     let state: DashMap<String, AlertState> = DashMap::new();
     loop {
         interval.tick().await;
+        // Only the Active instance raises drift alerts, so a Standby neither
+        // duplicates them nor evaluates against its stale baselines.
+        if !crate::server::mode::is_ready_to_serve() {
+            continue;
+        }
         evaluate_once(&pipe_store, &notification_store, &state, &cadence_defaults).await;
     }
 }

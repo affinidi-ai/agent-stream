@@ -3012,9 +3012,10 @@ impl MetricsStore {
                     }
                 }
 
-                // Only persist if data has changed (dirty flag is set)
+                // Only persist if data has changed (dirty flag is set), and only
+                // on the Active instance, which owns the shared file.
                 let is_dirty = *dirty.read().await;
-                if !is_dirty {
+                if !is_dirty || !crate::server::mode::is_ready_to_serve() {
                     continue;
                 }
 

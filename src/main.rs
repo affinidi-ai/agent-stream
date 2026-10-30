@@ -508,7 +508,11 @@ async fn async_main() -> Result<()> {
 const SHUTDOWN_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Writes every store that keeps a periodic in-memory tail, so a restart doesn't lose it.
+/// A Standby writes nothing: its copies are stale and would overwrite the Active's files.
 async fn flush_stores() {
+    if !crate::server::mode::is_ready_to_serve() {
+        return;
+    }
     if let Some(store) = observability::global_system_metrics_store() {
         store.flush().await;
     }

@@ -178,23 +178,46 @@ impl SystemMetricsStore {
         }
     }
 
+    /// Append a new sample to the in-memory history without persisting it.
+    async fn append(
+        &self,
+        sample: SystemMetricsSample,
+    ) {
+        let mut samples = self.samples.write().await;
+        samples.push(sample);
+        let len = samples.len();
+        if len > MAX_SAMPLES {
+            samples.drain(..len - MAX_SAMPLES);
+        }
+    }
+
+    /// Record a collected sample. Only the Active instance writes the shared
+    /// history file; a Standby keeps its samples in memory.
+    async fn record(
+        &self,
+        sample: SystemMetricsSample,
+    ) {
+        if crate::server::mode::is_ready_to_serve() {
+            self.push(sample).await;
+        } else {
+            self.append(sample).await;
+        }
+    }
+
     /// Append a new sample, persisting the history when [`Self::persist_interval`] has elapsed.
     async fn push(
         &self,
         sample: SystemMetricsSample,
     ) {
-        let data = {
-            let mut samples = self.samples.write().await;
-            samples.push(sample);
-            let len = samples.len();
-            if len > MAX_SAMPLES {
-                samples.drain(..len - MAX_SAMPLES);
-            }
-            if !self.persist_due().await {
-                return;
-            }
-            samples.clone()
-        };
+        self.append(sample).await;
+        if !self.persist_due().await {
+            return;
+        }
+        let data = self
+            .samples
+            .read()
+            .await
+            .clone();
 
         if let Err(e) = write_samples_atomically(&self.storage_path, &data).await {
             error!("Failed to persist system metrics: {:#}", e);
@@ -429,7 +452,7 @@ pub async fn periodic_system_metrics_collection(
         // Record into OpenTelemetry gauges (exported via OTLP on next flush).
         otel_gauges.record(&sample);
 
-        store.push(sample).await;
+        store.record(sample).await;
     }
 }
 
@@ -457,6 +480,35 @@ mod tests {
             .iter()
             .map(|s| s.process_cpu_percent)
             .collect()
+    }
+
+    #[test]
+    fn only_the_active_instance_persists_recorded_samples() {
+        use crate::server::mode::{self, ServerMode};
+
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemMetricsStore::with_persist_interval(dir.path(), Duration::from_secs(0));
+
+        mode::set_server_mode(ServerMode::Standby);
+        runtime.block_on(store.record(sample(1.0)));
+        assert!(
+            !dir.path()
+                .join("system_metrics.json")
+                .exists(),
+            "a Standby keeps samples in memory"
+        );
+
+        mode::set_server_mode(ServerMode::Active);
+        assert!(mode::mark_activation_ready(mode::current_activation_generation()));
+        runtime.block_on(store.record(sample(2.0)));
+        assert_eq!(runtime.block_on(persisted_cpu(dir.path())), vec![1.0, 2.0]);
     }
 
     #[tokio::test]

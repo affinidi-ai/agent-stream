@@ -65,6 +65,10 @@ pub async fn periodic_retention_sweep() {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
+        // Pruning deletes shared files, which only the Active instance may do.
+        if !crate::server::mode::is_ready_to_serve() {
+            continue;
+        }
         if let Some(runs) = global_drift_run_store() {
             runs.prune_all().await;
         }
