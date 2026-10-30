@@ -152,14 +152,73 @@ async fn refresh_referencing_engines(
     state: &IdentityApiState,
     policy_id: &str,
 ) {
+    recompile_policy_engines(
+        &EngineStores {
+            pipe_store: state.pipe_store.clone(),
+            global_policy_store: state
+                .global_policy_store
+                .clone(),
+            agent_surfaces_path: state
+                .bootstrap_config
+                .storage_paths
+                .agent_surfaces
+                .clone(),
+            gateways_path: state
+                .bootstrap_config
+                .storage_paths
+                .gateways
+                .clone(),
+        },
+        EngineScope::Referencing(policy_id),
+    )
+    .await;
+}
+
+/// Where [`recompile_policy_engines`] reads the objects whose engines it compiles.
+pub(crate) struct EngineStores {
+    pub pipe_store: Option<Arc<crate::pipes::FileSystemPipeStore>>,
+    pub global_policy_store: Option<Arc<crate::policies::FileSystemGlobalPolicyStore>>,
+    pub agent_surfaces_path: String,
+    pub gateways_path: String,
+}
+
+/// Which compiled policy engines [`recompile_policy_engines`] rebuilds.
+#[derive(Clone, Copy)]
+pub(crate) enum EngineScope<'a> {
+    /// Every engine, as at startup. Used when an instance is promoted.
+    All,
+    /// Only the engines that reference this policy definition.
+    Referencing(&'a str),
+}
+
+impl<'a> EngineScope<'a> {
+    fn label(self) -> &'a str {
+        match self {
+            Self::All => "*",
+            Self::Referencing(id) => id,
+        }
+    }
+}
+
+/// Recompile the pipe, surface, gateway and appliance-wide policy engines in
+/// `scope` from the stored definitions. A recompile that fails evicts the
+/// engine, so the object denies rather than keeping a stale policy.
+pub(crate) async fn recompile_policy_engines(
+    stores: &EngineStores,
+    scope: EngineScope<'_>,
+) {
+    let policy_id = scope.label();
     // ── Pipes: front-door, variants, IDE members ────────────────────────────
     let (mut pipes_ok, mut pipes_failed) = (0usize, 0usize);
-    if let Some(ref pipe_store) = state.pipe_store {
+    if let Some(ref pipe_store) = stores.pipe_store {
         let matched: Vec<_> = pipe_store
             .list()
             .await
             .into_iter()
-            .filter(|p| pipe_references_policy(p, policy_id))
+            .filter(|p| match scope {
+                EngineScope::All => true,
+                EngineScope::Referencing(id) => pipe_references_policy(p, id),
+            })
             .collect();
         for pipe in &matched {
             match PIPE_POLICY_MANAGER
@@ -185,19 +244,19 @@ async fn refresh_referencing_engines(
     match crate::gateways::get_policy_manager() {
         Some(policy_manager) => {
             let surface_store = crate::surfaces::FileSystemAgentSurfaceStore::new(std::path::PathBuf::from(
-                &state
-                    .bootstrap_config
-                    .storage_paths
-                    .agent_surfaces,
+                &stores.agent_surfaces_path,
             ))
             .await;
             match surface_store {
                 Ok(store) => match store.list_all().await {
                     Ok(surfaces) => {
-                        for surface in surfaces
-                            .iter()
-                            .filter(|s| s.status.is_enabled() && surface_references_policy(s, policy_id))
-                        {
+                        for surface in surfaces.iter().filter(|s| {
+                            s.status.is_enabled()
+                                && match scope {
+                                    EngineScope::All => s.opa_enabled(),
+                                    EngineScope::Referencing(id) => surface_references_policy(s, id),
+                                }
+                        }) {
                             match policy_manager
                                 .update_channel_policy(surface)
                                 .await
@@ -229,29 +288,26 @@ async fn refresh_referencing_engines(
     let (mut gateways_ok, mut gateways_failed) = (0usize, 0usize);
     match crate::gateways::get_gateway_policy_manager() {
         Some(gw_manager) => {
-            match crate::gateways::FileSystemGatewayStore::new(
-                std::path::PathBuf::from(
-                    &state
-                        .bootstrap_config
-                        .storage_paths
-                        .gateways,
-                ),
-                None,
-            )
-            .await
+            match crate::gateways::FileSystemGatewayStore::new(std::path::PathBuf::from(&stores.gateways_path), None)
+                .await
             {
                 Ok(gw_store) => match gw_store.list_all().await {
                     Ok(gateways) => {
-                        for gateway in gateways.iter().filter(|g| {
-                            g.opa_policy_config
-                                .as_ref()
-                                .is_some_and(|c| {
-                                    c.enabled
-                                        && c.all_policy_definition_ids()
-                                            .iter()
-                                            .any(|id| id == policy_id)
-                                })
-                        }) {
+                        for gateway in gateways
+                            .iter()
+                            .filter(|g| match scope {
+                                EngineScope::All => g.opa_policy_config.is_some(),
+                                EngineScope::Referencing(policy_id) => g
+                                    .opa_policy_config
+                                    .as_ref()
+                                    .is_some_and(|c| {
+                                        c.enabled
+                                            && c.all_policy_definition_ids()
+                                                .iter()
+                                                .any(|id| id == policy_id)
+                                    }),
+                            })
+                        {
                             match gw_manager
                                 .update_gateway_policy(gateway)
                                 .await
@@ -279,9 +335,13 @@ async fn refresh_referencing_engines(
     // Recompile the global policy sets when the changed definition is enforced
     // appliance-wide, so a mutated/deleted global policy takes effect (or fails
     // closed) on every surface immediately.
-    if let Some(ref global_store) = state.global_policy_store {
+    if let Some(ref global_store) = stores.global_policy_store {
         let assignments = global_store.get().await;
-        if assignments.references_policy(policy_id) {
+        let in_scope = match scope {
+            EngineScope::All => true,
+            EngineScope::Referencing(id) => assignments.references_policy(id),
+        };
+        if in_scope {
             match crate::pipes::PIPE_POLICY_MANAGER
                 .refresh_global(&assignments)
                 .await

@@ -15,6 +15,13 @@ pub struct FileSystemGatewayStore {
 }
 
 impl FileSystemGatewayStore {
+    /// Re-read every gateway from disk.
+    pub async fn refresh_from_disk(&self) -> Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+    }
+
     /// Create a new FileSystemGatewayStore with in-memory cache
     pub async fn new(
         storage_dir: PathBuf,

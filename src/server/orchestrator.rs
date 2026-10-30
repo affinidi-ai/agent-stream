@@ -370,12 +370,68 @@ struct ActivationIntegrations {
     secrets: Option<Arc<dyn crate::secrets::SecretsStore>>,
 }
 
+/// The policy stores a promotion re-reads before it reloads Surfaces, and the
+/// stores it then recompiles every policy engine from.
+struct ActivationPolicies {
+    definitions: Option<Arc<crate::policies::FileSystemPolicyDefinitionStore>>,
+    global: Option<Arc<crate::policies::FileSystemGlobalPolicyStore>>,
+    gateways: Option<Arc<crate::gateways::FileSystemGatewayStore>>,
+    engines: crate::identity::handlers::policy_definitions::EngineStores,
+}
+
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for ActivationPolicies {
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        if let Some(store) = &self.definitions {
+            store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        if let Some(store) = &self.global {
+            store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        if let Some(store) = &self.gateways {
+            store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+}
+
+/// Run `reload`, retrying with backoff until it succeeds. Returns `false` once
+/// a later mode change supersedes `generation`.
+async fn reload_until_done(
+    reload: &dyn crate::server::mode::ReloadOnPromotion,
+    generation: u64,
+) -> bool {
+    let mut delay = ACTIVATION_RELOAD_RETRY_FIRST;
+    while let Err(error) = reload
+        .reload_from_storage()
+        .await
+    {
+        error!("Activation cannot reload shared state from storage, retrying in {delay:?}: {error}");
+        tokio::time::sleep(delay).await;
+        if crate::server::mode::current_activation_generation() != generation {
+            return false;
+        }
+        delay = (delay * 2).min(ACTIVATION_RELOAD_RETRY_MAX);
+    }
+    true
+}
+
 /// What a promotion reloads and reconnects.
 #[derive(Clone)]
 struct Activation {
     listeners: Option<FabricListeners>,
     pipe_store: Option<Arc<crate::pipes::FileSystemPipeStore>>,
     route_manager: Option<Arc<crate::pipes::PipeRouteManager>>,
+    policies: Option<Arc<ActivationPolicies>>,
     reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>>,
     integrations: Option<ActivationIntegrations>,
     /// Runs one pipe reload at a time when promotions overlap.
@@ -394,6 +450,7 @@ impl Activation {
             listeners,
             pipe_store,
             route_manager,
+            policies: None,
             reloads: Vec::new(),
             integrations: None,
             reload_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -435,6 +492,15 @@ impl Activation {
         self
     }
 
+    /// Policy stores to re-read before Surfaces, and recompile engines from.
+    fn with_policies(
+        mut self,
+        policies: Arc<ActivationPolicies>,
+    ) -> Self {
+        self.policies = Some(policies);
+        self
+    }
+
     /// Integrations to migrate and pin before reporting ready.
     fn with_integrations(
         mut self,
@@ -453,17 +519,8 @@ impl Activation {
         generation: u64,
     ) -> bool {
         for reload in &self.reloads {
-            let mut delay = ACTIVATION_RELOAD_RETRY_FIRST;
-            while let Err(error) = reload
-                .reload_from_storage()
-                .await
-            {
-                error!("Activation cannot reload shared state from storage, retrying in {delay:?}: {error}");
-                tokio::time::sleep(delay).await;
-                if crate::server::mode::current_activation_generation() != generation {
-                    return false;
-                }
-                delay = (delay * 2).min(ACTIVATION_RELOAD_RETRY_MAX);
+            if !reload_until_done(reload.as_ref(), generation).await {
+                return false;
             }
         }
         true
@@ -521,6 +578,14 @@ impl Activation {
                 info!("Activation for generation {generation} was superseded before reloading");
                 return false;
             }
+            // Policy definitions are read before Surfaces, so every Surface
+            // compiled from here on resolves the current Rego.
+            if let Some(policies) = &self.policies
+                && !reload_until_done(policies.as_ref(), generation).await
+            {
+                info!("Activation for generation {generation} was superseded while reloading policies");
+                return false;
+            }
             if let (Some(pipe_store), Some(route_manager)) = (&self.pipe_store, &self.route_manager) {
                 if let Err(error) = pipe_store
                     .refresh_from_disk()
@@ -535,6 +600,13 @@ impl Activation {
                     Ok(routes) => info!("Activation reloaded {routes} pipe route(s) from storage"),
                     Err(error) => warn!("Promotion pipe route reload failed: {error}"),
                 }
+            }
+            if let Some(policies) = &self.policies {
+                crate::identity::handlers::policy_definitions::recompile_policy_engines(
+                    &policies.engines,
+                    crate::identity::handlers::policy_definitions::EngineScope::All,
+                )
+                .await;
             }
             if !self
                 .reload_shared_state(generation)
@@ -2479,6 +2551,23 @@ pub async fn run_axum_proxy(
         }
         promotion_reloads.push(budget_tracker.clone());
         promotion_reloads.push(team_usage_tracker.clone());
+        let activation_policies = Arc::new(ActivationPolicies {
+            definitions: policy_definition_store.clone(),
+            global: global_policy_store.clone(),
+            gateways: gateway_store.clone(),
+            engines: crate::identity::handlers::policy_definitions::EngineStores {
+                pipe_store: pipe_store.clone(),
+                global_policy_store: global_policy_store.clone(),
+                agent_surfaces_path: bootstrap_config
+                    .storage_paths
+                    .agent_surfaces
+                    .clone(),
+                gateways_path: bootstrap_config
+                    .storage_paths
+                    .gateways
+                    .clone(),
+            },
+        });
         identity_state.team_usage_tracker = Some(team_usage_tracker);
         info!("✓ Team usage tracker initialized");
 
@@ -2840,6 +2929,7 @@ pub async fn run_axum_proxy(
                     pipe_store.clone(),
                     pipe_route_manager.clone(),
                 )
+                .with_policies(activation_policies.clone())
                 .with_reloads(promotion_reloads.clone())
                 .with_integrations(
                     integration_storage.clone(),
@@ -3062,6 +3152,7 @@ pub async fn run_axum_proxy(
             error!("Cannot initialize listener manager without message store");
             spawn_mode_lifecycle(
                 Activation::new(None, pipe_store.clone(), pipe_route_manager.clone())
+                    .with_policies(activation_policies.clone())
                     .with_reloads(promotion_reloads.clone())
                     .with_integrations(
                         integration_storage.clone(),
@@ -4027,6 +4118,113 @@ mod tests {
 
         assert!(run(Activation::new(None, None, None).activate(mode::current_activation_generation(), None)));
 
+        assert!(mode::is_ready_to_serve());
+    }
+
+    #[test]
+    fn activation_compiles_surface_policy_from_definitions_another_instance_stored() {
+        use crate::pipes::{FileSystemPipeStore, PIPE_POLICY_MANAGER, PipeConfig, PipeType, config::PipeOpaConfig};
+        use crate::policies::FileSystemPolicyDefinitionStore;
+        use crate::policies::policy_definitions::{PolicyDefinition, PolicyType};
+
+        fn definition(name: &str) -> PolicyDefinition {
+            PolicyDefinition {
+                id: "promotion-gate".to_string(),
+                name: name.to_string(),
+                description: String::new(),
+                policy_type: PolicyType::Llm,
+                policy: format!("package llm.policy\nimport rego.v1\n# {name}\ndefault allow := true"),
+                enabled: true,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: None,
+                version: None,
+                content_hash: None,
+                sample_input: None,
+                tenant_id: None,
+            }
+        }
+
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| {
+            dir.path()
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        mode::set_server_mode(ServerMode::Active);
+
+        run(async {
+            let definitions = Arc::new(
+                FileSystemPolicyDefinitionStore::new(path("policies"))
+                    .await
+                    .unwrap(),
+            );
+            definitions
+                .save(definition("booted"))
+                .await
+                .unwrap();
+            let pipes = Arc::new(
+                FileSystemPipeStore::new(path("pipes"))
+                    .await
+                    .unwrap(),
+            );
+            let mut pipe = PipeConfig::new(
+                "promotion-pipe".to_string(),
+                "Promotion".to_string(),
+                PipeType::Webhook {
+                    endpoint: "https://example.com".to_string(),
+                },
+            );
+            pipe.opa_policy = Some(PipeOpaConfig {
+                enabled: true,
+                policy_definition_id: Some("promotion-gate".to_string()),
+                policy_definition_ids: Vec::new(),
+                log_decisions: false,
+            });
+            pipes
+                .save(pipe.clone())
+                .await
+                .unwrap();
+            PIPE_POLICY_MANAGER.set_policy_definition_store(definitions.clone());
+            PIPE_POLICY_MANAGER
+                .update_pipe_policy(&pipe)
+                .await
+                .unwrap();
+
+            FileSystemPolicyDefinitionStore::new(path("policies"))
+                .await
+                .unwrap()
+                .save(definition("edited on the active"))
+                .await
+                .unwrap();
+
+            let activation =
+                Activation::new(None, Some(pipes.clone()), None).with_policies(Arc::new(ActivationPolicies {
+                    definitions: Some(definitions),
+                    global: None,
+                    gateways: None,
+                    engines: crate::identity::handlers::policy_definitions::EngineStores {
+                        pipe_store: Some(pipes),
+                        global_policy_store: None,
+                        agent_surfaces_path: path("agent_surfaces"),
+                        gateways_path: path("gateways"),
+                    },
+                }));
+            assert!(
+                activation
+                    .activate(mode::current_activation_generation(), None)
+                    .await
+            );
+
+            let evidence = PIPE_POLICY_MANAGER
+                .policy_evidence("promotion-pipe", None)
+                .expect("the pipe policy is compiled");
+            assert_eq!(evidence.name.as_deref(), Some("edited on the active"));
+            PIPE_POLICY_MANAGER.remove_pipe("promotion-pipe");
+        });
         assert!(mode::is_ready_to_serve());
     }
 

@@ -106,6 +106,13 @@ impl FileSystemGlobalPolicyStore {
         Ok(Self { storage })
     }
 
+    /// Re-read the assignments from disk.
+    pub async fn refresh_from_disk(&self) -> Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+    }
+
     /// Load the current assignments (empty when none have been saved yet).
     pub async fn get(&self) -> GlobalPolicyAssignments {
         self.storage
