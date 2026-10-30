@@ -15,7 +15,8 @@ For what each configuration file controls, see
 | A Surface created, edited or deleted through the management API on this node | Immediately |
 | A Surface written by another node on shared storage | Within `cache_refresh_interval_secs`, when it is above 0; otherwise on promotion or restart |
 | Records of the other cached kinds written by another node, or edited by hand under `_storage/` | Within `cache_refresh_interval_secs`, when it is above 0; otherwise on restart |
-| Members, Teams, Prompts, sessions, policy definitions, global policies, drift state, dashboard settings edited outside this process | Restart |
+| Members, Teams, dashboard users and dashboard sessions written by another node or edited outside this process | On promotion or restart; dashboard users also within `cache_refresh_interval_secs`, when it is above 0 |
+| Prompts, policy definitions, global policies, drift state, dashboard settings edited outside this process | Restart |
 | `metrics.json` saved through `PUT /api/v1/metrics/config` | Immediately for OpenTelemetry |
 | The stored Model catalog (`llm.json`, `custom_llm.json` under `storage_paths.llm_configuration`) | On the next read after the file changes |
 | `rejection_categories.json` | On the next read after the file changes |
@@ -77,7 +78,8 @@ disables every loop.
 | --- | --- |
 | Refreshed on the interval | Surfaces, Surface templates, internal surface records, API keys, certificates, identities, dashboard users, gateways and pending gateway connections, mediators, Connection Points, credential providers, OAuth Identifiers, JWT verification strategies, integration mappings (Surface, user, gateway and identity), notifications, Terms |
 | Read from disk on every access | Secrets, delegation-vault tokens, integration definitions |
-| Loaded once at startup | Members, Teams, Prompts, sessions, policy definitions, global policies, drift baselines, runs, sessions and evaluation state, the revocation status list, dashboard settings |
+| Loaded at startup and re-read on promotion | Members, Teams, dashboard sessions |
+| Loaded once at startup | Prompts, policy definitions, global policies, drift baselines, runs, sessions and evaluation state, the revocation status list, dashboard settings |
 
 A refresh updates the in-memory record. Only Surfaces and internal surface records also
 rebuild routing from the events; other kinds are read from the cache on their next use.
@@ -186,7 +188,7 @@ only; elsewhere the process stays in its configured mode. A `[failover]` block w
 
 | Endpoint | Meaning |
 | --- | --- |
-| `GET /api/v1/health` | Readiness. `200` once the instance is Active, has finished reloading Surfaces and the spend counters from storage, and has migrated inline integration credentials and pinned integration destinations. A failed Surface reload, migration or pin is logged as a warning and does not hold readiness back. A spend counter read that fails with a storage error holds readiness at `503` and is retried until it succeeds. `503` while starting, activating, or Standby. Readiness does not wait for connection-point listeners or any other external dependency. |
+| `GET /api/v1/health` | Readiness. `200` once the instance is Active, has finished reloading Surfaces, Members, Teams, dashboard users and sessions, and the spend counters from storage, and has migrated inline integration credentials and pinned integration destinations. A failed Surface reload, migration or pin is logged as a warning and does not hold readiness back. A Member, Team, dashboard user, session or spend counter read that fails with a storage error holds readiness at `503` and is retried until it succeeds. `503` while starting, activating, or Standby. Readiness does not wait for connection-point listeners or any other external dependency. |
 | `GET /api/v1/alive` | Liveness. `200` whenever the process is running, in either mode. |
 
 Route client traffic on `/api/v1/health`. Restart a process only on `/api/v1/alive` failures;
@@ -197,17 +199,22 @@ a Standby is healthy even though it is not ready.
 On `SIGUSR1` the instance reports `503` at once, then:
 
 1. re-reads Surfaces from storage and rebuilds the Surface route table,
-2. reloads the Surface, Member and Team spend counters from `storage_paths.surface_usage`
+2. re-reads Members (rebuilding the identifier index the team gate uses), Teams, dashboard
+   users and dashboard sessions, so members and users the previous Active created are
+   recognised, existing sign-ins keep working, and sessions signed out or users removed there
+   are no longer accepted. Expired sessions are removed, as at startup,
+3. reloads the Surface, Member and Team spend counters from `storage_paths.surface_usage`
    and `storage_paths.team_usage`, so spend recorded by the previous Active still counts
    ([USAGE_LIMITS_AND_ATTRIBUTION.md](USAGE_LIMITS_AND_ATTRIBUTION.md#persistence-across-restart-and-promotion)).
-   A read that fails with a storage error is logged and retried, with a backoff of up to
-   30 seconds, until it succeeds or the instance is demoted,
-3. migrates the credentials integrations still store inline to the secrets store, then pins
+   A read in this or the previous step that fails with a storage error is logged and
+   retried, with a backoff of up to 30 seconds, until it succeeds or the instance is
+   demoted,
+4. migrates the credentials integrations still store inline to the secrets store, then pins
    the destination of each integration whose references have no pin yet
    ([INTEGRATIONS.md](INTEGRATIONS.md#secrets-in-integration-configuration)). A failure here is
    logged and never holds readiness back, and a demotion stops it before the next integration,
-4. reports ready (`200`), and
-5. in the background, validates the active integrations, re-reads Connection Points from
+5. reports ready (`200`), and
+6. in the background, validates the active integrations, re-reads Connection Points from
    storage and starts the
    connection-point listeners.
 
@@ -260,7 +267,8 @@ The controller owns every guarantee a built-in election would otherwise provide.
 Instances in an Active/Standby group must read the same storage tree (for example a shared
 volume), so that a promoted standby sees what the previous Active wrote.
 
-Promotion re-reads Surfaces, Connection Points and the spend counters only. The other cached stores follow
+Promotion re-reads Surfaces, Connection Points, Members, Teams, dashboard users and sessions,
+and the spend counters only. The other cached stores follow
 [Cache refresh](#cache-refresh): set `cache_refresh_interval_secs` on every instance of the
 group, otherwise a promoted standby serves records cached at its own startup. Both keys are
 top-level, above every `[table]` header.
@@ -270,9 +278,11 @@ server_mode = "standby"
 cache_refresh_interval_secs = 5
 ```
 
-The stores loaded once at startup (Members, Teams, Prompts, sessions, policy definitions,
-global policies, drift state, dashboard settings) are not refreshed by the
-timer. Restart a standby after any of them changes, before promoting it.
+The stores loaded once at startup (Prompts, policy definitions, global policies, drift state,
+dashboard settings) are not refreshed by the timer or on promotion. Restart a standby after
+any of them changes, before promoting it. Members, Teams and dashboard sessions are not
+refreshed by the timer either, so a Standby's own management API shows them as they were at
+its startup until it is promoted.
 
 Pending credential-delegation consent flows, outstanding passkey challenges, VP challenges,
 the Fabric envelope ids presentations have claimed, and the dashboard sign-in rate-limit and

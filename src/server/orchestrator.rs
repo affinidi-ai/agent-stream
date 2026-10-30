@@ -2462,8 +2462,23 @@ pub async fn run_axum_proxy(
             .await,
         );
         crate::teams::set_global_team_usage_tracker(team_usage_tracker.clone());
-        let promotion_reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> =
-            vec![budget_tracker.clone(), team_usage_tracker.clone()];
+        let mut promotion_reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> = Vec::new();
+        if let Some(store) = &identity_state.member_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(store) = &identity_state.team_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(state) = &auth_state {
+            promotion_reloads.push(state.storage.clone());
+            promotion_reloads.push(state.session_manager.clone());
+        }
+        if let Some(state) = &saml_state {
+            promotion_reloads.push(state.storage.clone());
+            promotion_reloads.push(state.session_manager.clone());
+        }
+        promotion_reloads.push(budget_tracker.clone());
+        promotion_reloads.push(team_usage_tracker.clone());
         identity_state.team_usage_tracker = Some(team_usage_tracker);
         info!("✓ Team usage tracker initialized");
 
@@ -4012,6 +4027,141 @@ mod tests {
 
         assert!(run(Activation::new(None, None, None).activate(mode::current_activation_generation(), None)));
 
+        assert!(mode::is_ready_to_serve());
+    }
+
+    #[test]
+    fn activation_reloads_members_teams_users_and_sessions_before_reporting_ready() {
+        use crate::auth::{SessionManager, UserRole, UserStatus, storage::PasskeyStorage, storage::UserData};
+        use crate::members::FileSystemMemberStore;
+        use crate::teams::FileSystemTeamStore;
+
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| {
+            dir.path()
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        mode::set_server_mode(ServerMode::Active);
+
+        run(async {
+            let members = Arc::new(
+                FileSystemMemberStore::new(path("members"))
+                    .await
+                    .unwrap(),
+            );
+            let teams = Arc::new(
+                FileSystemTeamStore::new(path("teams"))
+                    .await
+                    .unwrap(),
+            );
+            let users = Arc::new(
+                PasskeyStorage::new(path("users"), path("avatars"))
+                    .await
+                    .unwrap(),
+            );
+            let sessions = Arc::new(
+                SessionManager::with_storage(20, path("sessions").into())
+                    .await
+                    .unwrap(),
+            );
+
+            let member: crate::members::Member = serde_json::from_value(serde_json::json!({
+                "id": "m1", "status": "enabled",
+                "identifiers": [{ "kind": "custom", "value": "m1@x.io" }],
+                "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"
+            }))
+            .unwrap();
+            FileSystemMemberStore::new(path("members"))
+                .await
+                .unwrap()
+                .save(member)
+                .await
+                .unwrap();
+            let team: crate::teams::types::Team = serde_json::from_value(serde_json::json!({
+                "id": "t1", "name": "T1", "status": "enabled", "members": ["m1"]
+            }))
+            .unwrap();
+            FileSystemTeamStore::new(path("teams"))
+                .await
+                .unwrap()
+                .save(team)
+                .await
+                .unwrap();
+            let now = chrono::Utc::now();
+            PasskeyStorage::new(path("users"), path("avatars"))
+                .await
+                .unwrap()
+                .save_user(&UserData {
+                    user_id: "u1".to_string(),
+                    username: "alice".to_string(),
+                    passkeys: Vec::new(),
+                    role: UserRole::User,
+                    status: UserStatus::New,
+                    is_primary: false,
+                    first_name: None,
+                    last_name: None,
+                    email: None,
+                    department: None,
+                    job_title: None,
+                    avatar_path: None,
+                    created_at: now,
+                    updated_at: now,
+                    last_logged_in: None,
+                    saml_id: None,
+                })
+                .await
+                .unwrap();
+            let token = SessionManager::with_storage(20, path("sessions").into())
+                .await
+                .unwrap()
+                .create_session("alice".into(), "u1".into())
+                .await;
+
+            let activation = Activation::new(None, None, None).with_reloads([
+                members.clone() as Arc<dyn mode::ReloadOnPromotion>,
+                teams.clone(),
+                users.clone(),
+                sessions.clone(),
+            ]);
+            assert!(
+                activation
+                    .activate(mode::current_activation_generation(), None)
+                    .await
+            );
+
+            assert_eq!(
+                members
+                    .find_for_gate("m1@x.io")
+                    .await
+                    .map(|m| m.id),
+                Some("m1".to_string())
+            );
+            assert_eq!(
+                teams
+                    .teams_for_member("m1")
+                    .await
+                    .len(),
+                1
+            );
+            assert!(
+                users
+                    .load_user("alice")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(
+                sessions
+                    .validate_session(&token)
+                    .await,
+                Some(("alice".to_string(), "u1".to_string()))
+            );
+        });
         assert!(mode::is_ready_to_serve());
     }
 
