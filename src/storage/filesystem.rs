@@ -2156,6 +2156,15 @@ impl<T: StorableEntity> RwLockFilesystemStorage<T> {
     ) -> Result<bool> {
         Ok(self.get(id).await?.is_some())
     }
+
+    /// Replace the cache with what is on disk now. The write lock is taken
+    /// before the scan, so a local save or delete cannot be overwritten by an
+    /// older snapshot. A failed scan leaves the cache unchanged.
+    pub async fn refresh_from_disk(&self) -> Result<()> {
+        let mut cache = self.cache.write().await;
+        *cache = load_all_entities_from_disk(&self.storage_dir, self.entity_name, &self.config).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2196,6 +2205,9 @@ impl<T: StorableEntity> StorageBackend<T> for RwLockFilesystemStorage<T> {
     }
     fn raw_cache(&self) -> Option<&StorageCache<T>> {
         Some(&self.cache)
+    }
+    async fn refresh_from_disk(&self) -> Result<()> {
+        RwLockFilesystemStorage::refresh_from_disk(self).await
     }
 }
 
@@ -3809,6 +3821,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded, Some(entity));
+    }
+
+    fn entity(
+        id: &str,
+        value: i32,
+    ) -> TestEntity {
+        TestEntity {
+            id: id.to_string(),
+            name: id.to_string(),
+            value,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rwlock_refresh_from_disk_reflects_another_writer() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_path_buf();
+        let reader = RwLockFilesystemStorage::<TestEntity>::new(dir.clone(), "test_entity")
+            .await
+            .unwrap();
+        reader
+            .save(&entity("updated", 1))
+            .await
+            .unwrap();
+        reader
+            .save(&entity("deleted", 1))
+            .await
+            .unwrap();
+
+        let writer = RwLockFilesystemStorage::<TestEntity>::new(dir, "test_entity")
+            .await
+            .unwrap();
+        writer
+            .save(&entity("added", 1))
+            .await
+            .unwrap();
+        writer
+            .save(&entity("updated", 2))
+            .await
+            .unwrap();
+        writer
+            .delete("deleted")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader
+                .get("added")
+                .await
+                .unwrap(),
+            None,
+            "not seen before a refresh"
+        );
+        StorageBackend::refresh_from_disk(&reader)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader
+                .get("added")
+                .await
+                .unwrap(),
+            Some(entity("added", 1))
+        );
+        assert_eq!(
+            reader
+                .get("updated")
+                .await
+                .unwrap(),
+            Some(entity("updated", 2))
+        );
+        assert_eq!(
+            reader
+                .get("deleted")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reader
+                .list_all()
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rwlock_refresh_from_disk_failure_keeps_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().join("store");
+        let storage = RwLockFilesystemStorage::<TestEntity>::new(dir.clone(), "test_entity")
+            .await
+            .unwrap();
+        storage
+            .save(&entity("kept", 1))
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            storage
+                .refresh_from_disk()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage
+                .get("kept")
+                .await
+                .unwrap(),
+            Some(entity("kept", 1))
+        );
+        assert!(!dir.exists(), "a refresh does not recreate the directory");
     }
 
     #[tokio::test]
