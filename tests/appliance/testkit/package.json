@@ -1,0 +1,14 @@
+{
+  "name": "agent-stream-testkit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "agent-stream testkit: the real-API dialect/endpoint conformance suite (npm run conformance) and the mock load/reconciliation harness (npm start).",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "conformance": "node src/conformance-main.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

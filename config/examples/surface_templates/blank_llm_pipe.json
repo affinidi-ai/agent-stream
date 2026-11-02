@@ -1,0 +1,38 @@
+{
+  "$schema": "https://fabric.affinidi.io/schemas/pipe-template/v1.json",
+  "id": "builtin-blank-llm-surface",
+  "name": "Blank LLM Surface",
+  "description": "An empty LLM Surface. Pick your provider, model and route on the canvas.",
+  "details": "Starts you on the canvas with nothing pre-filled. Configure the Upstream node with a provider/model and the Caller node with a route, then Save.",
+  "starter_hint": "We've started you with an empty LLM Surface. Click the Upstream node to choose a provider and model, set a route on the Caller node, then click Save.",
+  "icon": "bolt",
+  "tags": [
+    "llm",
+    "starter",
+    "blank"
+  ],
+  "author": "system",
+  "builtin": true,
+  "sort_priority": 10,
+  "pipe": {
+    "name": "$SURFACE_NAME",
+    "description": "",
+    "enabled": true,
+    "route": "$SURFACE_ROUTE",
+    "provider": "",
+    "model": "",
+    "endpoint_url": "",
+    "api_key_secret_id": "",
+    "model_parameters": {},
+    "rate_limit_enabled": false,
+    "requests_per_minute": 60,
+    "tokens_per_minute": 100000,
+    "cost_tracking_enabled": false,
+    "input_price_per_1k": 0,
+    "output_price_per_1k": 0,
+    "override_policy": {},
+    "prompt_guard": null,
+    "judge": null,
+    "jury": null
+  }
+}

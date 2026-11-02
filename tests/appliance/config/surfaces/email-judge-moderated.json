@@ -1,0 +1,10 @@
+{
+  "key": "email-judge-moderated",
+  "description": "Moderated judge surface (request-side). Bad prompts are rejected before the main LLM call and recorded under the judge rejection stage.",
+  "identity": "email",
+  "route": "/llm/email-judge-moderated",
+  "model": "mock-large",
+  "judge": true,
+  "jurors": 0,
+  "moderated": true
+}

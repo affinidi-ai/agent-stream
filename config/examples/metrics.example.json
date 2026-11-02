@@ -1,0 +1,63 @@
+{
+  "opentelemetry": {
+    "enabled": false,
+    "endpoint": "http://localhost:4317",
+    "protocol": "grpc",
+    "service_name": "agent-stream-1",
+    "environment": "demo",
+    "instance_id": "agent-stream-1",
+    "traces": {
+      "enabled": true,
+      "sample_rate": 1.0,
+      "target_crates": [
+        "agent-stream"
+      ]
+    },
+    "metrics": {
+      "enabled": true,
+      "export_interval_seconds": 30,
+      "batch_max_queue_size": null,
+      "batch_scheduled_delay_ms": null,
+      "batch_max_export_size": null
+    },
+    "logs": {
+      "enabled": true,
+      "targets": [
+        "policy_audit",
+        "governance_record",
+        "credential_delegation"
+      ]
+    }
+  },
+  "cloudwatch": {
+    "enabled": false,
+    "region": "us-east-1",
+    "namespace": "AgentStream",
+    "dimensions": null
+  },
+  "retention": {
+    "local_logs_hours": 12,
+    "collector_log_mb": 100,
+    "collector_log_backups": 3,
+    "trace_retention_days": 7,
+    "metrics_retention_days": 14
+  },
+  "advanced": {
+    "batch_queue_size": 2048,
+    "batch_delay_ms": 2000,
+    "batch_size": 512,
+    "export_timeout_sec": 30,
+    "host_metrics": {
+      "enabled": true,
+      "collection_interval_seconds": 15,
+      "collectors": {
+        "cpu": true,
+        "memory": true,
+        "disk": true,
+        "network": true,
+        "load": true,
+        "processes": true
+      }
+    }
+  }
+}

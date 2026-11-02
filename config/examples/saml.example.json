@@ -1,0 +1,35 @@
+{
+  "idp_entity_id": "https://sts.windows.net/$AZURE_TENANT/",
+  "idp_sso_url": "https://login.microsoftonline.com/$AZURE_TENANT/saml2",
+  "idp_slo_url": "https://login.microsoftonline.com/$AZURE_TENANT/saml2",
+  "idp_metadata_url": "https://login.microsoftonline.com/$AZURE_TENANT/federationmetadata/2007-06/federationmetadata.xml?appid=XXXXXXXX",
+  "idp_cert_path": "certs/saml-idp.cer",
+  "sp_entity_id": "https://YOUR_DOMAIN/api/saml/metadata",
+  "sp_acs_url": "https://YOUR_DOMAIN/api/saml/acs",
+  "sign_requests": true,
+  "sp_key_path": "certs/saml-sp-key.pem",
+  "sp_cert_path": "certs/saml-sp-cert.pem",
+  "require_encrypted_assertions": false,
+  "attribute_mapping": {
+    "user_id": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier",
+    "username": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+    "email": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+    "first_name": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname",
+    "last_name": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname",
+    "role": "http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
+    "department": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/department/department",
+    "job_title": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/title/title"
+  },
+  "role_mapping": {
+    "administrator": "administrator",
+    "poweruser": "poweruser",
+    "user": "user"
+  },
+  "graph_api": {
+    "tenant_id": "$AZURE_TENANT",
+    "client_id": "",
+    "client_secret": "",
+    "fetch_avatar": true,
+    "note": "The permission needs admin consent because it's an application permission (not delegated)."
+  }
+}

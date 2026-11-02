@@ -1,0 +1,9 @@
+{
+  "key": "apikey-jury",
+  "description": "Jury-gated LLM surface, caller identified by an ApiKeyProvider key id.",
+  "identity": "apikey",
+  "route": "/llm/apikey-jury",
+  "model": "mock-large",
+  "judge": false,
+  "jurors": 2
+}

@@ -1,0 +1,68 @@
+{
+  "defined_patterns": [
+    {
+      "key": "email",
+      "label": "Email Addresses",
+      "icon": "fa-envelope",
+      "description": "Matches email addresses in standard user@domain.tld format",
+      "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b"
+    },
+    {
+      "key": "ssn",
+      "label": "US Social Security Numbers",
+      "icon": "fa-id-card",
+      "description": "Matches US SSNs in NNN-NN-NNNN format with validation for invalid ranges",
+      "regex": "\\b(?!000|666|9\\d{2})([0-8]\\d{2}|7([0-6]\\d|7[012]))([-])\\d{2}\\3\\d{4}\\b"
+    },
+    {
+      "key": "ssn_simple",
+      "label": "US SSN (Simple Format)",
+      "icon": "fa-id-card",
+      "description": "Matches any NNN-NN-NNNN format without range validation",
+      "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    },
+    {
+      "key": "phone_number",
+      "label": "Phone Numbers",
+      "icon": "fa-phone",
+      "description": "Matches US, international (+country code), and Australian mobile phone numbers",
+      "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"
+    },
+    {
+      "key": "credit_card",
+      "label": "Credit Card Numbers",
+      "icon": "fa-credit-card",
+      "description": "Matches Visa, MasterCard, Amex, Diners Club, Discover, and JCB card numbers",
+      "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\\d{3})\\d{11})\\b"
+    },
+    {
+      "key": "date_of_birth",
+      "label": "Date of Birth",
+      "icon": "fa-calendar",
+      "description": "Matches dates preceded by birth-related keywords (birth, dob, born, etc.)",
+      "regex": "\\b(birth|birthdate|birthday|dob|born)\\W+(?:\\w+\\W+){0,5}?((\\d{4}|\\d{1,2})[\\/\\-](\\d{4}|\\d{1,2})[\\/\\-](\\d{4}|\\d{1,2}))\\b"
+    },
+    {
+      "key": "ip_address",
+      "label": "IP Addresses (IPv4)",
+      "icon": "fa-network-wired",
+      "description": "Matches valid IPv4 addresses with octet range validation (0-255)",
+      "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"
+    },
+    {
+      "key": "passport",
+      "label": "Passport Numbers (US)",
+      "icon": "fa-passport",
+      "description": "Matches US passport numbers (1-2 letters followed by 6-9 digits)",
+      "regex": "\\b[A-Z]{1,2}[0-9]{6,9}\\b"
+    },
+    {
+      "key": "street_address",
+      "label": "US Street Addresses",
+      "icon": "fa-map-marker-alt",
+      "description": "Matches basic US street address patterns (number followed by street name)",
+      "regex": "\\d{1,5}\\s\\w.\\s(\\b\\w*\\b\\s){1,2}\\w*.?"
+    }
+  ],
+  "pii_detection_prompt": "You are a strict PII detection engine. Read the user's message and identify every span of personally identifiable information. Respond with ONLY a JSON object of the form {\"entities\":[{\"type\":\"<TYPE>\",\"text\":\"<exact substring>\",\"group\":\"<id>\"}]}. Copy each PII value exactly as it appears in the text (same casing and spacing). Set \"group\" to a short stable id that is the SAME for every mention referring to the same real-world entity (aliases, nicknames and repeated names, e.g. \"Bob\" and \"Robert Smith\"), and DIFFERENT for distinct entities; omit it if unsure. Do not translate, summarise, or explain. If there is no PII, respond with {\"entities\":[]}."
+}

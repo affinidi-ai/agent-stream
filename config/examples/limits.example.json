@@ -1,0 +1,129 @@
+{
+  "limits": {
+    "secrets": {
+      "name": "Secrets (total)",
+      "description": "Total across vault secrets, API keys, and certificates",
+      "limit": 10
+    },
+    "secrets.secret": {
+      "name": "Vault Secrets",
+      "description": "Secrets stored in the secrets vault",
+      "limit": 5
+    },
+    "secrets.apikeys": {
+      "name": "API Keys",
+      "description": "API keys issued for source authentication",
+      "limit": 5
+    },
+    "secrets.certificates": {
+      "name": "Certificates",
+      "description": "mTLS / signing certificates",
+      "limit": 5
+    },
+    "surfaces": {
+      "name": "Surfaces (total)",
+      "description": "Total number of surfaces (all types)",
+      "limit": 10
+    },
+    "surfaces.llm": {
+      "name": "LLM Surfaces",
+      "description": "LLM pipe surfaces",
+      "limit": 5
+    },
+    "surfaces.ide": {
+      "name": "IDE Surfaces",
+      "description": "IDE catalog surfaces",
+      "limit": 5
+    },
+    "users": {
+      "name": "Users",
+      "description": "Dashboard user accounts",
+      "limit": 5
+    },
+    "teams": {
+      "name": "Teams",
+      "description": "Teams",
+      "limit": 3
+    },
+    "members": {
+      "name": "Members",
+      "description": "Team members",
+      "limit": 5
+    },
+    "prompts": {
+      "name": "Prompts",
+      "description": "Saved prompts",
+      "limit": 5
+    },
+    "credentials": {
+      "name": "Credentials (total)",
+      "description": "Total across JWT, OAuth, providers, and tokens",
+      "limit": 6
+    },
+    "credentials.jwt": {
+      "name": "JWT Strategies",
+      "description": "JWT bearer verification strategies",
+      "limit": 2
+    },
+    "credentials.oauth": {
+      "name": "OAuth Identifiers",
+      "description": "OAuth identifiers",
+      "limit": 2
+    },
+    "credentials.providers": {
+      "name": "Credential Providers",
+      "description": "OAuth 2.0 / OIDC credential providers",
+      "limit": 2
+    },
+    "credentials.tokens": {
+      "name": "Delegation Tokens",
+      "description": "Stored delegation-vault tokens",
+      "limit": 2
+    },
+    "policies": {
+      "name": "Policies (total)",
+      "description": "Total number of policy definitions",
+      "limit": 5
+    },
+    "policies.fabric": {
+      "name": "Appliance Policies",
+      "description": "Appliance-level (fabric) policy definitions",
+      "limit": 2
+    },
+    "policies.llm": {
+      "name": "LLM Policies",
+      "description": "LLM policy definitions",
+      "limit": 2
+    },
+    "policies.ide": {
+      "name": "IDE Policies",
+      "description": "IDE policy definitions",
+      "limit": 2
+    },
+    "connections": {
+      "name": "Connections (total)",
+      "description": "Total across gateways, mediators, and connection points",
+      "limit": 3
+    },
+    "connections.gateways": {
+      "name": "Gateways",
+      "description": "Connected remote gateways",
+      "limit": 1
+    },
+    "connections.mediators": {
+      "name": "Mediators",
+      "description": "Configured DIDComm mediators",
+      "limit": 1
+    },
+    "connections.connectionpoints": {
+      "name": "Connection Points",
+      "description": "Gateway connection points",
+      "limit": 1
+    },
+    "integrations": {
+      "name": "Integrations",
+      "description": "Notifier / integration definitions",
+      "limit": 5
+    }
+  }
+}

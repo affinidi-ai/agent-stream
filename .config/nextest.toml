@@ -1,0 +1,5 @@
+[profile.ci]
+junit = { path = "test-results.xml" }
+# cucumber-rs uses a custom test harness that nextest cannot enumerate.
+# CI runs this binary separately with `cargo test --test surface_bdd`.
+default-filter = "not binary(surface_bdd)"

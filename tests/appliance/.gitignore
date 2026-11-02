@@ -1,0 +1,7 @@
+# Storage written by the appliance during a run — never commit.
+_storage/
+_volatile/
+_backup_restore/
+
+# Generated run reports.
+results/*.json

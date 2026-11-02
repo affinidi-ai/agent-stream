@@ -1,0 +1,128 @@
+services:
+  # ---- Mock OpenAI-protocol LLM ----------------------------------------------
+  # Deterministic content, random latency, variable usage block. Exposes a small
+  # control plane (/__mock/*) so the runner can read the exact per-call token
+  # usage it produced. No build step: runs the source directly on a stock node.
+  mock-llm:
+    image: ${TESTKIT_NODE_IMAGE:-node:20-alpine}
+    container_name: testkit-mock-llm
+    working_dir: /app
+    command: ["node", "server.js"]
+    environment:
+      - MOCK_LLM_PORT=9000
+      - MOCK_LLM_MIN_MS=${MOCK_LLM_MIN_MS:-400}
+      - MOCK_LLM_MAX_MS=${MOCK_LLM_MAX_MS:-2500}
+    volumes:
+      - ./mock-llm:/app:ro
+    ports:
+      - "9009:9000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  # ---- agent-stream appliance (DEBUG build) ----------------------------------
+  # DEBUG so the test-auth bootstrap endpoint is compiled in; passkey auth mode
+  # so it is mounted. AS_TEST_MODE + AS_TEST_TOKEN enable it at runtime.
+  # NEVER replicate this with a release binary (see README).
+  as1:
+    build:
+      context: ../..
+      dockerfile: tests/appliance/Dockerfile
+      target: ${AS_IMAGE_TARGET:-local}
+      args:
+        TESTKIT_RUNTIME_IMAGE: ${TESTKIT_RUNTIME_IMAGE:-debian:bookworm-slim}
+    container_name: testkit-as1
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+    environment:
+      - AS_TEST_MODE=true
+      - AS_TEST_TOKEN=${AS_TEST_TOKEN:-testkit-secret-token}
+      # Throwaway key for encrypted state in this disposable test appliance.
+      - AS_BACKUP_ENCRYPTION_KEY=1111111111111111111111111111111111111111111111111111111111111111
+      # No AWS credentials needed: secrets_backend=filesystem,
+      # channel_config_source=local, and cloudwatch is disabled, so no AWS SDK
+      # client is ever constructed.
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      # Committed, non-secret fixtures make managed mode self-contained.
+      - ./config/managed.config.toml:/app/config/config.toml:ro
+      - ./config/managed.llm.json:/app/config/llm.json:ro
+      # Disposable managed-mode state; `run.sh managed` removes these volumes.
+      - testkit-storage:/app/_storage
+      - testkit-volatile:/app/_volatile
+      - testkit-backup-restore:/app/_backup_restore
+    ports:
+      - "8280:8280"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ---- Test runner -----------------------------------------------------------
+  # Builds the population, drives random member traffic, reconciles appliance
+  # telemetry against its local ledger, writes a report, then tears down. Exits
+  # non-zero on any reconciliation/cap failure. No build step, no npm deps.
+  runner:
+    image: ${TESTKIT_NODE_IMAGE:-node:20-alpine}
+    container_name: testkit-runner
+    working_dir: /app
+    # openssl is needed by the enrolment drill to mint the throwaway mTLS CA +
+    # client cert. node:20-alpine doesn't ship the CLI, so install it first
+    # (writes to system dirs, not the read-only /app mount), then exec the runner.
+    command: ["sh", "-c", "apk add --no-cache openssl >/dev/null 2>&1 || true; exec node src/main.js"]
+    depends_on:
+      as1:
+        condition: service_started
+      mock-llm:
+        condition: service_healthy
+    environment:
+      - APPLIANCE_URL=http://as1:8280
+      - AS_TEST_TOKEN=${AS_TEST_TOKEN:-testkit-secret-token}
+      - MOCK_INTERNAL_URL=http://mock-llm:9000
+      - MOCK_CONTROL_URL=http://mock-llm:9000
+      - TESTKIT_AGENT_ID=${TESTKIT_AGENT_ID:-testkit-agent}
+      # Load level governs the population/traffic defaults; the knobs below are
+      # empty-by-default passthroughs so an explicit flag/env still overrides the
+      # chosen level, but an unset one falls through to the profile.
+      - LOAD=${LOAD:-medium}
+      - NUM_TEAMS=${NUM_TEAMS:-}
+      - MEMBERS_PER_TEAM=${MEMBERS_PER_TEAM:-}
+      - NUM_REQUESTS=${NUM_REQUESTS:-}
+      - CONCURRENCY=${CONCURRENCY:-}
+      - RPS=${RPS:-}
+      - DURATION=${DURATION:-}
+      - CAP_DRILL_CALLS=${CAP_DRILL_CALLS:-}
+      - REJECTION_REQUESTS=${REJECTION_REQUESTS:-}
+      - ENROLMENT_DRILL=${ENROLMENT_DRILL:-}
+      - ENROLMENT_CALLS=${ENROLMENT_CALLS:-}
+      - ENROLMENT_GUARDRAIL=${ENROLMENT_GUARDRAIL:-}
+      - ENROLMENT_MTLS=${ENROLMENT_MTLS:-}
+      - COVERAGE_WAVES=${COVERAGE_WAVES:-}
+      - COVERAGE_CALLS=${COVERAGE_CALLS:-}
+      - DRIFT_EVAL=${DRIFT_EVAL:-}
+      - DRIFT_EVAL_WAVES=${DRIFT_EVAL_WAVES:-}
+      - DRIFT_EVAL_MAX_SESSIONS=${DRIFT_EVAL_MAX_SESSIONS:-}
+      - SETTLE_SECONDS=${SETTLE_SECONDS:-4}
+      - RECON_RESOLUTION=${RECON_RESOLUTION:-30s}
+      - TEARDOWN=${TEARDOWN:-true}
+      - SEED=${SEED:-0}
+      - SURFACES_DIR=/fixtures/surfaces
+      - LLM_CATALOG_PATH=/fixtures/llm.json
+      - RESULTS_DIR=/results
+    volumes:
+      - ./testkit:/app:ro
+      - ./config/surfaces:/fixtures/surfaces:ro
+      - ./config/managed.llm.json:/fixtures/llm.json:ro
+      - ./results:/results
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.72.0/24
+
+volumes:
+  testkit-storage:
+  testkit-volatile:
+  testkit-backup-restore:

@@ -1,0 +1,49 @@
+{
+  "providers": [
+    {
+      "name": "Mock LLM",
+      "enum_value": "mock_llm",
+      "default_base_url": "http://mock-llm:9000",
+      "api_version_prefix": "/v1",
+      "api_schema": "openai",
+      "enabled": true,
+      "api_key_validation": "none",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "is_default": true,
+          "capabilities": ["chat_completions"]
+        },
+        {
+          "name": "Embeddings",
+          "path": "/embeddings",
+          "capabilities": ["embeddings"]
+        }
+      ],
+      "models": [
+        {
+          "name": "Mock Small",
+          "value": "mock-small",
+          "enabled": true,
+          "cost_per_1k_input": 0.001,
+          "cost_per_1k_output": 0.002
+        },
+        {
+          "name": "Mock Large",
+          "value": "mock-large",
+          "enabled": true,
+          "cost_per_1k_input": 0.003,
+          "cost_per_1k_output": 0.006
+        },
+        {
+          "name": "Mock Embeddings",
+          "value": "mock-embed",
+          "enabled": true,
+          "cost_per_1k_input": 0,
+          "cost_per_1k_output": 0
+        }
+      ]
+    }
+  ]
+}

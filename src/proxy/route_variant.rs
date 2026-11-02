@@ -1,0 +1,150 @@
+//! Route + variant suffix parsing for surface-snapshot variants.
+//!
+//! Grammar:
+//!
+//! ```text
+//! INBOUND:   IN_HOST/{route}[$alias][/{rest}]
+//! OUTBOUND:  OUT_HOST/{route}[$alias]/{tp-name}[/{rest}]
+//! ```
+//!
+//! The alias is attached to the route with no separator and uses `$` as the
+//! sentinel. Percent-encoded `%24` is tolerated equivalently.
+
+/// Result of stripping the route prefix and an optional `$alias` suffix from
+/// a request path.
+///
+/// `alias` is `None` when the request targets the default variant. `tail`
+/// always begins with `/` or is empty, ready to be passed to downstream
+/// matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteMatch<'a> {
+    pub alias: Option<&'a str>,
+    pub tail: &'a str,
+}
+
+/// Parse a request path against a configured surface route.
+///
+/// Returns `None` when `path` does not start with `route`, when an alias
+/// sentinel is present but the alias is empty, or when the character
+/// immediately following the route is neither `/`, `$`, end-of-path, nor a
+/// `%24` percent-encoded `$`.
+///
+/// Routes are matched as exact-prefix; callers are expected to normalise
+/// trailing slashes before invoking this function.
+pub fn parse_route_with_variant<'a>(
+    path: &'a str,
+    route: &str,
+) -> Option<RouteMatch<'a>> {
+    let rest = path.strip_prefix(route)?;
+
+    if rest.is_empty() || rest.starts_with('/') {
+        return Some(RouteMatch { alias: None, tail: rest });
+    }
+
+    // Accept either literal `$` or percent-encoded `%24` as the alias sentinel.
+    let after = rest
+        .strip_prefix('$')
+        .or_else(|| rest.strip_prefix("%24"))
+        .or_else(|| rest.strip_prefix("%24"))?;
+
+    let (alias, tail) = match after.find('/') {
+        Some(idx) => (&after[..idx], &after[idx..]),
+        None => (after, ""),
+    };
+
+    if alias.is_empty() {
+        return None;
+    }
+
+    Some(RouteMatch { alias: Some(alias), tail })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_variant_exact_match() {
+        let m = parse_route_with_variant("/api/sales", "/api/sales").unwrap();
+        assert_eq!(m.alias, None);
+        assert_eq!(m.tail, "");
+    }
+
+    #[test]
+    fn default_variant_with_tail() {
+        let m = parse_route_with_variant("/api/sales/v1/orders", "/api/sales").unwrap();
+        assert_eq!(m.alias, None);
+        assert_eq!(m.tail, "/v1/orders");
+    }
+
+    #[test]
+    fn alias_no_tail() {
+        let m = parse_route_with_variant("/api/sales$dev", "/api/sales").unwrap();
+        assert_eq!(m.alias, Some("dev"));
+        assert_eq!(m.tail, "");
+    }
+
+    #[test]
+    fn alias_with_tail() {
+        let m = parse_route_with_variant("/api/sales$dev/v1/orders", "/api/sales").unwrap();
+        assert_eq!(m.alias, Some("dev"));
+        assert_eq!(m.tail, "/v1/orders");
+    }
+
+    #[test]
+    fn alias_percent_encoded() {
+        let m = parse_route_with_variant("/api/sales%24dev/v1/orders", "/api/sales").unwrap();
+        assert_eq!(m.alias, Some("dev"));
+        assert_eq!(m.tail, "/v1/orders");
+    }
+
+    #[test]
+    fn no_match_when_route_not_prefix() {
+        assert!(parse_route_with_variant("/other/path", "/api/sales").is_none());
+    }
+
+    #[test]
+    fn no_match_when_route_partial_segment() {
+        // `/api/salesman` should not match route `/api/sales` because the
+        // character following the route is neither `/`, `$`, %24, nor end.
+        // (It is a literal `m`, which is not a valid sentinel.)
+        assert!(parse_route_with_variant("/api/salesman", "/api/sales").is_none());
+    }
+
+    #[test]
+    fn empty_alias_rejected() {
+        assert!(parse_route_with_variant("/api/sales$", "/api/sales").is_none());
+        assert!(parse_route_with_variant("/api/sales$/v1", "/api/sales").is_none());
+    }
+
+    #[test]
+    fn empty_route_inbound_alias() {
+        // Edge case from spec §2.3: empty route yields `IN_HOST$alias/...`.
+        let m = parse_route_with_variant("$dev/v1/orders", "").unwrap();
+        assert_eq!(m.alias, Some("dev"));
+        assert_eq!(m.tail, "/v1/orders");
+    }
+
+    #[test]
+    fn empty_route_default() {
+        let m = parse_route_with_variant("/v1/orders", "").unwrap();
+        assert_eq!(m.alias, None);
+        assert_eq!(m.tail, "/v1/orders");
+    }
+
+    #[test]
+    fn outbound_alias_with_tp_name() {
+        // `/route$dev/tp-name/v1/orders` — caller is responsible for then
+        // splitting the TP name out of `tail`.
+        let m = parse_route_with_variant("/route$dev/partner-a/v1/orders", "/route").unwrap();
+        assert_eq!(m.alias, Some("dev"));
+        assert_eq!(m.tail, "/partner-a/v1/orders");
+    }
+
+    #[test]
+    fn alias_with_hyphen_and_digits() {
+        let m = parse_route_with_variant("/r$staging-2/x", "/r").unwrap();
+        assert_eq!(m.alias, Some("staging-2"));
+        assert_eq!(m.tail, "/x");
+    }
+}

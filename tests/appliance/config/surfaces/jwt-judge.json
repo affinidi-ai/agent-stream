@@ -1,0 +1,9 @@
+{
+  "key": "jwt-judge",
+  "description": "Judge-gated LLM surface, caller identified by a verified RS256 JWT subject.",
+  "identity": "jwt",
+  "route": "/llm/jwt-judge",
+  "model": "mock-small",
+  "judge": true,
+  "jurors": 0
+}

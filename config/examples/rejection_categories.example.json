@@ -1,0 +1,362 @@
+{
+  "version": 1,
+  "default_category": "uncategorized",
+  "categories": [
+    {
+      "id": "prompt_injection",
+      "label": "Prompt Injection"
+    },
+    {
+      "id": "jailbreak",
+      "label": "Jailbreak"
+    },
+    {
+      "id": "toxicity",
+      "label": "Toxicity"
+    },
+    {
+      "id": "hate",
+      "label": "Hate Speech"
+    },
+    {
+      "id": "violence",
+      "label": "Violence"
+    },
+    {
+      "id": "sexual_nsfw",
+      "label": "Sexual / NSFW"
+    },
+    {
+      "id": "self_harm",
+      "label": "Self-Harm"
+    },
+    {
+      "id": "pii",
+      "label": "PII"
+    },
+    {
+      "id": "secrets",
+      "label": "Secrets / Credentials"
+    },
+    {
+      "id": "bias",
+      "label": "Bias"
+    },
+    {
+      "id": "policy_violation",
+      "label": "Policy Violation"
+    },
+    {
+      "id": "banned_keyword",
+      "label": "Banned Keyword"
+    },
+    {
+      "id": "relevancy",
+      "label": "Off-Topic / Relevancy"
+    },
+    {
+      "id": "copyright_ip",
+      "label": "Copyright / IP"
+    },
+    {
+      "id": "system_prompt_leak",
+      "label": "System Prompt Leak"
+    },
+    {
+      "id": "sponge_dos",
+      "label": "Sponge / DoS"
+    },
+    {
+      "id": "hallucination",
+      "label": "Hallucination"
+    },
+    {
+      "id": "judge_indeterminate",
+      "label": "Judge Indeterminate"
+    },
+    {
+      "id": "redrive",
+      "label": "Redrive (recovered)"
+    },
+    {
+      "id": "uncategorized",
+      "label": "Uncategorized"
+    }
+  ],
+  "mappings": [
+    {
+      "category": "judge_indeterminate",
+      "exact": [
+        "judge_verdict_indeterminate"
+      ],
+      "patterns": [],
+      "sources": [
+        "judge"
+      ]
+    },
+    {
+      "category": "prompt_injection",
+      "exact": [
+        "injection_attack",
+        "prompt_injection",
+        "prompt_injection_attack",
+        "indirect_prompt_injection"
+      ],
+      "patterns": [
+        "(?i)inject",
+        "(?i)prompt[ _-]?injection"
+      ],
+      "sources": []
+    },
+    {
+      "category": "prompt_injection",
+      "exact": [],
+      "patterns": [],
+      "sources": [
+        "azure_prompt_shields"
+      ]
+    },
+    {
+      "category": "jailbreak",
+      "exact": [
+        "jailbreak",
+        "jailbreaking"
+      ],
+      "patterns": [
+        "(?i)jail[ _-]?break",
+        "(?i)dan mode",
+        "(?i)ignore (all|previous) instructions"
+      ],
+      "sources": []
+    },
+    {
+      "category": "toxicity",
+      "exact": [
+        "toxicity",
+        "toxic",
+        "insult",
+        "obscene",
+        "harassment",
+        "profanity"
+      ],
+      "patterns": [
+        "(?i)toxic",
+        "(?i)abusiv",
+        "(?i)harass",
+        "(?i)profan",
+        "(?i)insult"
+      ],
+      "sources": []
+    },
+    {
+      "category": "hate",
+      "exact": [
+        "hate",
+        "identity_hate",
+        "identity_attack",
+        "hate_speech"
+      ],
+      "patterns": [
+        "(?i)hate",
+        "(?i)racis",
+        "(?i)bigot",
+        "(?i)discriminat"
+      ],
+      "sources": []
+    },
+    {
+      "category": "violence",
+      "exact": [
+        "violence",
+        "violent",
+        "threat",
+        "graphic_violence"
+      ],
+      "patterns": [
+        "(?i)violen",
+        "(?i)gore",
+        "(?i)\\bthreat"
+      ],
+      "sources": []
+    },
+    {
+      "category": "sexual_nsfw",
+      "exact": [
+        "nsfw",
+        "sexual",
+        "sexual_content",
+        "sexually_explicit",
+        "porn"
+      ],
+      "patterns": [
+        "(?i)nsfw",
+        "(?i)sexual",
+        "(?i)porn",
+        "(?i)explicit"
+      ],
+      "sources": []
+    },
+    {
+      "category": "self_harm",
+      "exact": [
+        "selfharm",
+        "self_harm",
+        "suicide"
+      ],
+      "patterns": [
+        "(?i)self[ _-]?harm",
+        "(?i)suicid"
+      ],
+      "sources": []
+    },
+    {
+      "category": "pii",
+      "exact": [
+        "pii",
+        "personal_data",
+        "personal_information"
+      ],
+      "patterns": [
+        "(?i)\\bpii\\b",
+        "(?i)personally identifiable",
+        "(?i)personal (data|information)"
+      ],
+      "sources": []
+    },
+    {
+      "category": "secrets",
+      "exact": [
+        "secrets",
+        "secret",
+        "api_key",
+        "credentials",
+        "password",
+        "token"
+      ],
+      "patterns": [
+        "(?i)secret",
+        "(?i)api[ _-]?key",
+        "(?i)credential",
+        "(?i)password"
+      ],
+      "sources": []
+    },
+    {
+      "category": "bias",
+      "exact": [
+        "bias",
+        "biased"
+      ],
+      "patterns": [
+        "(?i)\\bbias"
+      ],
+      "sources": []
+    },
+    {
+      "category": "policy_violation",
+      "exact": [
+        "policy_violation",
+        "policy",
+        "coc",
+        "code_of_conduct",
+        "compliance"
+      ],
+      "patterns": [
+        "(?i)policy",
+        "(?i)code of conduct",
+        "(?i)complian"
+      ],
+      "sources": []
+    },
+    {
+      "category": "banned_keyword",
+      "exact": [
+        "keyword_detected",
+        "banned_keyword",
+        "keyword",
+        "blocklist",
+        "denylist"
+      ],
+      "patterns": [
+        "(?i)banned",
+        "(?i)block[ _-]?list",
+        "(?i)deny[ _-]?list",
+        "(?i)keyword"
+      ],
+      "sources": []
+    },
+    {
+      "category": "relevancy",
+      "exact": [
+        "relevancy",
+        "topic_detector",
+        "off_topic",
+        "off-topic",
+        "irrelevant"
+      ],
+      "patterns": [
+        "(?i)off[ _-]?topic",
+        "(?i)irrelevan",
+        "(?i)relevanc",
+        "(?i)\\btopic"
+      ],
+      "sources": []
+    },
+    {
+      "category": "copyright_ip",
+      "exact": [
+        "copyright",
+        "ip_violation",
+        "intellectual_property",
+        "trademark"
+      ],
+      "patterns": [
+        "(?i)copyright",
+        "(?i)trademark",
+        "(?i)intellectual property"
+      ],
+      "sources": []
+    },
+    {
+      "category": "system_prompt_leak",
+      "exact": [
+        "system_prompt_leak",
+        "prompt_leak",
+        "system_prompt"
+      ],
+      "patterns": [
+        "(?i)system prompt",
+        "(?i)prompt leak"
+      ],
+      "sources": []
+    },
+    {
+      "category": "sponge_dos",
+      "exact": [
+        "sponge_attack",
+        "sponge",
+        "dos"
+      ],
+      "patterns": [
+        "(?i)sponge",
+        "(?i)denial of service"
+      ],
+      "sources": []
+    },
+    {
+      "category": "hallucination",
+      "exact": [
+        "hallucination",
+        "hallucinated",
+        "factuality",
+        "groundedness"
+      ],
+      "patterns": [
+        "(?i)hallucinat",
+        "(?i)factual",
+        "(?i)groundedness"
+      ],
+      "sources": []
+    }
+  ]
+}

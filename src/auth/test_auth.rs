@@ -1,0 +1,600 @@
+//! Test Authentication Module
+//!
+//! Provides a bypass authentication endpoint for automated UI testing.
+//! Compiled into debug builds only (`#[cfg(debug_assertions)]` on the module in
+//! `auth/mod.rs`), so it can never ship in a release binary. Even in a debug
+//! build it stays disabled unless `AS_TEST_MODE=true` **and** a non-empty
+//! `AS_TEST_TOKEN` are both set — a requested-but-tokenless config fails closed
+//! (no well-known default token).
+//! NEVER enable this in production environments.
+
+use async_trait::async_trait;
+use axum::{extract::State, http::HeaderMap, http::StatusCode, response::Json};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{error, info, warn};
+
+use super::{
+    SessionManager,
+    session_finalizer::{AuthenticatedPrincipal, SessionFinalizationError, SessionFinalizer, SessionManagerFinalizer},
+    storage::{PasskeyStorage, UserData},
+    types::{UserRole, UserStatus},
+};
+
+#[derive(Clone)]
+pub(crate) struct TestAuthState {
+    pub(crate) config: TestAuthConfig,
+    user_provisioner: Arc<dyn SyntheticUserProvisioner>,
+    session_finalizer: Arc<dyn SessionFinalizer>,
+}
+
+impl TestAuthState {
+    pub(crate) fn new(
+        storage: Arc<PasskeyStorage>,
+        session_manager: Arc<SessionManager>,
+        terms_manager: Arc<crate::terms::TermsManager>,
+        config: TestAuthConfig,
+    ) -> Self {
+        let user_provisioner: Arc<dyn SyntheticUserProvisioner> =
+            Arc::new(StorageBackedSyntheticUserProvisioner::new(storage, config.clone()));
+        let session_finalizer: Arc<dyn SessionFinalizer> =
+            Arc::new(SessionManagerFinalizer::new(session_manager, terms_manager));
+
+        Self {
+            config,
+            user_provisioner,
+            session_finalizer,
+        }
+    }
+}
+
+/// Configuration for test authentication mode
+#[derive(Debug, Clone)]
+pub struct TestAuthConfig {
+    /// Whether test mode is enabled (from AS_TEST_MODE env var)
+    pub enabled: bool,
+    /// Secret token required for test login (from AS_TEST_TOKEN env var)
+    pub test_token: String,
+    /// Default test user details
+    pub test_username: String,
+    pub test_user_id: String,
+    pub allow_role_override: bool,
+}
+
+impl Default for TestAuthConfig {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl TestAuthConfig {
+    /// Create configuration from environment variables.
+    ///
+    /// Fails closed: when `AS_TEST_MODE` is requested but `AS_TEST_TOKEN` is
+    /// unset or blank, the endpoint stays disabled rather than falling back to a
+    /// well-known default token (which would hand out administrator sessions).
+    pub fn from_env() -> Self {
+        let requested = std::env::var("AS_TEST_MODE")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+
+        let token = std::env::var("AS_TEST_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty());
+
+        let enabled = match (requested, token.is_some()) {
+            (true, true) => {
+                warn!("⚠️  TEST MODE ENABLED - Test authentication endpoint is active. Do NOT use in production!");
+                true
+            }
+            (true, false) => {
+                error!(
+                    "AS_TEST_MODE is set but AS_TEST_TOKEN is unset/blank — refusing to enable the test-auth endpoint (fail-closed)."
+                );
+                false
+            }
+            (false, _) => false,
+        };
+
+        Self {
+            enabled,
+            test_token: token.unwrap_or_default(),
+            test_username: std::env::var("AS_TEST_USERNAME").unwrap_or_else(|_| "test-user".to_string()),
+            test_user_id: std::env::var("AS_TEST_USER_ID").unwrap_or_else(|_| "test-user-001".to_string()),
+            allow_role_override: std::env::var("AS_TEST_ALLOW_ROLE_OVERRIDE")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+                .unwrap_or(false),
+        }
+    }
+}
+
+/// Request body for test login
+#[derive(Debug, Deserialize)]
+pub struct TestLoginRequest {
+    /// Optional custom username for the test session
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub role: Option<UserRole>,
+}
+
+/// Response from successful test login
+#[derive(Debug, Serialize)]
+pub struct TestLoginResponse {
+    /// Session token to use for authenticated requests
+    pub session_token: String,
+    /// Username associated with the session
+    pub username: String,
+    /// Session expiration in seconds
+    pub expires_in_seconds: u64,
+    /// Whether the authenticated user must accept Terms before product access.
+    pub consent_required: bool,
+}
+
+/// Error response for test login
+#[derive(Debug, Serialize)]
+#[allow(unused)]
+pub struct TestLoginError {
+    pub error: String,
+    pub message: String,
+}
+
+#[async_trait]
+pub(crate) trait SyntheticUserProvisioner: Send + Sync {
+    async fn ensure_user(
+        &self,
+        username: &str,
+        role: UserRole,
+    ) -> Result<UserData, StatusCode>;
+}
+
+struct StorageBackedSyntheticUserProvisioner {
+    storage: Arc<PasskeyStorage>,
+    config: TestAuthConfig,
+}
+
+impl StorageBackedSyntheticUserProvisioner {
+    fn new(
+        storage: Arc<PasskeyStorage>,
+        config: TestAuthConfig,
+    ) -> Self {
+        Self { storage, config }
+    }
+}
+
+#[async_trait]
+impl SyntheticUserProvisioner for StorageBackedSyntheticUserProvisioner {
+    async fn ensure_user(
+        &self,
+        username: &str,
+        role: UserRole,
+    ) -> Result<UserData, StatusCode> {
+        ensure_test_user(self.storage.as_ref(), &self.config, username, role).await
+    }
+}
+
+fn build_test_user_id(
+    config: &TestAuthConfig,
+    username: &str,
+) -> String {
+    if username == config.test_username {
+        return config.test_user_id.clone();
+    }
+
+    let slug = username
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let slug = slug.trim_matches('-');
+
+    if slug.is_empty() {
+        format!("test-user-{}", uuid::Uuid::new_v4())
+    } else {
+        format!("test-user-{}", slug)
+    }
+}
+
+fn build_test_user_email(username: &str) -> String {
+    let local_part = username
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('.')
+        .to_string();
+
+    if local_part.is_empty() {
+        "ui.test@example.test".to_string()
+    } else {
+        format!("{}@example.test", local_part)
+    }
+}
+
+async fn ensure_test_user(
+    storage: &PasskeyStorage,
+    config: &TestAuthConfig,
+    username: &str,
+    role: UserRole,
+) -> Result<UserData, StatusCode> {
+    let mut user = match storage
+        .load_user(username)
+        .await
+        .map_err(|error| {
+            warn!("[TEST MODE] Failed to load test user '{}': {}", username, error);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })? {
+        Some(existing_user) => existing_user,
+        None => {
+            let mut user_id = build_test_user_id(config, username);
+
+            if let Some(existing_user) = storage
+                .load_user_by_id(&user_id)
+                .await
+                .map_err(|error| {
+                    warn!("[TEST MODE] Failed to check test user id '{}' for '{}': {}", user_id, username, error);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                && existing_user.username != username
+            {
+                user_id = format!("{}-{}", user_id, uuid::Uuid::new_v4());
+            }
+
+            let now = chrono::Utc::now();
+            UserData {
+                user_id,
+                username: username.to_string(),
+                passkeys: Vec::new(),
+                role: role.clone(),
+                status: UserStatus::Approved,
+                is_primary: false,
+                first_name: Some("UI".to_string()),
+                last_name: Some("Test".to_string()),
+                email: Some(build_test_user_email(username)),
+                department: Some("QA".to_string()),
+                job_title: Some("Automation".to_string()),
+                avatar_path: Some("avatars/default.png".to_string()),
+                created_at: now,
+                updated_at: now,
+                last_logged_in: Some(now),
+                saml_id: None,
+            }
+        }
+    };
+
+    let now = chrono::Utc::now();
+    user.role = role;
+    user.status = UserStatus::Approved;
+    user.updated_at = now;
+    user.last_logged_in = Some(now);
+
+    if user.first_name.is_none() {
+        user.first_name = Some("UI".to_string());
+    }
+    if user.last_name.is_none() {
+        user.last_name = Some("Test".to_string());
+    }
+    if user.email.is_none() {
+        user.email = Some(build_test_user_email(username));
+    }
+    if user.department.is_none() {
+        user.department = Some("QA".to_string());
+    }
+    if user.job_title.is_none() {
+        user.job_title = Some("Automation".to_string());
+    }
+    if user.avatar_path.is_none() {
+        user.avatar_path = Some("avatars/default.png".to_string());
+    }
+
+    storage
+        .save_user(&user)
+        .await
+        .map_err(|error| {
+            warn!("[TEST MODE] Failed to persist test user '{}': {}", username, error);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(user)
+}
+
+/// Test login endpoint - only available when AS_TEST_MODE=true
+///
+/// This endpoint allows automated tests to obtain a valid session without
+/// going through the WebAuthn passkey flow. It requires a valid test token
+/// in the X-Test-Token header.
+///
+/// # Security
+/// - Returns 404 when test mode is not enabled
+/// - Requires valid X-Test-Token header
+/// - All test logins are logged with TEST MODE marker
+pub async fn test_login(
+    State(test_auth_state): State<Arc<TestAuthState>>,
+    headers: HeaderMap,
+    Json(req): Json<TestLoginRequest>,
+) -> Result<(HeaderMap, Json<TestLoginResponse>), SessionFinalizationError> {
+    let config = &test_auth_state.config;
+
+    // Check if test mode is enabled
+    if !config.enabled {
+        // Return 404 to not reveal the endpoint exists in production
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    // Validate test token from header
+    let provided_token = headers
+        .get("X-Test-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if provided_token.is_empty() {
+        warn!("[TEST MODE] Test login attempt without token");
+        return Err(StatusCode::UNAUTHORIZED.into());
+    }
+
+    if provided_token != config.test_token {
+        warn!("[TEST MODE] Invalid test token provided");
+        return Err(StatusCode::UNAUTHORIZED.into());
+    }
+
+    // Ensure the synthetic UI-test session maps to a real stored user so
+    // dashboard profile and permission lookups behave like normal auth.
+    let username = req
+        .username
+        .unwrap_or_else(|| config.test_username.clone());
+    let role = match req.role {
+        Some(role) if config.allow_role_override => role,
+        Some(_) => return Err(StatusCode::FORBIDDEN.into()),
+        None => UserRole::Administrator,
+    };
+    let user = test_auth_state
+        .user_provisioner
+        .ensure_user(&username, role)
+        .await?;
+    let finalized_session = test_auth_state
+        .session_finalizer
+        .finalize_session(AuthenticatedPrincipal::new(user.username.clone(), user.user_id.clone()))
+        .await?;
+
+    info!("[TEST MODE] Test login successful - user: {}, user_id: {}", user.username, user.user_id);
+
+    Ok((
+        finalized_session.headers,
+        Json(TestLoginResponse {
+            session_token: finalized_session.session_token,
+            username: user.username,
+            expires_in_seconds: test_auth_state
+                .session_finalizer
+                .session_timeout_seconds(),
+            consent_required: finalized_session.consent_required,
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use lazy_static::lazy_static;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    // required as each test modifies environment variables,
+    // which impacts other tests so we use a global mutex
+    // to serialize them
+    lazy_static! {
+        static ref TEST_LOCK: Mutex<bool> = Mutex::new(true);
+    }
+
+    #[test]
+    fn test_config_default_disabled() {
+        let _unused = TEST_LOCK.lock();
+
+        // Clear env vars for clean test
+        unsafe {
+            std::env::remove_var("AS_TEST_MODE");
+            std::env::remove_var("AS_TEST_TOKEN");
+            std::env::remove_var("AS_TEST_USERNAME");
+            std::env::remove_var("AS_TEST_USER_ID");
+        }
+
+        let config = TestAuthConfig::from_env();
+        assert!(!config.enabled);
+        assert!(config.test_token.is_empty());
+        assert_eq!(config.test_username, "test-user");
+        assert_eq!(config.test_user_id, "test-user-001");
+    }
+
+    #[test]
+    fn test_config_fails_closed_without_token() {
+        let _unused = TEST_LOCK.lock();
+
+        unsafe {
+            std::env::remove_var("AS_TEST_TOKEN");
+            std::env::set_var("AS_TEST_MODE", "true");
+        }
+
+        // Requested but tokenless ⇒ stays disabled (fail-closed), no default token.
+        let config = TestAuthConfig::from_env();
+        assert!(!config.enabled);
+        assert!(config.test_token.is_empty());
+    }
+
+    #[test]
+    fn test_config_fails_closed_with_blank_token() {
+        let _unused = TEST_LOCK.lock();
+
+        unsafe {
+            std::env::set_var("AS_TEST_MODE", "true");
+            std::env::set_var("AS_TEST_TOKEN", "   ");
+        }
+
+        let config = TestAuthConfig::from_env();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_config_enabled_from_env() {
+        let _unused = TEST_LOCK.lock();
+
+        unsafe {
+            std::env::set_var("AS_TEST_MODE", "true");
+            std::env::set_var("AS_TEST_TOKEN", "custom-token");
+            std::env::set_var("AS_TEST_USERNAME", "custom-user");
+            std::env::set_var("AS_TEST_USER_ID", "custom-id");
+        }
+
+        let config = TestAuthConfig::from_env();
+        assert!(config.enabled);
+        assert_eq!(config.test_token, "custom-token");
+        assert_eq!(config.test_username, "custom-user");
+        assert_eq!(config.test_user_id, "custom-id");
+    }
+
+    #[test]
+    fn test_config_enabled_with_1() {
+        let _unused = TEST_LOCK.lock();
+
+        unsafe {
+            std::env::remove_var("AS_TEST_USERNAME");
+            std::env::remove_var("AS_TEST_USER_ID");
+            std::env::set_var("AS_TEST_MODE", "1");
+            std::env::set_var("AS_TEST_TOKEN", "custom-token");
+        }
+
+        let config = TestAuthConfig::from_env();
+        assert!(config.enabled);
+        assert_eq!(config.test_token, "custom-token");
+    }
+
+    #[test]
+    fn test_config_disabled_with_false() {
+        let _unused = TEST_LOCK.lock();
+
+        unsafe {
+            std::env::set_var("AS_TEST_MODE", "false");
+        }
+
+        let config = TestAuthConfig::from_env();
+        assert!(!config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_test_user_creates_approved_administrator() {
+        let _unused = TEST_LOCK.lock();
+
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path().join("users");
+        let avatars_path = temp_dir
+            .path()
+            .join("avatars");
+        let storage = PasskeyStorage::new(
+            storage_path
+                .to_string_lossy()
+                .into_owned(),
+            avatars_path
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .await
+        .unwrap();
+
+        let config = TestAuthConfig {
+            enabled: true,
+            test_token: "token".to_string(),
+            test_username: "test-user".to_string(),
+            test_user_id: "test-user-001".to_string(),
+            allow_role_override: false,
+        };
+
+        let user = ensure_test_user(&storage, &config, "test-user", UserRole::Administrator)
+            .await
+            .unwrap();
+
+        assert_eq!(user.user_id, "test-user-001");
+        assert_eq!(user.role, UserRole::Administrator);
+        assert_eq!(user.status, UserStatus::Approved);
+        assert_eq!(user.avatar_path.as_deref(), Some("avatars/default.png"));
+
+        let stored_user = storage
+            .load_user_by_id("test-user-001")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_user.username, "test-user");
+        assert_eq!(stored_user.role, UserRole::Administrator);
+        assert_eq!(stored_user.status, UserStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_test_user_upgrades_existing_user() {
+        let _unused = TEST_LOCK.lock();
+
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path().join("users");
+        let avatars_path = temp_dir
+            .path()
+            .join("avatars");
+        let storage = PasskeyStorage::new(
+            storage_path
+                .to_string_lossy()
+                .into_owned(),
+            avatars_path
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .await
+        .unwrap();
+
+        let now = chrono::Utc::now();
+        storage
+            .save_user(&UserData {
+                user_id: "test-user-001".to_string(),
+                username: "test-user".to_string(),
+                passkeys: Vec::new(),
+                role: UserRole::User,
+                status: UserStatus::New,
+                is_primary: false,
+                first_name: None,
+                last_name: None,
+                email: None,
+                department: None,
+                job_title: None,
+                avatar_path: None,
+                created_at: now,
+                updated_at: now,
+                last_logged_in: None,
+                saml_id: None,
+            })
+            .await
+            .unwrap();
+
+        let config = TestAuthConfig {
+            enabled: true,
+            test_token: "token".to_string(),
+            test_username: "test-user".to_string(),
+            test_user_id: "test-user-001".to_string(),
+            allow_role_override: false,
+        };
+
+        let user = ensure_test_user(&storage, &config, "test-user", UserRole::Administrator)
+            .await
+            .unwrap();
+
+        assert_eq!(user.role, UserRole::Administrator);
+        assert_eq!(user.status, UserStatus::Approved);
+        assert_eq!(user.first_name.as_deref(), Some("UI"));
+        assert_eq!(user.avatar_path.as_deref(), Some("avatars/default.png"));
+        assert!(user.last_logged_in.is_some());
+    }
+}

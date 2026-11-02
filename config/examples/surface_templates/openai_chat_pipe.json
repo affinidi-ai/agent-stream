@@ -1,0 +1,38 @@
+{
+  "$schema": "https://fabric.affinidi.io/schemas/pipe-template/v1.json",
+  "id": "builtin-openai-chat-surface",
+  "name": "OpenAI Chat Completions",
+  "description": "An LLM Surface wired to OpenAI's chat completions endpoint.",
+  "details": "Pre-selects the OpenAI provider and the GPT-4o model against the chat completions endpoint. Add your OpenAI API key secret on the Upstream node, set a route, then Save.",
+  "starter_hint": "We've pre-wired this Surface to OpenAI GPT-4o. Open the Upstream node to attach your OpenAI API key secret, set a route on the Caller node, then click Save.",
+  "icon": "robot",
+  "tags": [
+    "llm",
+    "openai",
+    "starter"
+  ],
+  "author": "system",
+  "builtin": true,
+  "sort_priority": 20,
+  "pipe": {
+    "name": "$SURFACE_NAME",
+    "description": "OpenAI chat completions Surface",
+    "enabled": true,
+    "route": "$SURFACE_ROUTE",
+    "provider": "openai",
+    "model": "gpt-4o",
+    "endpoint_url": "/chat/completions",
+    "api_key_secret_id": "",
+    "model_parameters": {},
+    "rate_limit_enabled": false,
+    "requests_per_minute": 60,
+    "tokens_per_minute": 100000,
+    "cost_tracking_enabled": true,
+    "input_price_per_1k": 0,
+    "output_price_per_1k": 0,
+    "override_policy": {},
+    "prompt_guard": null,
+    "judge": null,
+    "jury": null
+  }
+}

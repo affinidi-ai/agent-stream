@@ -1,0 +1,35 @@
+{
+  "$schema": "https://fabric.affinidi.io/schemas/pipe-template/v1.json",
+  "id": "builtin-governed-ide-surface",
+  "name": "Governed IDE Catalogue",
+  "kind": "full",
+  "description": "An IDE catalogue with front-door OPA policy and rate limiting pre-added.",
+  "details": "Seeds the Access Point and Catalogue spine plus the front-door OPA Policy and Rate Limit governance nodes. Select a policy on the OPA node, drag on your LLM Surface members, set a route on the Access Point, then Save.",
+  "starter_hint": "We've pre-added front-door OPA and rate limiting. Open the OPA Policy node to pick a policy, drag on your LLM Surface members, set a route on the Access Point, then click Save.",
+  "icon": "shield-halved",
+  "tags": [
+    "ide",
+    "starter",
+    "governed"
+  ],
+  "author": "system",
+  "builtin": true,
+  "sort_priority": 20,
+  "pipe": {
+    "pipe_type": {
+      "type": "ide_catalog",
+      "config": {
+        "members": []
+      }
+    },
+    "opa_policy": {
+      "enabled": true,
+      "policy_definition_id": ""
+    },
+    "rate_limit": {
+      "enabled": true,
+      "requests_per_minute": 60,
+      "tokens_per_minute": 100000
+    }
+  }
+}

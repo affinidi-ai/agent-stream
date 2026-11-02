@@ -1,0 +1,94 @@
+{
+  "clips": [
+    {
+      "id": "tier1-give-me-a-second",
+      "file": "tier1-give-me-a-second.wav",
+      "text": "Okay, give me a second.",
+      "label": "Tier 1 — quick acknowledgement",
+      "tags": [
+        "tier1",
+        "ack"
+      ]
+    },
+    {
+      "id": "tier1-looking-it-up",
+      "file": "tier1-looking-it-up.wav",
+      "text": "Got it — let me look into that.",
+      "label": "Tier 1 — quick acknowledgement",
+      "tags": [
+        "tier1",
+        "ack"
+      ]
+    },
+    {
+      "id": "tier1-one-moment",
+      "file": "tier1-one-moment.wav",
+      "text": "One moment, please.",
+      "label": "Tier 1 — quick acknowledgement",
+      "tags": [
+        "tier1",
+        "ack"
+      ]
+    },
+    {
+      "id": "tier2-still-working",
+      "file": "tier2-still-working.wav",
+      "text": "Still working on that for you.",
+      "label": "Tier 2 — still working",
+      "tags": [
+        "tier2",
+        "progress"
+      ]
+    },
+    {
+      "id": "tier2-almost-there",
+      "file": "tier2-almost-there.wav",
+      "text": "Thanks for your patience — almost there.",
+      "label": "Tier 2 — still working",
+      "tags": [
+        "tier2",
+        "progress"
+      ]
+    },
+    {
+      "id": "tier2-double-checking",
+      "file": "tier2-double-checking.wav",
+      "text": "Just double-checking a couple of things.",
+      "label": "Tier 2 — still working",
+      "tags": [
+        "tier2",
+        "progress"
+      ]
+    },
+    {
+      "id": "tier3-nearly-done",
+      "file": "tier3-nearly-done.wav",
+      "text": "Appreciate you waiting — nearly done.",
+      "label": "Tier 3 — extended wait",
+      "tags": [
+        "tier3",
+        "progress"
+      ]
+    },
+    {
+      "id": "tier3-bear-with-me",
+      "file": "tier3-bear-with-me.wav",
+      "text": "This one's taking a little longer, bear with me.",
+      "label": "Tier 3 — extended wait",
+      "tags": [
+        "tier3",
+        "progress"
+      ]
+    },
+    {
+      "id": "tier3-wrapping-up",
+      "file": "tier3-wrapping-up.wav",
+      "text": "Hang tight, I'm wrapping this up now.",
+      "label": "Tier 3 — extended wait",
+      "tags": [
+        "tier3",
+        "progress"
+      ]
+    }
+  ]
+}

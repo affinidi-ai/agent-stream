@@ -1,0 +1,28 @@
+{
+  "suspicious terminology": {
+    "description": "Terms that may indicate drift from Agent Stream product language. Rename them unless the term is intentionally part of the behavior under test.",
+    "terms": [
+      "agent surface",
+      "channel",
+      "channel mapping",
+      "client",
+      "backend",
+      "upstream",
+      "origin",
+      "destination",
+      "connector"
+    ]
+  },
+  "harness mechanics wording": {
+    "description": "Terms that may leak test harness mechanics into business-readable Gherkin. Replace them with declarative system state unless the term is behavior-defining.",
+    "terms": [
+      "mock",
+      "fixture",
+      "debug",
+      "sleep",
+      "test setup",
+      "bootstrapped",
+      "temporary directory"
+    ]
+  }
+}

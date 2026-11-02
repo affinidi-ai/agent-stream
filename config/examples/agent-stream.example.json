@@ -1,0 +1,1661 @@
+{
+  "terms": false,
+  "affinidi_terms_url": "https://well.affinidi.io/terms/v1/current.json",
+  "did": {
+    "domain": "YOUR_DOMAIN",
+    "trusted_issuers": []
+  },
+  "oob_connection": {
+    "pending_expiry_hours": 24
+  },
+  "_note_virtual_channels": "To use virtual channel aliases in routes, add 'virtual_channels' array to channel config with 'alias' field. Access via URL path using $alias keyword (e.g., /api/sales/$alias/beta/checkout). Set 'default_virtual_channel' to specify fallback variant.",
+  "integration": {
+    "variable_pattern": "\\$\\{([A-Za-z0-9_]+)(?::([^}]*))?\\}|\\$([A-Za-z_][A-Za-z0-9_]*)",
+    "variable_pattern_description": "Matches ${VARIABLE}, ${VARIABLE:Label}, or $VARIABLE format.",
+    "custom_variable_prefix": "_",
+    "global_runtime_variables": [
+      {
+        "name": "OLD_STATE",
+        "description": "JSON representation of the entity's state before the event. Empty for CREATE events. Contains complete entity object (Gateway, User, etc.) for UPDATE and DELETE events.",
+        "example": "{\"id\":\"gateway-123\",\"name\":\"My Gateway\",\"status\":\"Enabled\",...}"
+      },
+      {
+        "name": "NEW_STATE",
+        "description": "JSON representation of the entity's state after the event. Empty for DELETE events. Contains complete entity object (Gateway, User, etc.) for CREATE and UPDATE events.",
+        "example": "{\"id\":\"gateway-123\",\"name\":\"Updated Gateway\",\"status\":\"Disabled\",...}"
+      },
+      {
+        "name": "EVENT_TYPE",
+        "description": "The type of event that triggered the integration (e.g., 'gateway.created', 'user.updated', etc.)",
+        "example": "gateway.created"
+      },
+      {
+        "name": "TIMESTAMP",
+        "description": "ISO 8601 timestamp when the event occurred",
+        "example": "2026-01-11T10:30:00Z"
+      }
+    ],
+    "types": [
+      {
+        "enum_value": "email",
+        "name": "Email",
+        "description": "Send notifications via SMTP email",
+        "metadata": {
+          "fields": [
+            {
+              "name": "subject",
+              "label": "Subject",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "body",
+              "label": "Body",
+              "type": "text",
+              "required": true
+            },
+            {
+              "name": "from_address",
+              "label": "From Address",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "to_addresses",
+              "label": "To Addresses",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "smtp_host",
+              "label": "SMTP Host",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "smtp_port",
+              "label": "SMTP Port",
+              "type": "number",
+              "required": true
+            },
+            {
+              "name": "smtp_username",
+              "label": "SMTP Username",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "smtp_password",
+              "label": "SMTP Password",
+              "type": "password",
+              "required": false
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "slack",
+        "name": "Slack",
+        "description": "Send notifications to Slack channels via webhook",
+        "metadata": {
+          "fields": [
+            {
+              "name": "webhook_url",
+              "label": "Webhook URL",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "message",
+              "label": "Message",
+              "type": "text",
+              "required": true
+            },
+            {
+              "name": "channel",
+              "label": "Channel",
+              "type": "string",
+              "required": false
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "webhook",
+        "name": "Webhook",
+        "description": "Send HTTP POST requests to custom endpoints",
+        "metadata": {
+          "fields": [
+            {
+              "name": "url",
+              "label": "Webhook URL",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "payload",
+              "label": "Payload Template",
+              "type": "text",
+              "required": true
+            },
+            {
+              "name": "headers",
+              "label": "Custom Headers (JSON)",
+              "type": "text",
+              "required": false
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "stream",
+        "name": "Stream",
+        "description": "Stream events to Kafka, Kinesis, Pulsar, or Redis Streams",
+        "metadata": {
+          "fields": [
+            {
+              "name": "platform",
+              "label": "Streaming Platform",
+              "type": "select",
+              "required": true,
+              "options": [
+                "kafka",
+                "kinesis",
+                "pulsar",
+                "redis"
+              ]
+            },
+            {
+              "name": "topic",
+              "label": "Topic/Stream Name",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "payload",
+              "label": "Event Payload Template (JSON)",
+              "type": "text",
+              "required": true
+            },
+            {
+              "name": "brokers",
+              "label": "Broker URLs (comma-separated, for Kafka/Pulsar)",
+              "type": "text",
+              "required": false
+            },
+            {
+              "name": "region",
+              "label": "AWS Region (for Kinesis)",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "redis_url",
+              "label": "Redis URL (for Redis Streams)",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "auth_type",
+              "label": "Authentication Type",
+              "type": "select",
+              "required": false,
+              "options": [
+                "none",
+                "sasl_plain",
+                "sasl_scram",
+                "aws_iam"
+              ]
+            },
+            {
+              "name": "username",
+              "label": "Username (for SASL auth)",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "password",
+              "label": "Password/Token",
+              "type": "password",
+              "required": false
+            },
+            {
+              "name": "partition_key",
+              "label": "Partition Key Template",
+              "type": "string",
+              "required": false
+            }
+          ]
+        }
+      }
+    ],
+    "categories": [
+      {
+        "enum_value": "general",
+        "name": "General",
+        "description": "General purpose notifications",
+        "metadata": {}
+      },
+      {
+        "enum_value": "connection_point",
+        "name": "Connection Point",
+        "description": "Notifications related to connection point events",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "connection_point.created",
+              "name": "Connection Point Created",
+              "description": "Triggered when a new connection point is created",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete connection point object as JSON (id, name, description, gateway_id, did, created_at, updated_at, status, connection_count)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for create events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'connection_point.created'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "connection_point.updated",
+              "name": "Connection Point Updated",
+              "description": "Triggered when connection point details are modified",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete connection point object as JSON before the update"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete connection point object as JSON after the update"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'connection_point.updated'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "connection_point.deleted",
+              "name": "Connection Point Deleted",
+              "description": "Triggered when a connection point is permanently deleted",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete connection point object as JSON before deletion"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Empty for delete events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'connection_point.deleted'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "connection_point.connected",
+              "name": "Connection Established",
+              "description": "Triggered when a remote agent successfully connects to a connection point",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete connection point object as JSON with updated connection count"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Connection point state before connection"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'connection_point.connected'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "connection_point.error",
+              "name": "Connection Point Error",
+              "description": "Triggered when an error occurs at a connection point",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Connection point object with error details as JSON"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Connection point state before error"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'connection_point.error'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "user",
+        "name": "User",
+        "description": "User-specific notifications",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "user.created",
+              "name": "New User Registered",
+              "description": "Triggered when a new user completes registration",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete user object as JSON"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for create events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'user.created'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "user.approved",
+              "name": "User Approved",
+              "description": "Triggered when an administrator approves a pending user account",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete user object as JSON after approval (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for approval events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'user.approved'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "user.updated",
+              "name": "User Updated",
+              "description": "Triggered when user details (role, status, profile) are modified",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete user object as JSON before the update (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete user object as JSON after the update (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'user.updated'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "user.deleted",
+              "name": "User Deleted",
+              "description": "Triggered when a user account is permanently deleted",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete user object as JSON before deletion (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Empty for delete events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'user.deleted'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "user.login",
+              "name": "User Login",
+              "description": "Triggered when a user successfully logs in via passkey authentication",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete user object as JSON (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for login events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'user.login'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "user.accessed",
+              "name": "User Profile Accessed",
+              "description": "Triggered when a user profile is viewed or accessed",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete user object as JSON being accessed"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for access events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'user.accessed'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "gateway",
+        "name": "Gateway",
+        "description": "Gateway system notifications",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "gateway.created",
+              "name": "Gateway Created",
+              "description": "Triggered when a new gateway is created",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete gateway object as JSON (id, name, description, did, gateway_type, status, creation_type, created_at, updated_at, exposed_channels)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for create events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'gateway.created'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "gateway.updated",
+              "name": "Gateway Updated",
+              "description": "Triggered when gateway details are modified",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete gateway object as JSON before the update (id, name, description, did, gateway_type, status, creation_type, created_at, updated_at, exposed_channels)"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete gateway object as JSON after the update (id, name, description, did, gateway_type, status, creation_type, created_at, updated_at, exposed_channels)"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'gateway.updated'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "gateway.deleted",
+              "name": "Gateway Deleted",
+              "description": "Triggered when a gateway is permanently deleted",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete gateway object as JSON before deletion (id, name, description, did, gateway_type, status, creation_type, created_at, updated_at, exposed_channels)"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Empty for delete events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'gateway.deleted'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "gateway.status_changed",
+              "name": "Gateway Status Changed",
+              "description": "Triggered when a gateway is enabled or disabled",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete gateway object as JSON before status change (id, name, description, did, gateway_type, status, creation_type, created_at, updated_at, exposed_channels)"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete gateway object as JSON after status change (id, name, description, did, gateway_type, status, creation_type, created_at, updated_at, exposed_channels)"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'gateway.status_changed'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "gateway.accessed",
+              "name": "Gateway Accessed",
+              "description": "Triggered when a gateway is viewed or accessed",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete gateway object as JSON being accessed"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for access events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'gateway.accessed'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "identity",
+        "name": "Identity",
+        "description": "DID identity-related notifications",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "identity.created",
+              "name": "Identity Created",
+              "description": "Triggered when a new DID identity is created",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete identity object as JSON (did, type, controller, created_at, public_keys, services)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for create events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'identity.created'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "identity.updated",
+              "name": "Identity Updated",
+              "description": "Triggered when an identity's keys or services are modified",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete identity object as JSON before the update"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete identity object as JSON after the update"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'identity.updated'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "identity.deleted",
+              "name": "Identity Deleted",
+              "description": "Triggered when an identity is permanently deleted",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete identity object as JSON before deletion"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Empty for delete events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'identity.deleted'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "identity.appeared",
+              "name": "Identity Appeared in Channel",
+              "description": "Triggered when an identity appears in a channel for the first time or reconnects",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete identity object as JSON appearing in channel"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for appearance events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'identity.appeared'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            },
+            {
+              "event_type": "identity.accessed",
+              "name": "Identity Accessed",
+              "description": "Triggered when an identity document or information is accessed",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete identity object as JSON being accessed"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for access events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'identity.accessed'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "pipe",
+        "name": "LLM Surface",
+        "description": "LLM Surface event notifications (create, update, delete, execute, error, budget, usage alerts)",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "pipe.created",
+              "name": "Pipe Created",
+              "description": "Triggered when a new Surface is created",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete Surface object as JSON (id, name, description, provider, model, enabled, created_at, updated_at)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for create events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'pipe.created'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable name"
+                },
+                {
+                  "name": "SURFACE_TYPE",
+                  "description": "Type of pipe (llm, webhook, ide_catalog)"
+                },
+                {
+                  "name": "SURFACE_PROVIDER",
+                  "description": "Provider name (e.g., openai, anthropic) for LLM Surfaces"
+                },
+                {
+                  "name": "SURFACE_MODEL",
+                  "description": "Model name (e.g., gpt-4, claude-3) for LLM Surfaces"
+                },
+                {
+                  "name": "SURFACE_ENABLED",
+                  "description": "Whether the Surface is enabled (true/false)"
+                }
+              ]
+            },
+            {
+              "event_type": "pipe.updated",
+              "name": "Pipe Updated",
+              "description": "Triggered when Surface configuration is modified",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete Surface object as JSON before the update"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Complete Surface object as JSON after the update"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'pipe.updated'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "SURFACE_TYPE",
+                  "description": "Type (llm, webhook, ide_catalog)"
+                },
+                {
+                  "name": "SURFACE_PROVIDER",
+                  "description": "Provider name for LLM Surfaces"
+                },
+                {
+                  "name": "SURFACE_MODEL",
+                  "description": "Model name for LLM Surfaces"
+                },
+                {
+                  "name": "SURFACE_ENABLED",
+                  "description": "Whether the Surface is enabled"
+                }
+              ]
+            },
+            {
+              "event_type": "pipe.deleted",
+              "name": "Pipe Deleted",
+              "description": "Triggered when a Surface is permanently deleted",
+              "runtime_variables": [
+                {
+                  "name": "OLD_STATE",
+                  "description": "Complete Surface object as JSON before deletion"
+                },
+                {
+                  "name": "NEW_STATE",
+                  "description": "Empty for delete events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'pipe.deleted'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the event occurred"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "SURFACE_TYPE",
+                  "description": "Type of Surface"
+                }
+              ]
+            },
+            {
+              "event_type": "pipe.executed",
+              "name": "Surface Executed",
+              "description": "Triggered when a Surface request is executed, including streamed responses when the stream ends",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Execution details as JSON, including currency, usage_by_stage (stage, provider, model, input_tokens, output_tokens, cost per model-calling stage), streaming, record_id, member_id, team_ids, team_names and tenant_id"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for execution events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'pipe.executed'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when execution occurred"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "SURFACE_PROVIDER",
+                  "description": "LLM provider used"
+                },
+                {
+                  "name": "SURFACE_MODEL",
+                  "description": "Model used for this execution"
+                },
+                {
+                  "name": "INPUT_TOKENS",
+                  "description": "Number of input tokens consumed"
+                },
+                {
+                  "name": "OUTPUT_TOKENS",
+                  "description": "Number of output tokens generated"
+                },
+                {
+                  "name": "TOTAL_TOKENS",
+                  "description": "Total tokens (input + output)"
+                },
+                {
+                  "name": "COST_USD",
+                  "description": "Execution cost in USD (e.g., '0.002340')"
+                },
+                {
+                  "name": "LATENCY_MS",
+                  "description": "Request latency in milliseconds"
+                },
+                {
+                  "name": "TRACE_ID",
+                  "description": "Distributed tracing ID for this request"
+                },
+                {
+                  "name": "CURRENCY",
+                  "description": "Currency of every cost on the event (USD)"
+                },
+                {
+                  "name": "STREAMING",
+                  "description": "'true' when the response was streamed to the caller"
+                },
+                {
+                  "name": "SUCCESS",
+                  "description": "'false' for a stream that aborted before it finished"
+                },
+                {
+                  "name": "RECORD_ID",
+                  "description": "Id of the signed governance record for this interaction (empty when governance recording is off)"
+                }
+              ]
+            },
+            {
+              "event_type": "pipe.error",
+              "name": "Surface execution Error",
+              "description": "Triggered when a Surface execution fails or a request is refused (content block, team gate, usage limit)",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Error details as JSON: pipe_id, pipe_name, error, and when known stage, code (team gate / usage limit), categories ({id, label} of a content block), trace_id and tenant_id"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for error events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'pipe.error'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when error occurred"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "ERROR_MESSAGE",
+                  "description": "Detailed error message"
+                }
+              ]
+            },
+            {
+              "event_type": "pipe.budget.threshold_reached",
+              "name": "Budget Threshold Reached",
+              "description": "Triggered when Surface spending reaches configured alert threshold (e.g., 80% of monthly budget)",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Budget alert details as JSON"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for budget alert events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'pipe.budget.threshold_reached'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when threshold was reached"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "MONTH",
+                  "description": "Budget month (YYYY-MM format, e.g., '2026-01')"
+                },
+                {
+                  "name": "TOTAL_SPENT_USD",
+                  "description": "Total amount spent this month in USD (e.g., '85.50')"
+                },
+                {
+                  "name": "BUDGET_LIMIT_USD",
+                  "description": "Monthly budget limit in USD (e.g., '100.00')"
+                },
+                {
+                  "name": "USAGE_PERCENTAGE",
+                  "description": "Percentage of budget used (e.g., '85.5')"
+                },
+                {
+                  "name": "REMAINING_BUDGET_USD",
+                  "description": "Remaining budget in USD (e.g., '14.50')"
+                },
+                {
+                  "name": "ALERT_THRESHOLD_PERCENT",
+                  "description": "Configured alert threshold percentage (e.g., '80')"
+                }
+              ]
+            },
+            {
+              "event_type": "pipe.budget.exceeded",
+              "name": "Budget Exceeded",
+              "description": "Triggered when Surface spending exceeds monthly budget limit",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Budget alert details as JSON"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for budget exceeded events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'pipe.budget.exceeded'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when budget was exceeded"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "MONTH",
+                  "description": "Budget month (YYYY-MM format)"
+                },
+                {
+                  "name": "TOTAL_SPENT_USD",
+                  "description": "Total amount spent this month in USD"
+                },
+                {
+                  "name": "BUDGET_LIMIT_USD",
+                  "description": "Monthly budget limit in USD"
+                },
+                {
+                  "name": "USAGE_PERCENTAGE",
+                  "description": "Percentage of budget used (will be >100%)"
+                },
+                {
+                  "name": "OVERSPEND_USD",
+                  "description": "Amount over budget in USD (e.g., '15.25')"
+                }
+              ]
+            },
+            {
+              "event_type": "drift.detected",
+              "name": "Drift Detected",
+              "description": "Triggered when a surface's behaviour drifts past its baseline (raised once on the transition into drift)",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Drift details as JSON (surface_id, surface_name, status, window_seconds, headline dimension/baseline/current/delta, and dimensions: every evaluated dimension with id, label, unit, status, baseline, current, delta; unknown values are null)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for drift events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'drift.detected'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when drift was detected"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "DRIFT_STATUS",
+                  "description": "Overall drift status (drift)"
+                },
+                {
+                  "name": "DRIFT_DIMENSION",
+                  "description": "The dimension that drifted furthest (e.g. Latency, Refusal rate)"
+                },
+                {
+                  "name": "DRIFT_BASELINE",
+                  "description": "Baseline mean for the drifted dimension"
+                },
+                {
+                  "name": "DRIFT_CURRENT",
+                  "description": "Current-window mean for the drifted dimension"
+                },
+                {
+                  "name": "DRIFT_DELTA",
+                  "description": "Current minus baseline for the drifted dimension"
+                }
+              ]
+            },
+            {
+              "event_type": "drift.resolved",
+              "name": "Drift Resolved",
+              "description": "Triggered when a surface leaves drift (its overall status is no longer drift)",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Drift details as JSON (surface_id, surface_name, status, window_seconds, and dimensions: every evaluated dimension with id, label, unit, status, baseline, current, delta; unknown values are null)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for drift events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'drift.resolved'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when drift ended"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "DRIFT_STATUS",
+                  "description": "Overall drift status after leaving drift (stable, warn or unknown)"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "llm_governance",
+        "name": "LLM Governance",
+        "description": "Signed governance records exported from LLM Surfaces (prompt, processing stages, completion, metrics) as tamper-evident W3C Verifiable Credentials",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "governance.record",
+              "name": "Governance Record",
+              "description": "A signed governance record was produced for an interaction on an LLM Surface",
+              "runtime_variables": [
+                {
+                  "name": "RECORD_ID",
+                  "description": "Unique identifier of the signed governance record"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Identifier of the LLM Surface the record was captured on"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Display name of the LLM Surface the record was captured on"
+                },
+                {
+                  "name": "CONTENT_HASH",
+                  "description": "SHA-256 content hash of the record (sha256:… hex)"
+                },
+                {
+                  "name": "PREV_RECORD_HASH",
+                  "description": "Content hash of the previous record in the per-surface chain"
+                },
+                {
+                  "name": "CREDENTIAL",
+                  "description": "The full signed W3C Verifiable Credential (JSON) for the record"
+                },
+                {
+                  "name": "RECORD",
+                  "description": "The full governance record (JSON), including stages, digests, and metrics"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'governance.record'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when the record was produced"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "llm_drift",
+        "name": "LLM Drift",
+        "description": "Behavioural drift alerts for LLM Surfaces — raised when a monitored surface's dimensions move past their pinned baseline",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "drift.detected",
+              "name": "Drift Detected",
+              "description": "Triggered when a surface's behaviour drifts past its baseline (raised once on the transition into drift)",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Drift details as JSON (surface_id, surface_name, status, window_seconds, headline dimension/baseline/current/delta, and dimensions: every evaluated dimension with id, label, unit, status, baseline, current, delta; unknown values are null)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for drift events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'drift.detected'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when drift was detected"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "DRIFT_STATUS",
+                  "description": "Overall drift status (drift)"
+                },
+                {
+                  "name": "DRIFT_DIMENSION",
+                  "description": "The dimension that drifted furthest (e.g. Latency, Refusal rate)"
+                },
+                {
+                  "name": "DRIFT_BASELINE",
+                  "description": "Baseline mean for the drifted dimension"
+                },
+                {
+                  "name": "DRIFT_CURRENT",
+                  "description": "Current-window mean for the drifted dimension"
+                },
+                {
+                  "name": "DRIFT_DELTA",
+                  "description": "Current minus baseline for the drifted dimension"
+                }
+              ]
+            },
+            {
+              "event_type": "drift.resolved",
+              "name": "Drift Resolved",
+              "description": "Triggered when a surface leaves drift (its overall status is no longer drift)",
+              "runtime_variables": [
+                {
+                  "name": "NEW_STATE",
+                  "description": "Drift details as JSON (surface_id, surface_name, status, window_seconds, and dimensions: every evaluated dimension with id, label, unit, status, baseline, current, delta; unknown values are null)"
+                },
+                {
+                  "name": "OLD_STATE",
+                  "description": "Empty for drift events"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "description": "Always 'drift.resolved'"
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "description": "ISO 8601 timestamp when drift ended"
+                },
+                {
+                  "name": "SURFACE_ID",
+                  "description": "Unique Surface identifier"
+                },
+                {
+                  "name": "SURFACE_NAME",
+                  "description": "Human-readable Surface name"
+                },
+                {
+                  "name": "DRIFT_STATUS",
+                  "description": "Overall drift status after leaving drift (stable, warn or unknown)"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "enum_value": "audit",
+        "name": "Governance Audit",
+        "description": "Forwards every record written to the VP Audit Log: policy decisions, audit-control changes, VP injections and credential delegation. Every record is one delivery.",
+        "metadata": {
+          "event_types": [
+            {
+              "event_type": "audit.policy_decision",
+              "name": "Policy Decision",
+              "description": "An LLM Surface, IDE Surface, appliance-wide or gateway OPA policy allowed or denied a request"
+            },
+            {
+              "event_type": "audit.audit_configuration_changed",
+              "name": "Audit Configuration Changed",
+              "description": "An administrator changed the audit recording controls"
+            },
+            {
+              "event_type": "audit.vp_injected",
+              "name": "VP Injected",
+              "description": "A signed identity Verifiable Presentation was injected into a proxied request or response"
+            },
+            {
+              "event_type": "audit.token_injected",
+              "name": "Token Injected",
+              "description": "A delegated credential from the vault was injected on the caller's behalf"
+            },
+            {
+              "event_type": "audit.token_refreshed",
+              "name": "Token Refreshed",
+              "description": "An expired delegated credential was refreshed and injected"
+            },
+            {
+              "event_type": "audit.refresh_failed",
+              "name": "Refresh Failed",
+              "description": "A delegated credential could not be refreshed, so consent is required again"
+            },
+            {
+              "event_type": "audit.consent_granted",
+              "name": "Consent Granted",
+              "description": "A user completed the OAuth consent flow and a delegation token was stored"
+            },
+            {
+              "event_type": "audit.consent_required",
+              "name": "Consent Required",
+              "description": "The caller was asked to grant consent before the request could proceed"
+            },
+            {
+              "event_type": "audit.token_revoked",
+              "name": "Token Revoked",
+              "description": "A delegation token was revoked through the management API"
+            },
+            {
+              "event_type": "audit.user_tokens_revoked",
+              "name": "User Tokens Revoked",
+              "description": "Every delegation token for a user was revoked"
+            },
+            {
+              "event_type": "audit.token_not_found",
+              "name": "Token Not Found",
+              "description": "A delegation token lookup found no match"
+            },
+            {
+              "event_type": "audit.elicitation_sent",
+              "name": "Elicitation Sent",
+              "description": "An MCP elicitation request was sent to the client"
+            },
+            {
+              "event_type": "audit.elicitation_accepted",
+              "name": "Elicitation Accepted",
+              "description": "The client accepted an MCP elicitation"
+            },
+            {
+              "event_type": "audit.elicitation_declined",
+              "name": "Elicitation Declined",
+              "description": "The client declined an MCP elicitation"
+            },
+            {
+              "event_type": "audit.elicitation_cancelled",
+              "name": "Elicitation Cancelled",
+              "description": "The client cancelled an MCP elicitation"
+            },
+            {
+              "event_type": "audit.elicitation_timed_out",
+              "name": "Elicitation Timed Out",
+              "description": "The client did not answer an MCP elicitation in time"
+            },
+            {
+              "event_type": "audit.pre_authorize_blocked",
+              "name": "Pre-Authorize Blocked",
+              "description": "Pre-authorization blocked a session because a required credential was missing"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "cors": [],
+  "webauthn": {
+    "rp_id": "YOUR_DOMAIN",
+    "external_origin": "https://YOUR_DOMAIN"
+  },
+  "listeners": [
+    {
+      "id": "http-listener",
+      "name": "HTTP Listener",
+      "bind_address": "0.0.0.0",
+      "port": 8080,
+      "protocol": "http",
+      "external_urls": [
+        "https://YOUR_DOMAIN",
+        "http://localhost:8080"
+      ]
+    },
+    {
+      "id": "https-listener",
+      "name": "HTTPS Listener",
+      "bind_address": "0.0.0.0",
+      "port": 8443,
+      "protocol": "https",
+      "external_urls": [
+        "https://localhost:8443"
+      ]
+    }
+  ],
+  "routes": {
+    "connection_points_did": {
+      "type": "connection_point",
+      "prefix": "/connection-points"
+    },
+    "api": {
+      "type": "identity_api",
+      "prefix": "/api"
+    },
+    "onboarding": {
+      "type": "onboarding",
+      "prefix": "/"
+    },
+    "dashboard": {
+      "type": "static",
+      "prefix": "/",
+      "path": "www",
+      "fallback": true
+    },
+    "avatars": {
+      "type": "static",
+      "prefix": "/avatars",
+      "path": "_storage/avatars",
+      "fallback": false
+    }
+  },
+  "oauth_callback_route": "/oauth/callback",
+  "_note_secrets": "`secret_types` are the kinds the dashboard offers when a secret is created. `reveal_values` (default true) lets `GET /api/v1/secrets/{id}` return the stored value and the dashboard show it; set it to false to keep every secret write-only: values can be set and replaced, never read back.",
+  "secrets": {
+    "reveal_values": true,
+    "secret_types": [
+      "General",
+      "ApiKey",
+      "DatabasePassword",
+      "Certificate",
+      "SshKey",
+      "Token",
+      "OAuth",
+      "JWT"
+    ]
+  },
+  "logging": {
+    "level": "info",
+    "json": false,
+    "audit_identity_binding_vp": false,
+    "redaction": {
+      "enabled": true,
+      "rules": [
+        {
+          "name": "JWT tokens",
+          "pattern": "eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+",
+          "replacement": "[REDACTED-JWT]"
+        },
+        {
+          "name": "Authorization header values",
+          "pattern": "(?i)((?:Authorization|Proxy-Authorization)[\"']?\\s*[:=]\\s*(?:Bearer|Basic|Digest|Token|ApiKey)\\s+)\\S+",
+          "replacement": "${1}[REDACTED]"
+        },
+        {
+          "name": "Password fields",
+          "pattern": "(?i)(password|passwd|pwd)[\"']?\\s*[:=]\\s*[\"']?\\S+",
+          "replacement": "${1}=[REDACTED]"
+        },
+        {
+          "name": "Access and refresh tokens",
+          "pattern": "(?i)(access_token|refresh_token|token)[\"']?\\s*[:=]\\s*[\"']?[^\\s\"']+",
+          "replacement": "${1}=[REDACTED]"
+        },
+        {
+          "name": "Session identifiers",
+          "pattern": "(?i)(session_id|sessionid|sid|jsessionid|connect\\.sid)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9_\\-\\.]+",
+          "replacement": "${1}=[REDACTED-SESSION]"
+        },
+        {
+          "name": "Private key material (PEM)",
+          "pattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+          "replacement": "[REDACTED-PRIVATE-KEY]"
+        },
+        {
+          "name": "Email addresses",
+          "pattern": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b",
+          "replacement": "[REDACTED-EMAIL]"
+        },
+        {
+          "name": "IPv4 addresses",
+          "pattern": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",
+          "replacement": "[REDACTED-IP]"
+        },
+        {
+          "name": "IPv6 addresses",
+          "pattern": "(?i)\\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\\b|(?:[0-9a-f]{0,4}::(?:[0-9a-f]{1,4}:)*[0-9a-f]{0,4})|(?:[0-9a-f]{1,4}:)+:(?:[0-9a-f]{1,4}:)*[0-9a-f]{0,4}",
+          "replacement": "[REDACTED-IPv6]"
+        },
+        {
+          "name": "Device identifiers",
+          "pattern": "(?i)(device_id|device-id|udid|idfa|gaid|android_id)[\"']?\\s*[:=]\\s*[\"']?[0-9a-f\\-]{32,36}",
+          "replacement": "${1}=[REDACTED-DEVICE-ID]"
+        },
+        {
+          "name": "DID identifiers",
+          "pattern": "did:[a-z]+:[A-Za-z0-9._:%-]+",
+          "replacement": "did:redacted:***"
+        },
+        {
+          "name": "Ethereum addresses",
+          "pattern": "0x[0-9a-fA-F]{40}",
+          "replacement": "[REDACTED-ETH]"
+        },
+        {
+          "name": "Public key values",
+          "pattern": "(?i)(public_key|publicKey|pub_key|pubkey)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9+/=_\\-]{43,}",
+          "replacement": "${1}=[REDACTED-PUBKEY]"
+        },
+        {
+          "name": "API key assignments",
+          "pattern": "(?i)(api[_-]?key|secret)[=:\\s]+\\S+",
+          "replacement": "${1}=[REDACTED]"
+        },
+        {
+          "name": "CREDIT / DEBIT CARD NO (structural)",
+          "pattern": "\\b(?:4[0-9]{12}(?:[0-9]{3,6})?|[25][1-7][0-9]{14}|6(?:011|5[0-9]{2})[0-9]{12,15}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|(?:2131|1800|35\\d{3})\\d{11})\\b|\\b(?:\\d{4}[- .]){3}\\d{4}(?:[- .]\\d{1,4})?\\b",
+          "replacement": "[REDACTED-CARD]"
+        },
+        {
+          "name": "CREDIT / DEBIT CARD NO (keyword)",
+          "pattern": "(?i)(?:credit[ \\t]*card|debit[ \\t]*card|card[ \\t]*(?:no\\.?|num(?:ber)?|#?))[ \\t:_=-]*\\d{13,19}",
+          "replacement": "[REDACTED-CARD]"
+        },
+        {
+          "name": "US SSN",
+          "pattern": "\\b(?:00[1-9]|0[1-9]\\d|[1-5]\\d{2}|6(?:[0-5]\\d|6[0-57-9]|[7-9]\\d)|[78]\\d{2})-(?:0[1-9]|[1-9]\\d)-(?:000[1-9]|00[1-9]\\d|0[1-9]\\d{2}|[1-9]\\d{3})\\b",
+          "replacement": "[REDACTED-US-SSN]"
+        },
+        {
+          "name": "CN RESIDENT ID CARD NUM",
+          "pattern": "(([1-9]\\d{5})(18|19|([23]\\d))\\d{2}((0[1-9])|10|11|12)([0-2][1-9]|10|20|30|31)(\\d{3}[0-9Xx]))|(^[1-9]\\d{5}\\d{2}(0[1-9]|10|11|12)(([0-2][1-9])|10|20|30|31)\\d{2})",
+          "replacement": "${2}[REDACTED-CN-RES-ID-NO]${8}"
+        },
+        {
+          "name": "UK INSURANCE NUM",
+          "pattern": "(?i)\\b(?:[ACEHJLMOPRSWXY][ABCEGHJ-NPRSTW-Z]|B[ABCEHJ-NPRSTW-Z]|G[ACEGHJ-NPRSTW-Z]|K[ABCEGHJ-MPRSTW-Z]|N[ABCEGHJ-MPRSW-Z]|T[ABCEGHJ-MPRSTW-Z]|Z[ABCEGHJ-NPRSTW-Y])\\d{6}[ABCD]\\b",
+          "replacement": "[REDACTED-UK-INS-NO]"
+        },
+        {
+          "name": "NATIONAL ID | PASSPORT NO | USER ID",
+          "pattern": "(?i)(?:national\\s*id|\\bpassport\\b|user\\s*id)[\\w\\s]*[\\s:_-]*([A-Z0-9\\-]{8,30})",
+          "replacement": "[REDACTED-ID]"
+        },
+        {
+          "name": "Physical address fields",
+          "pattern": "(?i)([\"']?(?:address|street|address_line_?[12]?|postal_code|zip_code|zipcode)[\"']?\\s*[:=]\\s*[\"']?)[^\"'\\n}]+",
+          "replacement": "${1}[REDACTED-ADDRESS]"
+        },
+        {
+          "name": "Phone numbers",
+          "pattern": "(?:\\+\\d{1,3}[\\s.-]?)?(?:\\(?\\d{1,4}\\)?[\\s.-]?)?\\d{3,4}[\\s.-]?\\d{4,}",
+          "replacement": "[REDACTED-PHONE]"
+        }
+      ]
+    }
+  },
+  "pipe_paths": [
+    {
+      "id": "llm",
+      "name": "llm",
+      "prefix": "/llm"
+    },
+    {
+      "id": "models",
+      "name": "models",
+      "prefix": "/models"
+    }
+  ],
+  "_note_llm_catalog": "Optional. Set `llm_catalog.refresh_url` to the published master llm.json so the Models page's 'Refresh Builtin Models' button can pull, validate, and install the latest built-in providers (previous kept as llm.json.bak). Omit to disable the action. The URL must be https on a public host without credentials, and the download refuses any address that is not public; set `allow_insecure_source` to true only for an internal mirror (plain http or a private network). Loopback, link-local and cloud metadata hosts are always refused.",
+  "llm_catalog": {
+    "refresh_url": "",
+    "allow_insecure_source": false
+  },
+  "_note_drift": "Optional. LLM drift replay-evaluation runner + retention controls. `eval_max_consecutive_failures` auto-suspends a surface's scheduled evaluation after N consecutive failed runs (0 disables); `eval_session_timeout_secs` caps each replayed session so one wedged upstream can't hang a run. Cost: a replay is a real upstream call billed to the surface and metered against its usage limits, so `eval_max_run_cost_usd` caps the provider spend one run may consume before it stops part-way (null = no appliance ceiling; a surface's Drift Harness can override it). Retention: `max_runs_per_surface` / `max_sessions_per_surface` cap how many run-history entries / captured indicative sessions are kept per surface (enforced on write); `max_run_age_days` / `max_session_age_days` optionally drop records older than N days (null = no age limit; enforced on write and by a periodic sweep so idle surfaces are pruned too).",
+  "drift": {
+    "eval_max_consecutive_failures": 3,
+    "eval_session_timeout_secs": 30,
+    "eval_max_run_cost_usd": 5.0,
+    "max_runs_per_surface": 50,
+    "max_sessions_per_surface": 200,
+    "max_run_age_days": null,
+    "max_session_age_days": null
+  }
+}

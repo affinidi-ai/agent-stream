@@ -1,0 +1,46 @@
+[advisories]
+# Advisories to ignore (assessed as acceptable risk for this project).
+# Each entry requires a reason comment above it.
+ignore = [
+    # owning_ref 0.4.1 — Multiple soundness issues (no fix available)
+    # Transitive via: json-ld-context-processing → json-ld → ssi
+    "RUSTSEC-2022-0040",
+
+    # rsa 0.6.1 / 0.9.10 — Marvin Attack timing sidechannel (no fix available)
+    # 0.6.1 transitive via: ssi-jwk → ssi
+    # 0.9.10 transitive via: jsonwebtoken, openidconnect, reqsign
+    "RUSTSEC-2023-0071",
+
+    # quick-xml ≤0.40 — Quadratic run time when checking a start tag for duplicate
+    # attribute names. Severity 7.5 (high). Fix requires ≥0.41.0. Our own
+    # dependency (and samael's, since 0.0.22) is now 0.41; the remaining ≤0.40
+    # instance in the lockfile is reqsign-aws-v4's, which still pins <0.39.
+    # SAML — the only path that parses attacker-supplied XML — is on 0.41.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0194
+    "RUSTSEC-2026-0194",
+
+    # quick-xml ≤0.40 — Unbounded namespace-declaration allocation in NsReader
+    # enables memory-exhaustion denial of service. Severity 7.5 (high).
+    # Same root cause as RUSTSEC-2026-0194; blocked on the same reqsign pin.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0195
+    "RUSTSEC-2026-0195",
+
+    # rkyv 0.7.46 — Archive validation can cause out-of-bounds reads.
+    # Present only as rust_decimal's optional rkyv dependency in Cargo.lock; the
+    # active dependency graph does not enable rust_decimal's rkyv feature.
+    # cargo-audit scans lockfile entries regardless of feature activation.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0235
+    "RUSTSEC-2026-0235",
+
+    # crypto-bigint 0.3.2 / 0.5.5 — Timing variability in operations intended to
+    # be constant-time. Fixed only in ≥0.7.6; there is no fix in the 0.3 or 0.5
+    # lines. The 0.7 instance is on 0.7.10.
+    # 0.5.5 transitive via: elliptic-curve 0.13 → affinidi-crypto (affinidi-tdk-common,
+    # didwebvh-rs, affinidi-did-common)
+    # 0.3.2 transitive via: der 0.5 → rsa 0.6.1 → ssi-jwk → ssi
+    # Remove once those crates move to elliptic-curve ≥0.14 and rsa ≥0.9.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0387
+    "RUSTSEC-2026-0387",
+
+]
+informational_warnings = ["unmaintained", "unsound", "notice"]

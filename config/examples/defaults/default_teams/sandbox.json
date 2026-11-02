@@ -1,0 +1,10 @@
+{
+  "id": "sandbox",
+  "name": "Sandbox",
+  "description": "Built-in team for sandbox (Test) executions. Aggregates test usage separately from anonymous/live traffic so the dashboard totals reconcile.",
+  "status": "enabled",
+  "system": true,
+  "members": ["sandbox"],
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-01T00:00:00Z"
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://fabric.affinidi.io/schemas/pipe-template/v1.json",
+  "id": "builtin-blank-ide-surface",
+  "name": "Blank IDE Surface",
+  "kind": "full",
+  "description": "An empty IDE model catalogue. Add LLM Surfaces on the canvas.",
+  "details": "Starts you on the canvas with the Access Point and Catalogue spine only. Drag on an LLM Surface member for each model you want to publish to IDE clients, set a route on the Access Point, then Save.",
+  "starter_hint": "We've started you with an empty IDE catalogue. Drag on an LLM Surface for each model you want to publish, set a route on the Access Point, then click Save.",
+  "icon": "laptop-code",
+  "tags": [
+    "ide",
+    "starter",
+    "blank"
+  ],
+  "author": "system",
+  "builtin": true,
+  "sort_priority": 10,
+  "pipe": {
+    "pipe_type": {
+      "type": "ide_catalog",
+      "config": {
+        "members": []
+      }
+    }
+  }
+}

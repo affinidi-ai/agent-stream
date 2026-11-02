@@ -1,0 +1,76 @@
+{
+  "$schema": "https://fabric.affinidi.io/schemas/pipe-template/v1.json",
+  "id": "builtin-multi-provider-llm-surface",
+  "name": "Multi-Provider LLM Surface",
+  "description": "An LLM Surface with upstream variants for OpenAI and Anthropic, addressed by $alias.",
+  "details": "A full Surface snapshot wired to OpenAI GPT-4o as the base upstream, plus two alias-addressed upstream variants (OpenAI and Anthropic). Attach the relevant API key secrets on each upstream, set a route on the Caller node, then Save. Call the base at your route, or a variant at /route$openai and /route$anthropic.",
+  "starter_hint": "We've pre-wired a base OpenAI upstream plus two upstream variants. Open the Variants widget (top-left of the canvas) to attach each provider's API key secret, set a route on the Caller node, then click Save.",
+  "icon": "code-branch",
+  "tags": [
+    "llm",
+    "variants",
+    "starter",
+    "full"
+  ],
+  "author": "system",
+  "builtin": true,
+  "kind": "full",
+  "sort_priority": 30,
+  "items": [],
+  "pipe": {
+    "name": "$SURFACE_NAME",
+    "description": "Multi-provider LLM Surface with upstream variants",
+    "enabled": true,
+    "route": "$SURFACE_ROUTE",
+    "provider": "openai",
+    "model": "gpt-4o",
+    "endpoint_url": "/chat/completions",
+    "api_key_secret_id": "",
+    "model_parameters": {},
+    "rate_limit_enabled": false,
+    "requests_per_minute": 60,
+    "tokens_per_minute": 100000,
+    "cost_tracking_enabled": true,
+    "input_price_per_1k": 0,
+    "output_price_per_1k": 0,
+    "override_policy": {},
+    "prompt_guard": null,
+    "judge": null,
+    "jury": null,
+    "variants": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "alias": "openai",
+        "name": "OpenAI GPT-4o",
+        "enabled": true,
+        "overrides": {
+          "pipe_type": {
+            "type": "llm",
+            "provider": {
+              "provider_type": "openai",
+              "model": "gpt-4o"
+            },
+            "endpoint_path": "/chat/completions"
+          }
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "alias": "anthropic",
+        "name": "Anthropic Claude",
+        "enabled": true,
+        "overrides": {
+          "pipe_type": {
+            "type": "llm",
+            "provider": {
+              "provider_type": "anthropic",
+              "model": "claude-3-5-sonnet-20241022"
+            },
+            "endpoint_path": "/v1/messages"
+          }
+        }
+      }
+    ],
+    "default_variant_id": "00000000-0000-4000-8000-000000000001"
+  }
+}

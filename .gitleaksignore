@@ -1,0 +1,53 @@
+# .gitleaksignore — verified false-positive suppressions
+#
+# Every entry below was reviewed and is test or documentation material, never a
+# production secret. Fingerprints match `gitleaks dir` output, run from the
+# repository root. Format is <file>:<rule>:<line>; re-verify after code moves.
+
+# --- Test key pairs (generated for unit tests, not production keys) ---
+# The JWKS and signature fixtures depend on each key's fixed public component,
+# so the keys are kept in source rather than generated at runtime.
+src/jwt_bearer/validator.rs:private-key:275
+src/source_auth/middleware.rs:private-key:1015
+
+# --- Test master keys for encryption at rest ---
+src/encryption/init.rs:generic-api-key:93
+src/encryption/key_management.rs:generic-api-key:377
+src/encryption/serde_encrypted.rs:generic-api-key:390
+# The name of an environment variable that must not exist, not a key.
+src/storage/filesystem.rs:generic-api-key:3978
+
+# --- Redaction test fixtures: inputs must look like secrets ---
+# The log redactor tests feed fake JWTs, a truncated PEM key, a test did:key and
+# a fake API key through the redaction rules to prove they are masked.
+src/observability/log_redact.rs:jwt:289
+src/observability/log_redact.rs:jwt:532
+src/observability/log_redact.rs:private-key:630
+src/observability/log_redact.rs:generic-api-key:777
+src/observability/log_redact.rs:generic-api-key:803
+
+# --- Public example identifiers and references ---
+# did:key identifiers used as test fixtures and in doc-comment examples.
+src/identity/filesystem.rs:generic-api-key:519
+src/identity/handlers/credentials.rs:generic-api-key:1680
+www/default/src/utils/stringUtils.ts:generic-api-key:1100
+www/default/src/utils/stringUtils.ts:generic-api-key:1101
+www/default/src/utils/__tests__/stringUtils.test.ts:generic-api-key:68
+www/default/src/utils/__tests__/stringUtils.test.ts:generic-api-key:69
+# Secret reference ids in test fixtures; they name a secret, they do not hold one.
+src/pipes/config.rs:generic-api-key:2175
+src/secrets/mod.rs:generic-api-key:530
+
+# --- Integration signing_secret test fixtures ---
+# Webhook signing secrets in integration storage and handler tests; fake values.
+src/storage/integration_credentials.rs:generic-api-key:1450
+src/storage/integration_credentials.rs:generic-api-key:1658
+src/storage/integration_handlers.rs:generic-api-key:1211
+src/storage/integration_handlers.rs:generic-api-key:1424
+src/storage/integration_trigger_handlers.rs:generic-api-key:850
+
+# --- Test-only tokens and detection code ---
+# The appliance testkit's documented test-auth token, accepted by debug builds only.
+tests/appliance/README.md:curl-auth-header:483
+# The certificate upload form checks for a PEM private-key header to reject it.
+www/default/src/pages/EditCertificatePage.tsx:private-key:227

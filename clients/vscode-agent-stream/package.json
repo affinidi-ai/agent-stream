@@ -1,0 +1,179 @@
+{
+  "name": "agent-stream-vscode",
+  "displayName": "Agent Stream Connector",
+  "description": "Use an Affinidi Agent Stream IDE Surface as a Copilot Chat model provider (Ask, Edit, Agent, and Plan modes), authenticated per-user with your corporate Microsoft Entra ID (Azure AD) sign-in. Usage, budgets, quotas, and OPA group policies are enforced centrally by Agent Stream.",
+  "version": "0.4.4",
+  "publisher": "affinidi",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguageModelChat:agent-stream"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "agent-stream",
+        "displayName": "Agent Stream",
+        "managementCommand": "agent-stream.signIn"
+      }
+    ],
+    "commands": [
+      {
+        "command": "agent-stream.signIn",
+        "title": "Agent Stream: Sign in with Microsoft Entra ID",
+        "category": "Agent Stream"
+      },
+      {
+        "command": "agent-stream.signOut",
+        "title": "Agent Stream: Sign out",
+        "category": "Agent Stream"
+      },
+      {
+        "command": "agent-stream.showLogs",
+        "title": "Agent Stream: Show Logs",
+        "category": "Agent Stream"
+      },
+      {
+        "command": "agent-stream.refreshModels",
+        "title": "Agent Stream: Refresh Models",
+        "category": "Agent Stream"
+      }
+    ],
+    "configuration": [
+      {
+        "title": "Affinidi Trust Fabric - Agent Stream",
+        "order": 1,
+        "properties": {
+          "agentStream.endpoint": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "markdownDescription": "Base URL of the Agent Stream **IDE Surface Access Point**, e.g. `https://gateway.example.com/ide`. **This is the only setting you need.** The extension pulls everything else (sign-in tenant/client/scopes and the discovery/dispatch paths) from the surface's public bootstrap document (`GET {endpoint}/.well-known/agent-stream`), so central changes on the surface reconfigure every client automatically. Workspace settings are ignored for this trust-boundary setting.",
+            "order": 1
+          }
+        }
+      },
+      {
+        "title": "Agent Stream: Optional overrides",
+        "order": 2,
+        "properties": {
+          "agentStream.modelsPath": {
+            "type": "string",
+            "default": "/v1/models",
+            "scope": "machine",
+            "markdownDescription": "**Optional override** — leave blank unless overriding. The model-discovery path is auto-filled from the surface bootstrap; set this only if your surface exposes a non-standard path. Workspace settings are ignored for this trust-boundary setting.",
+            "order": 1
+          },
+          "agentStream.chatPath": {
+            "type": "string",
+            "default": "/v1/chat/completions",
+            "scope": "machine",
+            "markdownDescription": "**Optional override** — leave blank unless overriding. The chat-completions path is auto-filled from the surface bootstrap; set this only if your surface exposes a non-standard path. Workspace settings are ignored for this trust-boundary setting.",
+            "order": 2
+          },
+          "agentStream.allowLocalEndpoints": {
+            "type": "boolean",
+            "default": false,
+            "scope": "machine",
+            "markdownDescription": "Allow local-development Agent Stream endpoints such as `http://localhost:8080`. Keep disabled for production; cloud metadata endpoints and embedded credentials are still blocked.",
+            "order": 3
+          },
+          "agentStream.models": {
+            "type": "array",
+            "default": [
+              {
+                "id": "gpt-4o",
+                "name": "Agent Stream (SSO)"
+              }
+            ],
+            "scope": "machine",
+            "markdownDescription": "**Optional fallback** — normally ignored. Used only when dynamic discovery from the IDE Surface Access Point is unavailable (Access Point unreachable or returns no models). When discovery succeeds the picker shows the surface's published models and this list is ignored. Each entry is a distinct pickable model. `id` is the VS Code model identity (must be unique). Use `alias` to route an entry to a specific surface **variant** (`{endpoint}$alias/...`) and/or `endpoint` to point it at a different surface. Workspace settings are ignored for this trust-boundary setting.",
+            "items": {
+              "type": "object",
+              "required": [
+                "id"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Unique VS Code model identity for this picker entry."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Display name in the model picker."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "OpenAI `model` string sent to the surface. Defaults to `id`. Ignored when the surface pins the model (override policy GatewayWins)."
+                },
+                "alias": {
+                  "type": "string",
+                  "description": "Surface variant alias to address (`{endpoint}$alias/...`). Omit to hit the base surface."
+                },
+                "endpoint": {
+                  "type": "string",
+                  "description": "Per-model surface URL override. Defaults to `agentStream.endpoint`."
+                },
+                "maxInputTokens": {
+                  "type": "number",
+                  "description": "Context window size hint (defaults to 128000)."
+                },
+                "maxOutputTokens": {
+                  "type": "number",
+                  "description": "Max output tokens hint (defaults to 8192)."
+                }
+              }
+            },
+            "order": 4
+          },
+          "agentStream.entra.tenantId": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "markdownDescription": "**Optional override** — leave blank unless overriding. The Microsoft Entra ID **tenant ID** (GUID or domain) is auto-filled from the surface bootstrap; set this only to override it per-user. Sent as the `VSCODE_TENANT:` scope modifier so tokens target your tenant. Workspace settings are ignored for this trust-boundary setting.",
+            "order": 5
+          },
+          "agentStream.entra.clientId": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "markdownDescription": "**Optional override** — leave blank unless overriding. The **client ID** of the Entra app registration used to acquire the token is auto-filled from the surface bootstrap; set this only to override it per-user. Sent as the `VSCODE_CLIENT_ID:` scope modifier. Workspace settings are ignored for this trust-boundary setting.",
+            "order": 6
+          },
+          "agentStream.entra.scopes": {
+            "type": "array",
+            "default": [],
+            "scope": "machine",
+            "items": {
+              "type": "string"
+            },
+            "markdownDescription": "**Optional override** — leave blank unless overriding. The OAuth scopes (e.g. `[\"api://<api-app-id>/access_as_user\"]`) are auto-filled from the surface bootstrap; set this only to override per-user. The token's `aud` must match the audience configured on the Agent Stream JWT verification strategy. Workspace settings are ignored for this trust-boundary setting.",
+            "order": 7
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc -p ./ --noEmit",
+    "test": "npm run compile && node --test out/*.test.js",
+    "package": "npm run compile && npx --yes @vscode/vsce package --allow-missing-repository --no-dependencies -o agent-stream-vscode.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.104.0",
+    "typescript": "^5.5.0"
+  }
+}

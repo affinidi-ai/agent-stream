@@ -1,0 +1,15 @@
+{
+  "id": "anonymous",
+  "name": "Anonymous",
+  "description": "Built-in fallback identity for callers that can't be matched to a real member. Disable to require recognised callers.",
+  "status": "enabled",
+  "system": true,
+  "identifiers": [
+    {
+      "kind": "custom",
+      "value": "anonymous"
+    }
+  ],
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-01T00:00:00Z"
+}

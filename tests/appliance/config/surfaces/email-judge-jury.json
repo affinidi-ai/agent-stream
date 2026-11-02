@@ -1,0 +1,9 @@
+{
+  "key": "email-judge-jury",
+  "description": "Full pipeline: judge + 2-juror jury, caller identified by email header.",
+  "identity": "email",
+  "route": "/llm/email-judge-jury",
+  "model": "mock-large",
+  "judge": true,
+  "jurors": 2
+}

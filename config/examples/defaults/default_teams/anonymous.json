@@ -1,0 +1,10 @@
+{
+  "id": "anonymous",
+  "name": "Anonymous",
+  "description": "Built-in fallback team for callers not assigned to any other team. Disable to require explicit team membership.",
+  "status": "enabled",
+  "system": true,
+  "members": ["anonymous"],
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-01T00:00:00Z"
+}

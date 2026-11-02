@@ -1,0 +1,31 @@
+# BuildKit reads this file instead of the root .dockerignore when building
+# tests/appliance/Dockerfile. The root file excludes tests/, which this image
+# needs for cargo-chef and the managed fixtures.
+.git
+.github
+target/
+_storage/
+test_results/
+docs/
+envs/
+envs.copy/
+ui-tests/
+clients/
+tools/
+www/
+**/node_modules/
+tests/appliance/results/
+tests/appliance/_storage/
+tests/appliance/_volatile/
+tests/appliance/_backup_restore/
+.env
+.env.*
+*.log
+tmp/
+*.md
+.vscode/
+.idea/
+.DS_Store
+*.pem
+*.key
+.cache

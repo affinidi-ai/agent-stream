@@ -1,0 +1,227 @@
+# Agent Stream Bootstrap Configuration
+
+# Compatibility setting for the surface configuration source
+channel_config_source = "local"
+
+# AWS Region (optional)
+# If not specified, uses the default region from AWS credential chain
+aws_region = "ap-southeast-1"
+
+# Secrets backend type: "filesystem" or "aws"
+secrets_backend = "filesystem"
+
+# Authentication mode (passkey or saml)
+# Options: "passkey" or "saml"
+auth_mode = "passkey"
+
+# Session timeout in minutes (applies to both passkey and SAML)
+session_timeout_minutes = 20
+
+# Require authentication for WebSocket connections (default: true)
+# When enabled, users must authenticate with a valid passkey session before connecting to WebSocket
+websocket_require_auth = true
+
+# WebSocket broadcast channel buffer size (default: 500)
+# Increase for high-traffic deployments to prevent message loss
+# Each buffered message uses ~8KB memory
+websocket_broadcast_buffer = 500
+
+# How long to keep metrics in minutes (default: 360 = 6 hours, max: 10080 = 7 days)
+# This value is overridden by settings stored in _storage/settings/settings.json
+metrics_retention_minutes = 360
+
+# Cache TTL for metrics aggregations in seconds (default: 1)
+# Lower values provide more real-time updates but increase CPU usage
+# Higher values reduce CPU usage but make dashboard updates less frequent
+metrics_cache_ttl_seconds = 1
+
+# Marketplace catalog cache TTL in seconds (default: 300 = 5 minutes)
+# How long marketplace model data from connected gateways is cached before re-querying
+marketplace_cache_ttl = 300
+
+# Backup encryption key (BEK) — resolves to a 64-char hex (32-byte AES-256) key.
+# NOTE: this is a TOP-LEVEL key. Do NOT place it under [encryption] (it would be
+# silently ignored). Protects archives created via the backup/restore API.
+# Backup and encrypted restore fail closed unless an explicit key is configured,
+# regardless of the encryption-at-rest key source. Runtime environment injection
+# is recommended; file://path and a literal hex key are also supported.
+backup_encryption_key = "env://AS_BACKUP_ENCRYPTION_KEY"
+
+# Reconnect policy for connection-point DIDComm links.
+# A dropped/failed mediator connection is retried with exponential backoff up to
+# max_backoff_seconds, then at that fixed cadence (e.g. 30s -> 60s -> ... -> 1800s).
+[reconnect_policy]
+# Initial backoff after the first failed attempt, in seconds. #default: 30
+initial_backoff_seconds = 30
+# Cap on the backoff; also the fixed retry cadence once reached. #default: 1800
+max_backoff_seconds = 1800
+# Multiplier applied after each failure. <= 1.0 disables growth. #default: 2.0
+backoff_multiplier = 2.0
+
+# Encryption at rest. Required choice: startup fails unless this table either sets
+# enabled = true or explicitly sets allow_unencrypted = true.
+[encryption]
+# Master switch: when enabled, whole JSON storage files on disk are written
+# encrypted (.json.enc) and the encryption layers are loaded at boot.
+enabled = false
+# The testkit supplies no master key, so it opts out explicitly.
+allow_unencrypted = true
+# Master key source: "environment", "file", or "aws_kms".
+key_source = "environment"
+# For key_source = "environment": env var holding the 32-byte master key
+# (hex or base64). Not used by the other sources.
+key_env_var = "AS_MASTER_KEY"
+# For key_source = "file": path to the master key file.
+# key_file = "certs/master.key"
+# For key_source = "aws_kms": per-value envelope encryption. Set kms_key_id (a KMS
+# key id or ARN); every value is sealed with a fresh KMS data key (GenerateDataKey
+# per write, Decrypt per read) and stored as ENC[2:...]. key_env_var/key_file are
+# unused. IAM needs kms:GenerateDataKey + kms:Decrypt on the CMK. Also set the
+# required top-level backup_encryption_key (see above).
+# kms_key_id = "<kms-key-arn>"
+# Bound the number of in-flight KMS operations (optional, default 16).
+# kms_max_concurrent_ops = 16
+# When true, sensitive fields are additionally sealed as ENC[...] inside the JSON
+# document (rather than only whole-file encryption).
+field_encryption_enabled = false
+
+# Configuration file paths
+[config_files]
+agent_stream = "agent-stream.json"
+metrics = "metrics.json"
+rbac = "rbac.json"
+limits = "limits.json"
+llm = "llm.json"
+saml = "saml.json"
+prompt_guard = "prompt-guard.json"
+marketplace_models = "marketplace-models.json"
+rejection_taxonomy = "rejection_categories.json"
+# Catalog of pre-generated voice clips (id -> text/label) the realtime relay can
+# stream to a caller while a reply is being vetted (Gated voice safety). The clip
+# WAV bytes live under storage_paths.audio_streams.
+audio_streams = "audio_streams.json"
+# Storage paths
+[storage_paths]
+config_cache = "../_storage/cache"
+settings = "../_storage/settings"
+notifications = "../_storage/notifications/messages"
+notification_templates = "../_storage/notifications/templates"
+connection_points = "../_storage/connection_points"
+secrets = "../_storage/secrets"
+apikeys = "../_storage/apikeys"
+certificates = "../_storage/certificates"
+surfaces = "../_storage/surfaces"
+surface_templates = "../_storage/surface_templates"
+llm_configuration = "../_storage/llm_configuration"
+integrations = "../_storage/integrations/definitions"
+integration_triggers = "../_storage/integrations/triggers"
+webhooks = "../_storage/webhooks"
+vc_keys = "../_storage/vc_keys"
+system_metrics = "../_storage/system_metrics"
+passkeys = "../_storage/passkeys"
+avatars = "../_storage/avatars"
+identities = "../_storage/identities"
+gateways = "../_storage/gateways"
+mediators = "../_storage/mediators"
+messages = "../_storage/messages"
+sessions = "../_storage/sessions"
+marketplace_models = "../_storage/marketplace_models"
+policy_definitions = "../_storage/policies"
+credential_providers = "../_storage/credential_providers"
+delegation_vault = "../_storage/delegation_vault"
+# Content-addressed store for binary attachments (audio, documents, images) a
+# caller sends. Governance records reference each blob by its SHA-256; the bytes
+# live here (encrypted at rest) so a record can be verified against them later.
+multimedia_store = "../_storage/multimedia_store"
+# Shared store of short pre-generated WAV voice clips (PCM16 / 24 kHz / mono) the
+# realtime relay streams during a Gated voice-safety pause. Catalogued by the
+# config_files.audio_streams file.
+audio_streams = "../_storage/audio_streams"
+backup_restore = "../_backup_restore"
+members = "../_storage/members"
+teams = "../_storage/teams"
+default_members = "defaults/default_members"
+default_teams = "defaults/default_teams"
+member_provisioning = "../_storage/enrolment"
+metrics = "../_volatile/usage/metrics"
+team_usage = "../_volatile/usage/team_usage"
+surface_usage = "../_volatile/usage/surface_usage"
+telemetry = "../_volatile/timeseries/telemetry"
+ops_telemetry = "../_volatile/timeseries/ops_telemetry"
+drift = "../_volatile/timeseries/drift"
+drift_baselines = "../_storage/drift_baselines"
+drift_runs = "../_storage/drift_runs"
+drift_sessions = "../_storage/drift_sessions"
+drift_eval_state = "../_storage/drift_eval_state"
+
+# LLM drift alert-cadence defaults. A per-surface Drift Harness can override
+# these. Governs how often a `drift.detected` alert re-fires while a surface
+# stays drifting, and the max alerts per baseline.
+[drift]
+# Minutes between re-alerts while a surface stays drifting. #default: 60
+re_alert_interval_mins = 60
+# Max drift alerts fired per surface per baseline (0 = unlimited). #default: 5
+max_alerts = 5
+
+# DID Document Cache Configuration
+# Caches DID documents for resilient gateway communication and reduced CPU usage
+# The cache operates at two levels:
+# 1. Application cache: Persistent storage with configurable TTL
+# 2. SDK cache: Session-level cache (100 entries, 1h TTL) for redundant resolution elimination
+[did_cache]
+# Time-to-live for cache entries in seconds (default: 3600 = 1 hour)
+# Longer TTL = fewer network resolutions = lower CPU usage
+# Note: DID documents are pre-warmed on startup for all active gateways/connection points
+ttl_seconds = 86400
+# Maximum number of cached DID documents (default: 1000)
+max_entries = 1000
+# Percentage of TTL after which entries are considered stale and should be refreshed (default: 80%)
+stale_threshold_percent = 80
+# Path to store cached DID documents (persisted as JSON files)
+storage_path = "../_storage/cache/did"
+
+# TLS Configuration (required)
+[tls]
+cert_path = "certs/cert.pem"
+key_path = "certs/key.pem"
+verify_upstream = true
+
+[tls.client_auth]
+direct = "disabled"
+trusted_proxies = ["172.16.0.0/12"]
+
+[tls.client_auth.forwarded_header]
+header_name = "x-forwarded-client-cert"
+format = "url_encoded_pem"
+
+# Fabric gateway request timeout in milliseconds (how long GW1 waits for GW2)
+fabric_gateway_timeout_ms = 60000  # 60 seconds
+# Message expiration time in seconds (DIDComm message TTL). MUST be strictly
+# greater than `fabric_gateway_timeout_ms / 1000` so that in-flight messages
+# don't silently expire at the mediator before GW1 has given up waiting.
+message_expires_seconds = 90  # Messages expire after 90 seconds
+# Maximum number of fabric forward-requests that may be processed
+# concurrently on GW2 per WS listener. Higher values increase throughput on
+# bursty fabric load at the cost of more concurrent upstream HTTP requests.
+max_inflight_dispatches = 256
+# SDK inbound message-pickup cache size (count + bytes). The upstream
+# defaults (100 messages / 10 MiB) cause the WS handler to stop reading the
+# mediator socket once the cache fills, which cascades into mediator
+# backpressure and the looping-timeout failure pattern observed under fabric
+# load. Raise these for production deployments.
+sdk_inbound_cache_count = 1024
+sdk_inbound_cache_bytes = 104857600  # 100 MiB
+
+# Logging Configuration (optional)
+[logging]
+level = "info"  # trace, debug, info, warn, error
+json = false    # Set to true for JSON-formatted logs
+log_directory = "../_storage/logs"  # Directory to write log files (logs to stdout only if not set)
+
+# Extension Inspection Configuration (optional)
+[extension_inspection]
+# Enable inspection of A2A extensions
+# When enabled, the proxy will parse the 'a2a-extensions' header and display
+# the contents of any extensions that match the watch list below
+enabled = true
+

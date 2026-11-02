@@ -1,0 +1,9 @@
+{
+  "key": "email-plain",
+  "description": "Plain LLM surface, caller identified by email header. No judge/jury.",
+  "identity": "email",
+  "route": "/llm/email-plain",
+  "model": "mock-small",
+  "judge": false,
+  "jurors": 0
+}

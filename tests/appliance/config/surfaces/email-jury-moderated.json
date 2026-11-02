@@ -1,0 +1,10 @@
+{
+  "key": "email-jury-moderated",
+  "description": "Moderated jury surface (response-side). Bad prompts run the main LLM, then the jury rejects the flagged response, recorded under the jury rejection stage.",
+  "identity": "email",
+  "route": "/llm/email-jury-moderated",
+  "model": "mock-large",
+  "judge": false,
+  "jurors": 2,
+  "moderated": true
+}

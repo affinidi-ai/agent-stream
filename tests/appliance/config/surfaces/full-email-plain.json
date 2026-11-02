@@ -1,0 +1,26 @@
+{
+  "id": "tk-full-email",
+  "name": "Testkit full-config email surface",
+  "description": "Example of a FULL PipeConfig authored verbatim (has pipe_type). The runner posts it to /v1/pipes as-is after substituting ${...} placeholders. Use ${MOCK_URL} for the mock base URL, ${JWT_STRATEGY_ID} for a jwt_bearer source_auth, and ${APIKEY_AGENT_ID} for an api_key_provider source_auth. This one is email-flavored (no source auth; caller identified by the X-Caller-Email header). It targets the Mock LLM 'mock_llm' custom-catalog provider (api_schema openai), so the model id lives in provider.model and the base URL in provider.base_url.",
+  "pipe_type": {
+    "type": "llm",
+    "provider": {
+      "provider_type": "mock_llm",
+      "model": "mock-small",
+      "base_url": "${MOCK_URL}"
+    }
+  },
+  "route": "/llm/full-email",
+  "cost_tracking": { "enabled": true },
+  "team_attribution": {
+    "enabled": true,
+    "caller_email_source": { "type": "header", "name": "X-Caller-Email" },
+    "enforce": true,
+    "allow_individual_overage": false,
+    "allowed_teams": []
+  },
+  "enable_metrics": true,
+  "metrics_enabled": true,
+  "log_requests": false,
+  "log_responses": false
+}

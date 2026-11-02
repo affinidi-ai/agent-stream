@@ -1,0 +1,22 @@
+{
+  "id": "quickstart-mock-llm",
+  "name": "Quickstart (mock LLM)",
+  "description": "Routes /llm/quickstart to the mock OpenAI-protocol model server started by docker-compose.yml. Replace the provider with a real one, or delete this surface.",
+  "pipe_type": {
+    "type": "llm",
+    "provider": {
+      "provider_type": "ollama",
+      "model": "mock-small",
+      "base_url": "http://mock-llm:9000"
+    }
+  },
+  "route": "/llm/quickstart",
+  "cost_tracking": {
+    "enabled": true
+  },
+  "enable_metrics": true,
+  "metrics_enabled": true,
+  "log_requests": false,
+  "log_responses": false,
+  "created_at": "2026-01-01T00:00:00Z"
+}

@@ -1,0 +1,4566 @@
+{
+  "providers": [
+    {
+      "name": "Microsoft 365 Copilot",
+      "enum_value": "m365_copilot",
+      "default_base_url": "https://graph.microsoft.com",
+      "api_version_prefix": "/beta",
+      "api_schema": "copilot",
+      "enabled": true,
+      "api_key_label": "Not required — uses the caller's delegated Entra token",
+      "api_key_validation": "none",
+      "requires_forward_caller_token": true,
+      "endpoints": [
+        {
+          "name": "Chat",
+          "path": "/copilot/conversations",
+          "description": "Microsoft 365 Copilot Chat API — answers grounded on the signed-in user's M365 content (OneDrive, SharePoint, mail, calendar) under their own ACLs. Requires a per-user Microsoft 365 Copilot license and identity pass-through (forward the caller's Entra token).",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ]
+        }
+      ],
+      "models": [
+        {
+          "name": "Microsoft 365 Copilot",
+          "value": "copilot",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "name": "OpenAI",
+      "enum_value": "openai",
+      "default_base_url": "https://api.openai.com",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "Primary endpoint for GPT-5 and o-series models",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": [
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "string",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does. Supported levels vary by model.",
+              "applies_to_models": [
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.4-nano",
+                "gpt-5.1",
+                "gpt-5",
+                "gpt-5-mini",
+                "o3",
+                "o4-mini"
+              ]
+            },
+            {
+              "name": "tool_choice",
+              "label": "Tool Choice",
+              "type": "select",
+              "default": "auto",
+              "options": [
+                "none",
+                "auto",
+                "required"
+              ],
+              "description": "Controls whether the model calls tools. 'none' disables tools, 'auto' lets the model decide, 'required' forces a tool call.",
+              "applies_to_models": [
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.4-nano",
+                "gpt-5.1",
+                "gpt-5",
+                "gpt-5-mini",
+                "o3",
+                "o4-mini"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Content Moderation",
+          "path": "/moderations",
+          "description": "Check if content complies with safety guidelines",
+          "capabilities": [
+            "content_moderation"
+          ],
+          "moderation_models": [
+            {
+              "name": "Omni Moderation (Latest)",
+              "value": "omni-moderation-latest"
+            },
+            {
+              "name": "Omni Moderation (2024-09-26)",
+              "value": "omni-moderation-2024-09-26"
+            },
+            {
+              "name": "Text Moderation (Latest)",
+              "value": "text-moderation-latest"
+            },
+            {
+              "name": "Text Moderation (Stable)",
+              "value": "text-moderation-stable"
+            }
+          ],
+          "moderation_categories": [
+            {
+              "name": "sexual",
+              "description": "Content meant to arouse sexual excitement"
+            },
+            {
+              "name": "sexual/minors",
+              "description": "Sexual content involving individuals under 18"
+            },
+            {
+              "name": "harassment",
+              "description": "Content that harasses, intimidates, or bullies"
+            },
+            {
+              "name": "harassment/threatening",
+              "description": "Harassment content with threats of violence or serious harm"
+            },
+            {
+              "name": "hate",
+              "description": "Content promoting hatred based on protected characteristics"
+            },
+            {
+              "name": "hate/threatening",
+              "description": "Hateful content with threats of violence or serious harm"
+            },
+            {
+              "name": "illicit",
+              "description": "Content related to illegal activities"
+            },
+            {
+              "name": "illicit/violent",
+              "description": "Content related to violent illegal activities"
+            },
+            {
+              "name": "self-harm",
+              "description": "Content promoting or depicting self-harm"
+            },
+            {
+              "name": "self-harm/intent",
+              "description": "Content expressing intent to self-harm"
+            },
+            {
+              "name": "self-harm/instructions",
+              "description": "Instructions for self-harm"
+            },
+            {
+              "name": "violence",
+              "description": "Content depicting violence or physical harm"
+            },
+            {
+              "name": "violence/graphic",
+              "description": "Graphic depictions of violence or gore"
+            }
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "icon": "fa-brain",
+      "description": "GPT-5.5, GPT-5.4, GPT-5, o3, o4-mini and more from OpenAI",
+      "hero": {
+        "logo_path": "/images/llm-providers/openai.svg",
+        "width": "",
+        "height": ""
+      },
+      "api_key_label": "OpenAI API Key",
+      "api_key_validation": "mandatory",
+      "filter_tag": "openai",
+      "models": [
+        {
+          "name": "GPT-5.5",
+          "value": "gpt-5.5",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.005,
+          "cost_per_1k_output": 0.03,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-5.4",
+          "value": "gpt-5.4",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.0025,
+          "cost_per_1k_output": 0.015,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-5.4 Mini",
+          "value": "gpt-5.4-mini",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.00075,
+          "cost_per_1k_output": 0.0045,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-5.4 Nano",
+          "value": "gpt-5.4-nano",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.0002,
+          "cost_per_1k_output": 0.00125,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 500000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-5.1",
+          "value": "gpt-5.1",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.00125,
+          "cost_per_1k_output": 0.01,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-5",
+          "value": "gpt-5",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.00125,
+          "cost_per_1k_output": 0.01,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "minimal",
+                "low",
+                "medium",
+                "high"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-5 Mini",
+          "value": "gpt-5-mini",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.00025,
+          "cost_per_1k_output": 0.002,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "minimal",
+                "low",
+                "medium",
+                "high"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 500000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "o3",
+          "value": "o3",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.002,
+          "cost_per_1k_output": 0.008,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 100000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 500,
+              "default": 60
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 150000,
+              "default": 90000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "o4-mini",
+          "value": "o4-mini",
+          "request_profile": {
+            "reasoning": true
+          },
+          "cost_per_1k_input": 0.0011,
+          "cost_per_1k_output": 0.0044,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 100000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 500000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT Realtime",
+          "value": "gpt-realtime",
+          "cost_per_1k_input": 0.032,
+          "cost_per_1k_output": 0.064,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.8,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 1,
+              "max": 200,
+              "default": 50
+            },
+            "tokens_per_minute": {
+              "min": 1000,
+              "max": 100000,
+              "default": 40000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": false,
+            "supports_audio_input": true,
+            "supports_realtime": true
+          }
+        }
+      ],
+      "api_schema": "openai",
+      "provider_capabilities": [
+        "chat",
+        "embedding",
+        "image_understanding",
+        "audio_transcription",
+        "audio_generation",
+        "moderation"
+      ]
+    },
+    {
+      "name": "Anthropic",
+      "enum_value": "anthropic",
+      "default_base_url": "https://api.anthropic.com",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "endpoints": [
+        {
+          "name": "Messages (Claude)",
+          "path": "/messages",
+          "description": "Primary endpoint for Claude 3 models",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": [
+            {
+              "name": "stream",
+              "label": "Stream Response",
+              "type": "boolean",
+              "default": false,
+              "description": "Enable server-sent events streaming",
+              "applies_to_models": []
+            },
+            {
+              "name": "stop_sequences",
+              "label": "Stop Sequences",
+              "type": "array",
+              "default": [],
+              "description": "Custom stop sequences (up to 4)",
+              "applies_to_models": []
+            },
+            {
+              "name": "metadata",
+              "label": "Metadata",
+              "type": "object",
+              "default": {},
+              "description": "Object with user_id for tracking and abuse detection",
+              "applies_to_models": []
+            }
+          ]
+        },
+        {
+          "name": "Messages (Streaming)",
+          "path": "/messages",
+          "description": "Streaming responses for Claude models",
+          "capabilities": [
+            "streaming"
+          ],
+          "endpoint_parameters": [
+            {
+              "name": "stream",
+              "label": "Stream Response",
+              "type": "boolean",
+              "default": true,
+              "description": "Must be true for streaming endpoint",
+              "applies_to_models": []
+            }
+          ]
+        }
+      ],
+      "icon": "fa-robot",
+      "description": "Claude 3 family models with advanced reasoning and extended context windows",
+      "hero": {
+        "logo_path": "/images/llm-providers/anthropic.svg",
+        "width": "140px",
+        "height": ""
+      },
+      "api_key_label": "Anthropic API Key",
+      "filter_tag": "anthropic",
+      "models": [
+        {
+          "enabled": false,
+          "name": "Claude Fable 5",
+          "value": "claude-fable-5",
+          "request_profile": {
+            "unsupported_params": [
+              "temperature"
+            ]
+          },
+          "cost_per_1k_input": 0.01,
+          "cost_per_1k_output": 0.05,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate (up to 128K output, 1M context)"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            },
+            {
+              "name": "top_k",
+              "label": "Top K",
+              "type": "number",
+              "default": 0,
+              "min": 0,
+              "max": 500,
+              "description": "Sample from the k most likely tokens (0 = disabled)"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 5,
+              "max": 500,
+              "default": 50
+            },
+            "tokens_per_minute": {
+              "min": 5000,
+              "max": 100000,
+              "default": 80000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": false
+          }
+        },
+        {
+          "name": "Claude Opus 4.8",
+          "value": "claude-opus-4-8",
+          "request_profile": {
+            "unsupported_params": [
+              "temperature"
+            ]
+          },
+          "cost_per_1k_input": 0.005,
+          "cost_per_1k_output": 0.025,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate (up to 128K output, 1M context)"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            },
+            {
+              "name": "top_k",
+              "label": "Top K",
+              "type": "number",
+              "default": 0,
+              "min": 0,
+              "max": 500,
+              "description": "Sample from the k most likely tokens (0 = disabled)"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 5,
+              "max": 500,
+              "default": 50
+            },
+            "tokens_per_minute": {
+              "min": 5000,
+              "max": 100000,
+              "default": 80000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": false
+          }
+        },
+        {
+          "name": "Claude Sonnet 4.6",
+          "value": "claude-sonnet-4-6",
+          "request_profile": {
+            "unsupported_params": [
+              "temperature"
+            ]
+          },
+          "cost_per_1k_input": 0.003,
+          "cost_per_1k_output": 0.015,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 64000,
+              "description": "Maximum tokens to generate (up to 64K output, 200K context)"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            },
+            {
+              "name": "top_k",
+              "label": "Top K",
+              "type": "number",
+              "default": 0,
+              "min": 0,
+              "max": 500,
+              "description": "Sample from the k most likely tokens (0 = disabled)"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": false
+          }
+        },
+        {
+          "name": "Claude Haiku 4.5",
+          "value": "claude-haiku-4-5",
+          "request_profile": {
+            "unsupported_params": [
+              "temperature"
+            ]
+          },
+          "cost_per_1k_input": 0.001,
+          "cost_per_1k_output": 0.005,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 64000,
+              "description": "Maximum tokens to generate (up to 64K output, 200K context)"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            },
+            {
+              "name": "top_k",
+              "label": "Top K",
+              "type": "number",
+              "default": 0,
+              "min": 0,
+              "max": 500,
+              "description": "Sample from the k most likely tokens (0 = disabled)"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 400000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": false
+          }
+        }
+      ],
+      "api_schema": "anthropic",
+      "provider_capabilities": [
+        "chat",
+        "image_understanding"
+      ]
+    },
+    {
+      "name": "Google Gemini",
+      "enum_value": "gemini",
+      "default_base_url": "https://generativelanguage.googleapis.com",
+      "api_version_prefix": "/v1beta",
+      "enabled": true,
+      "endpoints": [
+        {
+          "name": "Generate Content",
+          "path": "/models/{model}:generateContent",
+          "description": "Primary endpoint for text generation",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": [
+            {
+              "name": "generationConfig",
+              "label": "Generation Config",
+              "type": "object",
+              "default": {},
+              "description": "Complex config object with stopSequences, responseMimeType, responseSchema, candidateCount",
+              "applies_to_models": []
+            },
+            {
+              "name": "safetySettings",
+              "label": "Safety Settings",
+              "type": "array",
+              "default": [],
+              "description": "Configure thresholds for blocking harmful content (HARM_CATEGORY_*, BLOCK_THRESHOLD)",
+              "applies_to_models": []
+            },
+            {
+              "name": "tools",
+              "label": "Tools",
+              "type": "array",
+              "default": [],
+              "description": "Function calling and Google Search grounding",
+              "applies_to_models": []
+            },
+            {
+              "name": "toolConfig",
+              "label": "Tool Config",
+              "type": "object",
+              "default": {},
+              "description": "Configuration for function calling mode (AUTO, ANY, NONE)",
+              "applies_to_models": []
+            },
+            {
+              "name": "responseMimeType",
+              "label": "Response MIME Type",
+              "type": "select",
+              "default": "text/plain",
+              "options": [
+                "text/plain",
+                "application/json"
+              ],
+              "description": "Enforce structured output format (text/plain or application/json)",
+              "applies_to_models": [
+                "gemini-3",
+                "gemini-3-flash"
+              ]
+            },
+            {
+              "name": "responseSchema",
+              "label": "Response Schema",
+              "type": "object",
+              "default": null,
+              "description": "JSON schema for structured output validation",
+              "applies_to_models": [
+                "gemini-3",
+                "gemini-3-flash"
+              ]
+            },
+            {
+              "name": "thinkingLevel",
+              "label": "Thinking Level",
+              "type": "select",
+              "default": null,
+              "options": [
+                "low",
+                "high"
+              ],
+              "description": "Control reasoning depth for Gemini 3 Pro/Flash models",
+              "applies_to_models": [
+                "gemini-3-pro",
+                "gemini-3-flash"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Generate Content (Streaming)",
+          "path": "/models/{model}:streamGenerateContent",
+          "description": "Streaming text generation",
+          "capabilities": [
+            "streaming"
+          ],
+          "endpoint_parameters": [
+            {
+              "name": "generationConfig",
+              "label": "Generation Config",
+              "type": "object",
+              "default": {},
+              "description": "Complex config object with stopSequences, responseMimeType, responseSchema",
+              "applies_to_models": []
+            },
+            {
+              "name": "safetySettings",
+              "label": "Safety Settings",
+              "type": "array",
+              "default": [],
+              "description": "Configure thresholds for blocking harmful content",
+              "applies_to_models": []
+            }
+          ]
+        },
+        {
+          "name": "Embed Content",
+          "path": "/models/{model}:embedContent",
+          "description": "Generate embeddings for text",
+          "capabilities": [
+            "embeddings"
+          ],
+          "endpoint_parameters": [
+            {
+              "name": "taskType",
+              "label": "Task Type",
+              "type": "select",
+              "default": "RETRIEVAL_DOCUMENT",
+              "options": [
+                "RETRIEVAL_QUERY",
+                "RETRIEVAL_DOCUMENT",
+                "SEMANTIC_SIMILARITY",
+                "CLASSIFICATION",
+                "CLUSTERING"
+              ],
+              "description": "Type of embedding task",
+              "applies_to_models": []
+            },
+            {
+              "name": "title",
+              "label": "Document Title",
+              "type": "string",
+              "default": "",
+              "description": "Optional title for RETRIEVAL_DOCUMENT tasks",
+              "applies_to_models": []
+            }
+          ]
+        },
+        {
+          "name": "Count Tokens",
+          "path": "/models/{model}:countTokens",
+          "description": "Count tokens in input text",
+          "capabilities": [
+            "token_counting"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "icon": "fa-brain",
+      "description": "Google's multimodal AI models with advanced reasoning capabilities",
+      "hero": {
+        "logo_path": "/images/llm-providers/google.svg",
+        "width": "",
+        "height": ""
+      },
+      "api_key_label": "Google API Key",
+      "filter_tag": "gemini",
+      "models": [
+        {
+          "name": "Gemini Pro 2.5",
+          "value": "gemini-2.5-pro",
+          "cost_per_1k_input": 0.00125,
+          "cost_per_1k_output": 0.01,
+          "model_parameters": [
+            {
+              "name": "maxOutputTokens",
+              "label": "Max Output Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 65536,
+              "description": "Maximum number of tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            },
+            {
+              "name": "topP",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Nucleus sampling parameter"
+            },
+            {
+              "name": "topK",
+              "label": "Top K",
+              "type": "number",
+              "default": 40,
+              "min": 1,
+              "max": 100,
+              "description": "Top-k sampling parameter"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1500,
+              "default": 150
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 300000,
+              "default": 150000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Gemini 2.5 Flash Native Audio",
+          "value": "gemini-2.5-flash-native-audio-latest",
+          "cost_per_1k_input": 0.00035,
+          "cost_per_1k_output": 0.0015,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 1,
+              "max": 200,
+              "default": 50
+            },
+            "tokens_per_minute": {
+              "min": 1000,
+              "max": 100000,
+              "default": 40000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": false,
+            "supports_audio_input": true,
+            "supports_realtime": true
+          }
+        },
+        {
+          "name": "Gemini Pro 3.1 (Preview)",
+          "value": "gemini-3.1-pro-preview",
+          "cost_per_1k_input": 0.002,
+          "cost_per_1k_output": 0.012,
+          "model_parameters": [
+            {
+              "name": "maxOutputTokens",
+              "label": "Max Output Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 65536,
+              "description": "Maximum number of tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            },
+            {
+              "name": "topP",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Nucleus sampling parameter"
+            },
+            {
+              "name": "topK",
+              "label": "Top K",
+              "type": "number",
+              "default": 40,
+              "min": 1,
+              "max": 100,
+              "description": "Top-k sampling parameter"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 5,
+              "max": 500,
+              "default": 60
+            },
+            "tokens_per_minute": {
+              "min": 5000,
+              "max": 150000,
+              "default": 90000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Gemini Flash 3.5",
+          "value": "gemini-3.5-flash",
+          "cost_per_1k_input": 0.0015,
+          "cost_per_1k_output": 0.009,
+          "model_parameters": [
+            {
+              "name": "maxOutputTokens",
+              "label": "Max Output Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 65536,
+              "description": "Maximum number of tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            },
+            {
+              "name": "topP",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Nucleus sampling parameter"
+            },
+            {
+              "name": "topK",
+              "label": "Top K",
+              "type": "number",
+              "default": 40,
+              "min": 1,
+              "max": 100,
+              "description": "Top-k sampling parameter"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 400000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Gemini Flash Lite 3.1",
+          "value": "gemini-3.1-flash-lite",
+          "cost_per_1k_input": 0.00025,
+          "cost_per_1k_output": 0.0015,
+          "model_parameters": [
+            {
+              "name": "maxOutputTokens",
+              "label": "Max Output Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 65536,
+              "description": "Maximum number of tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            },
+            {
+              "name": "topP",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Nucleus sampling parameter"
+            },
+            {
+              "name": "topK",
+              "label": "Top K",
+              "type": "number",
+              "default": 40,
+              "min": 1,
+              "max": 100,
+              "description": "Top-k sampling parameter"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 4000,
+              "default": 400
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 1000000,
+              "default": 400000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Gemini Flash 2.5",
+          "value": "gemini-2.5-flash",
+          "cost_per_1k_input": 0.0003,
+          "cost_per_1k_output": 0.0025,
+          "model_parameters": [
+            {
+              "name": "maxOutputTokens",
+              "label": "Max Output Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 65536,
+              "description": "Maximum number of tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            },
+            {
+              "name": "topP",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Nucleus sampling parameter"
+            },
+            {
+              "name": "topK",
+              "label": "Top K",
+              "type": "number",
+              "default": 40,
+              "min": 1,
+              "max": 100,
+              "description": "Top-k sampling parameter"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 400000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Gemini Flash Lite 2.5",
+          "value": "gemini-2.5-flash-lite",
+          "cost_per_1k_input": 0.0001,
+          "cost_per_1k_output": 0.0004,
+          "model_parameters": [
+            {
+              "name": "maxOutputTokens",
+              "label": "Max Output Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 65536,
+              "description": "Maximum number of tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Controls randomness of output"
+            },
+            {
+              "name": "topP",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Nucleus sampling parameter"
+            },
+            {
+              "name": "topK",
+              "label": "Top K",
+              "type": "number",
+              "default": 40,
+              "min": 1,
+              "max": 100,
+              "description": "Top-k sampling parameter"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 4000,
+              "default": 400
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 1000000,
+              "default": 400000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "api_schema": "gemini",
+      "provider_capabilities": [
+        "chat",
+        "embedding",
+        "image_understanding",
+        "image_generation",
+        "audio_transcription"
+      ]
+    },
+    {
+      "name": "AWS Bedrock",
+      "enum_value": "bedrock",
+      "default_base_url": "https://bedrock-mantle.us-east-1.api.aws",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions via Bedrock Gateway API key auth",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ]
+        }
+      ],
+      "icon": "fa-cloud",
+      "description": "Access DeepSeek, Google, MiniMax, Mistral, Moonshot, NVIDIA, OpenAI, Qwen, Writer, and ZhipuAI models through AWS Bedrock with API key authentication",
+      "hero": {
+        "logo_path": "/images/llm-providers/aws.svg",
+        "width": "",
+        "height": ""
+      },
+      "api_key_label": "Bedrock API Key",
+      "filter_tag": "bedrock",
+      "models": [
+        {
+          "name": "DeepSeek V3.1",
+          "value": "deepseek.v3.1",
+          "cost_per_1k_input": 0.0006,
+          "cost_per_1k_output": 0.00173,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "DeepSeek V3.2",
+          "value": "deepseek.v3.2",
+          "cost_per_1k_input": 0.00062,
+          "cost_per_1k_output": 0.00185,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Google Gemma 3 4B IT",
+          "value": "google.gemma-3-4b-it",
+          "cost_per_1k_input": 0.00004,
+          "cost_per_1k_output": 0.00008,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Google Gemma 3 12B IT",
+          "value": "google.gemma-3-12b-it",
+          "cost_per_1k_input": 0.00009,
+          "cost_per_1k_output": 0.00029,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Google Gemma 3 27B IT",
+          "value": "google.gemma-3-27b-it",
+          "cost_per_1k_input": 0.00023,
+          "cost_per_1k_output": 0.00038,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "MiniMax M2",
+          "value": "minimax.minimax-m2",
+          "cost_per_1k_input": 0.0003,
+          "cost_per_1k_output": 0.0012,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "MiniMax M2.1",
+          "value": "minimax.minimax-m2.1",
+          "cost_per_1k_input": 0.0003,
+          "cost_per_1k_output": 0.0012,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "MiniMax M2.5",
+          "value": "minimax.minimax-m2.5",
+          "cost_per_1k_input": 0.0003,
+          "cost_per_1k_output": 0.0012,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Devstral 2 123B",
+          "value": "mistral.devstral-2-123b",
+          "cost_per_1k_input": 0.0004,
+          "cost_per_1k_output": 0.002,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Magistral Small",
+          "value": "mistral.magistral-small-2509",
+          "cost_per_1k_input": 0.0005,
+          "cost_per_1k_output": 0.0015,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Ministral 3 3B",
+          "value": "mistral.ministral-3-3b-instruct",
+          "cost_per_1k_input": 0.0001,
+          "cost_per_1k_output": 0.0001,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Ministral 3 8B",
+          "value": "mistral.ministral-3-8b-instruct",
+          "cost_per_1k_input": 0.00015,
+          "cost_per_1k_output": 0.00015,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Ministral 3 14B",
+          "value": "mistral.ministral-3-14b-instruct",
+          "cost_per_1k_input": 0.0002,
+          "cost_per_1k_output": 0.0002,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Large 3 675B",
+          "value": "mistral.mistral-large-3-675b-instruct",
+          "cost_per_1k_input": 0.0005,
+          "cost_per_1k_output": 0.0015,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Voxtral Mini 3B",
+          "value": "mistral.voxtral-mini-3b-2507",
+          "cost_per_1k_input": 0.00004,
+          "cost_per_1k_output": 0.00004,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Mistral Voxtral Small 24B",
+          "value": "mistral.voxtral-small-24b-2507",
+          "cost_per_1k_input": 0.0001,
+          "cost_per_1k_output": 0.0003,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Moonshot Kimi K2 Thinking",
+          "value": "moonshotai.kimi-k2-thinking",
+          "cost_per_1k_input": 0.0006,
+          "cost_per_1k_output": 0.0025,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Moonshot Kimi K2.5",
+          "value": "moonshotai.kimi-k2.5",
+          "cost_per_1k_input": 0.0006,
+          "cost_per_1k_output": 0.003,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "NVIDIA Nemotron Nano 9B v2",
+          "value": "nvidia.nemotron-nano-9b-v2",
+          "cost_per_1k_input": 0.00006,
+          "cost_per_1k_output": 0.00023,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "NVIDIA Nemotron Nano 12B v2",
+          "value": "nvidia.nemotron-nano-12b-v2",
+          "cost_per_1k_input": 0.0002,
+          "cost_per_1k_output": 0.0006,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "NVIDIA Nemotron Nano 3 30B",
+          "value": "nvidia.nemotron-nano-3-30b",
+          "cost_per_1k_input": 0.00006,
+          "cost_per_1k_output": 0.00024,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "OpenAI GPT OSS 20B",
+          "value": "openai.gpt-oss-20b",
+          "cost_per_1k_input": 0.00007,
+          "cost_per_1k_output": 0.0003,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "OpenAI GPT OSS 120B",
+          "value": "openai.gpt-oss-120b",
+          "cost_per_1k_input": 0.00015,
+          "cost_per_1k_output": 0.0006,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "OpenAI GPT OSS Safeguard 20B",
+          "value": "openai.gpt-oss-safeguard-20b",
+          "cost_per_1k_input": 0.00007,
+          "cost_per_1k_output": 0.0002,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "OpenAI GPT OSS Safeguard 120B",
+          "value": "openai.gpt-oss-safeguard-120b",
+          "cost_per_1k_input": 0.00015,
+          "cost_per_1k_output": 0.0006,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 32B",
+          "value": "qwen.qwen3-32b",
+          "cost_per_1k_input": 0.00015,
+          "cost_per_1k_output": 0.0006,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 235B A22B",
+          "value": "qwen.qwen3-235b-a22b-2507",
+          "cost_per_1k_input": 0.00023,
+          "cost_per_1k_output": 0.00091,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 Coder 30B A3B",
+          "value": "qwen.qwen3-coder-30b-a3b-instruct",
+          "cost_per_1k_input": 0.00015,
+          "cost_per_1k_output": 0.0006,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 Coder 480B A35B",
+          "value": "qwen.qwen3-coder-480b-a35b-instruct",
+          "cost_per_1k_input": 0.0005,
+          "cost_per_1k_output": 0.0012,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 Coder Next",
+          "value": "qwen.qwen3-coder-next",
+          "cost_per_1k_input": 0.0005,
+          "cost_per_1k_output": 0.0012,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 Next 80B A3B",
+          "value": "qwen.qwen3-next-80b-a3b-instruct",
+          "cost_per_1k_input": 0.00015,
+          "cost_per_1k_output": 0.0012,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 VL 235B A22B",
+          "value": "qwen.qwen3-vl-235b-a22b-instruct",
+          "cost_per_1k_input": 0.00053,
+          "cost_per_1k_output": 0.00266,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Writer Palmyra Vision 7B",
+          "value": "writer.palmyra-vision-7b",
+          "cost_per_1k_input": 0.00015,
+          "cost_per_1k_output": 0.0006,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "ZhipuAI GLM 4.6",
+          "value": "zai.glm-4.6",
+          "cost_per_1k_input": 0.0006,
+          "cost_per_1k_output": 0.0022,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "ZhipuAI GLM 4.7",
+          "value": "zai.glm-4.7",
+          "cost_per_1k_input": 0.0006,
+          "cost_per_1k_output": 0.0022,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "ZhipuAI GLM 4.7 Flash",
+          "value": "zai.glm-4.7-flash",
+          "cost_per_1k_input": 0.00007,
+          "cost_per_1k_output": 0.0004,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "ZhipuAI GLM 5",
+          "value": "zai.glm-5",
+          "cost_per_1k_input": 0.001,
+          "cost_per_1k_output": 0.0032,
+          "model_parameters": [
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 1,
+              "step": 0.1,
+              "description": "Controls randomness in responses"
+            },
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.9,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling threshold"
+            }
+          ],
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "api_schema": "openai",
+      "provider_capabilities": [
+        "chat",
+        "embedding",
+        "image_understanding"
+      ]
+    },
+    {
+      "name": "Azure OpenAI",
+      "enum_value": "azure",
+      "api_version_prefix": "",
+      "enabled": false,
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/openai/deployments/{deployment-id}/chat/completions",
+          "description": "Primary endpoint for chat models",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": [
+            {
+              "name": "data_sources",
+              "label": "Data Sources",
+              "type": "array",
+              "default": [],
+              "description": "Azure OpenAI chat extensions (Azure Search, Cosmos DB) - Azure-specific",
+              "applies_to_models": []
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "string",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does. Applies to GPT-5 family and o-series reasoning models.",
+              "applies_to_models": [
+                "azure-gpt-5.5",
+                "azure-gpt-5.4",
+                "azure-gpt-5.4-mini",
+                "azure-gpt-5.4-nano",
+                "azure-gpt-5.1",
+                "azure-gpt-5",
+                "azure-gpt-5-mini",
+                "azure-gpt-5-nano",
+                "azure-o3",
+                "azure-o4-mini"
+              ]
+            },
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": null,
+              "description": "Upper bound for tokens (visible + reasoning)",
+              "applies_to_models": [
+                "azure-gpt-5.5",
+                "azure-gpt-5.4",
+                "azure-gpt-5.4-mini",
+                "azure-gpt-5.4-nano",
+                "azure-gpt-5.1",
+                "azure-gpt-5",
+                "azure-gpt-5-mini",
+                "azure-gpt-5-nano",
+                "azure-o3",
+                "azure-o4-mini"
+              ]
+            }
+          ]
+        }
+      ],
+      "icon": "fa-cloud",
+      "description": "Enterprise-grade OpenAI models (GPT-5.5, GPT-5.4, GPT-5, o3, o4-mini) hosted on Microsoft Azure infrastructure",
+      "hero": {
+        "logo_path": "/images/llm-providers/azure.svg",
+        "width": "",
+        "height": ""
+      },
+      "api_key_label": "Azure API Key",
+      "filter_tag": "azure",
+      "models": [
+        {
+          "name": "Azure GPT-5.5",
+          "value": "azure-gpt-5.5",
+          "cost_per_1k_input": 0.005,
+          "cost_per_1k_output": 0.03,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 600,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure GPT-5.4",
+          "value": "azure-gpt-5.4",
+          "cost_per_1k_input": 0.0025,
+          "cost_per_1k_output": 0.015,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure GPT-5.4 Mini",
+          "value": "azure-gpt-5.4-mini",
+          "cost_per_1k_input": 0.00075,
+          "cost_per_1k_output": 0.0045,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 400000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure GPT-5.4 Nano",
+          "value": "azure-gpt-5.4-nano",
+          "cost_per_1k_input": 0.0002,
+          "cost_per_1k_output": 0.00125,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 4000,
+              "default": 400
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 1000000,
+              "default": 400000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure GPT-5.1",
+          "value": "azure-gpt-5.1",
+          "cost_per_1k_input": 0.00125,
+          "cost_per_1k_output": 0.01,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "none",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure GPT-5",
+          "value": "azure-gpt-5",
+          "cost_per_1k_input": 0.00125,
+          "cost_per_1k_output": 0.01,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure GPT-5 Mini",
+          "value": "azure-gpt-5-mini",
+          "cost_per_1k_input": 0.00025,
+          "cost_per_1k_output": 0.002,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 400000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure GPT-5 Nano",
+          "value": "azure-gpt-5-nano",
+          "cost_per_1k_input": 0.00005,
+          "cost_per_1k_output": 0.0004,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 128000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 4000,
+              "default": 400
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 1000000,
+              "default": 400000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure o3",
+          "value": "azure-o3",
+          "cost_per_1k_input": 0.002,
+          "cost_per_1k_output": 0.008,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 100000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens, 200K context)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": false,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 1000,
+              "default": 100
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 200000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Azure o4-mini",
+          "value": "azure-o4-mini",
+          "cost_per_1k_input": 0.0011,
+          "cost_per_1k_output": 0.0044,
+          "model_parameters": [
+            {
+              "name": "max_completion_tokens",
+              "label": "Max Completion Tokens",
+              "type": "number",
+              "default": 4096,
+              "min": 1,
+              "max": 100000,
+              "description": "Maximum number of tokens to generate (includes reasoning tokens, 200K context)"
+            },
+            {
+              "name": "reasoning_effort",
+              "label": "Reasoning Effort",
+              "type": "select",
+              "default": "medium",
+              "options": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "description": "Controls how much reasoning the model does before responding"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 10,
+              "max": 2000,
+              "default": 200
+            },
+            "tokens_per_minute": {
+              "min": 10000,
+              "max": 400000,
+              "default": 200000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "api_schema": "openai",
+      "provider_capabilities": [
+        "chat",
+        "embedding",
+        "image_understanding"
+      ]
+    },
+    {
+      "name": "Ollama",
+      "enum_value": "ollama",
+      "default_base_url": "http://localhost:11434",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "Local Ollama instance OpenAI-compatible chat completions",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Qwen 3-vl 8B",
+          "value": "qwen3-vl:8b",
+          "cost_per_1k_input": 0,
+          "cost_per_1k_output": 0,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 131072,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Sampling temperature"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 1,
+              "max": 1000,
+              "default": 60
+            },
+            "tokens_per_minute": {
+              "min": 1000,
+              "max": 1000000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Gemma 3 12B",
+          "value": "gemma3:12b",
+          "cost_per_1k_input": 0,
+          "cost_per_1k_output": 0,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 8192,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Sampling temperature"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 1,
+              "max": 1000,
+              "default": 60
+            },
+            "tokens_per_minute": {
+              "min": 1000,
+              "max": 1000000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Llama 3.1 8B",
+          "value": "llama3.1:8b",
+          "cost_per_1k_input": 0,
+          "cost_per_1k_output": 0,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 32768,
+              "description": "Maximum tokens to generate"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 0.7,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Sampling temperature"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 1,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 1,
+              "max": 1000,
+              "default": 60
+            },
+            "tokens_per_minute": {
+              "min": 1000,
+              "max": 1000000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Gemma 4 E4B",
+          "value": "gemma4:e4b",
+          "cost_per_1k_input": 0,
+          "cost_per_1k_output": 0,
+          "model_parameters": [
+            {
+              "name": "max_tokens",
+              "label": "Max Tokens",
+              "type": "number",
+              "default": 2048,
+              "min": 1,
+              "max": 262144,
+              "description": "Maximum tokens to generate (256K context MoE model)"
+            },
+            {
+              "name": "temperature",
+              "label": "Temperature",
+              "type": "number",
+              "default": 1.0,
+              "min": 0,
+              "max": 2,
+              "step": 0.1,
+              "description": "Sampling temperature"
+            },
+            {
+              "name": "top_p",
+              "label": "Top P",
+              "type": "number",
+              "default": 0.95,
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "description": "Nucleus sampling"
+            },
+            {
+              "name": "top_k",
+              "label": "Top K",
+              "type": "number",
+              "default": 64,
+              "min": 0,
+              "max": 500,
+              "description": "Top-k sampling parameter"
+            }
+          ],
+          "rate_limiting": {
+            "can_disable": true,
+            "can_change": true,
+            "requests_per_minute": {
+              "min": 1,
+              "max": 1000,
+              "default": 60
+            },
+            "tokens_per_minute": {
+              "min": 1000,
+              "max": 1000000,
+              "default": 100000
+            }
+          },
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "icon": "fa-brain",
+      "description": "Run open-source LLMs locally with Ollama",
+      "hero": {
+        "logo_path": "/images/llm-providers/ollama.png",
+        "width": "",
+        "height": ""
+      },
+      "api_key_label": "",
+      "api_key_required": false,
+      "api_key_validation": "none",
+      "api_schema": "openai",
+      "provider_capabilities": [
+        "chat",
+        "embedding"
+      ]
+    },
+    {
+      "name": "Marketplace",
+      "enum_value": "marketplace",
+      "default_base_url": "",
+      "api_version_prefix": "",
+      "enabled": true,
+      "api_schema": "marketplace",
+      "endpoints": [],
+      "models": [],
+      "icon": "fa-store",
+      "description": "Browse and select LLM providers from the marketplace",
+      "hero": {
+        "logo_path": "/images/llm-providers/marketplace.png",
+        "width": "",
+        "height": ""
+      },
+      "api_key_label": "",
+      "api_key_required": false,
+      "api_key_validation": "none",
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "Groq",
+      "enum_value": "groq",
+      "default_base_url": "https://api.groq.com/openai",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "Groq API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "groq",
+      "api_schema": "openai",
+      "icon": "fa-bolt",
+      "description": "OpenAI-compatible inference on Groq LPUs. Pricing is not tracked for preset models — add per-model pricing in the LLM Providers editor if you need cost accounting.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Llama 3.3 70B Versatile",
+          "value": "llama-3.3-70b-versatile",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Llama 3.1 8B Instant",
+          "value": "llama-3.1-8b-instant",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-OSS 120B",
+          "value": "openai/gpt-oss-120b",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Kimi K2 Instruct",
+          "value": "moonshotai/kimi-k2-instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "xAI (Grok)",
+      "enum_value": "xai",
+      "default_base_url": "https://api.x.ai",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "xAI API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "xai",
+      "api_schema": "openai",
+      "icon": "fa-x",
+      "description": "OpenAI-compatible access to xAI Grok models. Pricing is not tracked for preset models — add per-model pricing in the LLM Providers editor if you need cost accounting.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Grok 4",
+          "value": "grok-4",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Grok 4 Fast",
+          "value": "grok-4-fast",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Grok 3",
+          "value": "grok-3",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Grok 3 Mini",
+          "value": "grok-3-mini",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "OpenRouter",
+      "enum_value": "openrouter",
+      "default_base_url": "https://openrouter.ai/api",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "OpenRouter API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "openrouter",
+      "api_schema": "openai",
+      "icon": "fa-route",
+      "description": "OpenAI-compatible router across many vendors. Model IDs are namespaced (vendor/model); add more in the LLM Providers editor. Pricing is not tracked for preset models.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "OpenAI GPT-4o",
+          "value": "openai/gpt-4o",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Anthropic Claude 3.7 Sonnet",
+          "value": "anthropic/claude-3.7-sonnet",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Google Gemini 2.0 Flash",
+          "value": "google/gemini-2.0-flash-001",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Meta Llama 3.3 70B Instruct",
+          "value": "meta-llama/llama-3.3-70b-instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "Fireworks AI",
+      "enum_value": "fireworks",
+      "default_base_url": "https://api.fireworks.ai/inference",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "Fireworks API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "fireworks",
+      "api_schema": "openai",
+      "icon": "fa-fire",
+      "description": "OpenAI-compatible inference on Fireworks AI. Model IDs use the accounts/fireworks/models/ prefix. Pricing is not tracked for preset models.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Llama 3.3 70B Instruct",
+          "value": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Llama 3.1 8B Instruct",
+          "value": "accounts/fireworks/models/llama-v3p1-8b-instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 2.5 72B Instruct",
+          "value": "accounts/fireworks/models/qwen2p5-72b-instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "DeepSeek V3",
+          "value": "accounts/fireworks/models/deepseek-v3",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "Cerebras",
+      "enum_value": "cerebras",
+      "default_base_url": "https://api.cerebras.ai",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "Cerebras API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "cerebras",
+      "api_schema": "openai",
+      "icon": "fa-microchip",
+      "description": "OpenAI-compatible inference on Cerebras wafer-scale hardware. Pricing is not tracked for preset models — add per-model pricing in the LLM Providers editor if you need cost accounting.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Llama 3.3 70B",
+          "value": "llama-3.3-70b",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Llama 3.1 8B",
+          "value": "llama3.1-8b",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 3 32B",
+          "value": "qwen-3-32b",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "GPT-OSS 120B",
+          "value": "gpt-oss-120b",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "DeepSeek",
+      "enum_value": "deepseek",
+      "default_base_url": "https://api.deepseek.com",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "DeepSeek API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "deepseek",
+      "api_schema": "openai",
+      "icon": "fa-water",
+      "description": "OpenAI-compatible access to DeepSeek models. Pricing is not tracked for preset models — add per-model pricing in the LLM Providers editor if you need cost accounting.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "DeepSeek Chat (V3)",
+          "value": "deepseek-chat",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "DeepSeek Reasoner (R1)",
+          "value": "deepseek-reasoner",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "Moonshot AI (Kimi)",
+      "enum_value": "moonshot",
+      "default_base_url": "https://api.moonshot.ai",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "Moonshot API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "moonshot",
+      "api_schema": "openai",
+      "icon": "fa-moon",
+      "description": "OpenAI-compatible access to Moonshot AI / Kimi models. Pricing is not tracked for preset models.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Kimi K2 (0905 preview)",
+          "value": "kimi-k2-0905-preview",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Kimi Latest",
+          "value": "kimi-latest",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Moonshot v1 128k",
+          "value": "moonshot-v1-128k",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "SambaNova Cloud",
+      "enum_value": "sambanova",
+      "default_base_url": "https://api.sambanova.ai",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "SambaNova API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "sambanova",
+      "api_schema": "openai",
+      "icon": "fa-server",
+      "description": "OpenAI-compatible access to SambaNova Cloud models. Pricing is not tracked for preset models.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Llama 3.3 70B Instruct",
+          "value": "Meta-Llama-3.3-70B-Instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "DeepSeek R1",
+          "value": "DeepSeek-R1",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Llama 4 Maverick 17B",
+          "value": "Llama-4-Maverick-17B-128E-Instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "Hyperbolic",
+      "enum_value": "hyperbolic",
+      "default_base_url": "https://api.hyperbolic.xyz",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "Hyperbolic API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "hyperbolic",
+      "api_schema": "openai",
+      "icon": "fa-bolt",
+      "description": "OpenAI-compatible access to open models hosted on Hyperbolic. Pricing is not tracked for preset models.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Llama 3.3 70B Instruct",
+          "value": "meta-llama/Llama-3.3-70B-Instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "DeepSeek V3",
+          "value": "deepseek-ai/DeepSeek-V3",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 2.5 72B Instruct",
+          "value": "Qwen/Qwen2.5-72B-Instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "NVIDIA NIM",
+      "enum_value": "nvidia",
+      "default_base_url": "https://integrate.api.nvidia.com",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "NVIDIA API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "nvidia",
+      "api_schema": "openai",
+      "icon": "fa-microchip",
+      "description": "OpenAI-compatible access to models hosted on NVIDIA NIM / build.nvidia.com. Pricing is not tracked for preset models.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Llama 3.3 70B Instruct",
+          "value": "meta/llama-3.3-70b-instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "DeepSeek R1",
+          "value": "deepseek-ai/deepseek-r1",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Nemotron 70B Instruct",
+          "value": "nvidia/llama-3.1-nemotron-70b-instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    },
+    {
+      "name": "Nebius AI Studio",
+      "enum_value": "nebius",
+      "default_base_url": "https://api.studio.nebius.com",
+      "api_version_prefix": "/v1",
+      "enabled": true,
+      "api_key_label": "Nebius API Key",
+      "api_key_validation": "mandatory",
+      "api_key_required": true,
+      "filter_tag": "nebius",
+      "api_schema": "openai",
+      "icon": "fa-server",
+      "description": "OpenAI-compatible access to open models on Nebius AI Studio. Pricing is not tracked for preset models.",
+      "endpoints": [
+        {
+          "name": "Chat Completions",
+          "path": "/chat/completions",
+          "description": "OpenAI-compatible chat completions.",
+          "is_default": true,
+          "capabilities": [
+            "chat_completions"
+          ],
+          "endpoint_parameters": []
+        }
+      ],
+      "models": [
+        {
+          "name": "Llama 3.3 70B Instruct",
+          "value": "meta-llama/Llama-3.3-70B-Instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "DeepSeek V3",
+          "value": "deepseek-ai/DeepSeek-V3",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        },
+        {
+          "name": "Qwen 2.5 72B Instruct",
+          "value": "Qwen/Qwen2.5-72B-Instruct",
+          "capabilities": {
+            "supports_json_mode": true
+          }
+        }
+      ],
+      "provider_capabilities": [
+        "chat"
+      ]
+    }
+  ]
+}

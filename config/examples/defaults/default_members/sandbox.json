@@ -1,0 +1,15 @@
+{
+  "id": "sandbox",
+  "name": "Sandbox",
+  "description": "Built-in identity for sandbox (Test) executions, which have no real caller. Keeps test usage visible and reconciled against surface totals while staying separable from anonymous/live traffic.",
+  "status": "enabled",
+  "system": true,
+  "identifiers": [
+    {
+      "kind": "custom",
+      "value": "sandbox"
+    }
+  ],
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-01T00:00:00Z"
+}

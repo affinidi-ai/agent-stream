@@ -1,0 +1,59 @@
+{
+  "$schema": "https://fabric.affinidi.io/schemas/pipe-template/v1.json",
+  "id": "builtin-guardrails-pack",
+  "name": "Guardrails Pack",
+  "description": "Adds rate limiting, cost tracking, and prompt-guard PII redaction to the current Surface.",
+  "details": "A partial template — it does not replace your Surface. Applying it merges three middleware enhancements onto the current Surface: a 30 req/min rate limit, cost tracking, and a prompt guard that redacts email and credit-card patterns. Review the placed nodes on the canvas before saving.",
+  "icon": "shield-halved",
+  "tags": [
+    "middleware",
+    "guardrails"
+  ],
+  "author": "system",
+  "builtin": true,
+  "kind": "partial",
+  "sort_priority": 100,
+  "items": [
+    {
+      "scope": "middleware",
+      "kind": "pipe-rate-limit",
+      "config": {
+        "enabled": true,
+        "requests_per_minute": 30,
+        "tokens_per_minute": 60000
+      }
+    },
+    {
+      "scope": "middleware",
+      "kind": "pipe-cost-tracking",
+      "config": {
+        "enabled": true,
+        "input_price_per_1k": 0,
+        "output_price_per_1k": 0
+      }
+    },
+    {
+      "scope": "middleware",
+      "kind": "pipe-prompt-guard",
+      "config": {
+        "request": [
+          {
+            "regex": {
+              "action": "mask",
+              "rules": [
+                {
+                  "builtin": "email"
+                },
+                {
+                  "builtin": "credit_card"
+                }
+              ]
+            },
+            "rejection": null
+          }
+        ],
+        "response": []
+      }
+    }
+  ]
+}

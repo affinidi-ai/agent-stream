@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://affinidi.com/schemas/llm_catalog.schema.json",
+  "title": "LLM provider catalog",
+  "description": "Canonical schema for an LLM provider catalog document (`{ \"providers\": [ ... ] }`). Used to validate both the shipped/built-in `llm.json` (and the master file Affinidi publishes for the 'Refresh Builtin Models' flow) and the user-editable `custom_llm.json`. Intentionally permissive (additionalProperties allowed on providers/endpoints/models) so the rich provider structure round-trips, while pinning the identity fields the runtime relies on. A custom provider must additionally not reuse the enum_value of a built-in provider — that collision is rejected separately by the backend because it cannot be expressed in JSON Schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["providers"],
+  "properties": {
+    "providers": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/provider" }
+    }
+  },
+  "definitions": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["enum_value", "name"],
+      "properties": {
+        "enum_value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Machine-readable provider id. Must be unique within the catalog; a custom provider must not collide with a built-in provider."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable provider name."
+        },
+        "default_base_url": { "type": "string" },
+        "api_version_prefix": { "type": "string" },
+        "api_schema": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "api_key_label": { "type": "string" },
+        "api_key_validation": {
+          "type": "string",
+          "enum": ["mandatory", "optional", "none"]
+        },
+        "api_key_required": { "type": "boolean" },
+        "requires_forward_caller_token": {
+          "type": "boolean",
+          "description": "When true, a surface fronting this provider must forward the caller's validated bearer token (identity pass-through). Drives the dashboard to auto-enable forwarding and require a JWT-bearer Caller Context."
+        },
+        "filter_tag": { "type": "string" },
+        "icon": { "type": "string" },
+        "description": { "type": "string" },
+        "hero": { "type": "object", "additionalProperties": true },
+        "endpoints": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/endpoint" }
+        },
+        "models": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/model" }
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "path"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "is_default": { "type": "boolean" },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "cost_per_1k_input": { "type": "number", "minimum": 0 },
+        "cost_per_1k_output": { "type": "number", "minimum": 0 },
+        "request_profile": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}
