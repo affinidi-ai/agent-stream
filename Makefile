@@ -15,7 +15,7 @@ SHELL := /bin/bash
 # ==============================================================================
 
 .PHONY: help cargo-release cargo-build run-debug run-watch run-release \
-        config-certs config-debug config-debug-dev config-debug-x config-test config-release install-deps install-rust-deps verify-rust-deps verify-xml-libs install-git-hooks \
+        config-certs config-debug config-debug-dev config-debug-x config-test config-release install-deps install-rust-deps verify-rust-deps verify-xml-libs fix-xml-libs install-git-hooks \
         docker-build-local docker-build-local-dev docker-rebuild-local docker-rebuild-local-dev docker-run docker-run-dev docker-shell docker-network \
         config-docker \
 	test test-unit test-bins test-integration test-policies test-coverage test-junit test-rust-ci test-bdd npm-test npm-test-ci npm-build npm-build-ci npm-install npm-install-ci clippy clippy-ci fmt fmt-www-all fmt-check lint lint-bdd-gherkin npm-lint npm-lint-www-all npm-lint-ci check cargo-build-ci node-ci rust-ci node-local rust-local local audit-www-all audit-fix-www-all license-check \
@@ -45,9 +45,22 @@ RUST_LLVM_DEPS := $(if $(RUST_LLVM_MAJOR),llvm@$(RUST_LLVM_MAJOR),llvm)
 # without the keg-only formula present the build resolves libxslt (and through
 # it a second libxml2) from the macOS system copy. Two libxml2s in one process
 # segfault the moment xmlsec touches a document parsed by the other one.
-RUST_DEPS := sccache keith/formulae/ld64.lld protobuf xmlsec1 cmake libxml2 libxslt $(RUST_LLVM_DEPS)
+#
+# cyrus-sasl is required for the same reason: without a libsasl2 that
+# pkg-config can find, rdkafka's sasl2-sys falls back to `-L /usr/lib`, and that
+# search path makes the linker take macOS's libxml2 and libxslt from the SDK.
+RUST_DEPS := sccache keith/formulae/ld64.lld protobuf xmlsec1 cmake libxml2 libxslt cyrus-sasl $(RUST_LLVM_DEPS)
 BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
-XML_PKG_CONFIG_PATH := $(BREW_PREFIX)/opt/libxml2/lib/pkgconfig:$(BREW_PREFIX)/opt/libxslt/lib/pkgconfig:$(BREW_PREFIX)/opt/libxmlsec1/lib/pkgconfig
+XML_PKG_CONFIG_PATH := $(BREW_PREFIX)/opt/libxml2/lib/pkgconfig:$(BREW_PREFIX)/opt/libxslt/lib/pkgconfig:$(BREW_PREFIX)/opt/libxmlsec1/lib/pkgconfig:$(BREW_PREFIX)/opt/cyrus-sasl/lib/pkgconfig
+# Every cargo build make starts links the Homebrew XML libraries, never the
+# macOS system copies.
+ifeq ($(shell uname -s),Darwin)
+ifneq ($(BREW_PREFIX),)
+ifeq ($(findstring $(XML_PKG_CONFIG_PATH),$(PKG_CONFIG_PATH)),)
+export PKG_CONFIG_PATH := $(XML_PKG_CONFIG_PATH)$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH))
+endif
+endif
+endif
 CARGO_TOOLS := cargo-llvm-cov cargo-nextest cargo-audit cargo-deny cargo-watch
 DEPS := jq pre-commit gitleaks
 COVERAGE_THRESHOLD ?= 37
@@ -129,17 +142,31 @@ verify-xml-libs: ## Verify libxml2/libxslt/libxmlsec1 resolve to a single Homebr
 			*) echo "$(RED)❌ $$pc resolves to $$libdir, outside $(BREW_PREFIX). Fix PKG_CONFIG_PATH.$(NC)"; exit 1;; \
 		esac; \
 	done
-	@bin=target/debug/agent-stream; \
-	if [ ! -x "$$bin" ]; then bin=target/release/agent-stream; fi; \
-	if [ -x "$$bin" ]; then \
-		count=$$(otool -L "$$bin" | grep -c 'libxml2' || true); \
-		if [ "$$count" -gt 1 ]; then \
-			echo "$(RED)❌ $$bin links $$count copies of libxml2:$(NC)"; \
-			otool -L "$$bin" | grep 'libxml2'; \
-			echo "$(RED)   Run 'cargo clean' and rebuild with the pinned PKG_CONFIG_PATH.$(NC)"; exit 1; \
-		fi; \
-	fi
+	@bin=; \
+	for b in target/debug/agent-stream target/release/agent-stream; do \
+		if [ -x "$$b" ] && { [ -z "$$bin" ] || [ "$$b" -nt "$$bin" ]; }; then bin=$$b; fi; \
+	done; \
+	if [ -z "$$bin" ]; then echo "$(YELLOW)⚠️  No agent-stream build yet, libxml2/libxslt link check skipped$(NC)"; exit 0; fi; \
+	for lib in libxml2 libxslt; do \
+		path=$$(otool -L "$$bin" | awk -v lib="/$$lib." 'index($$1, lib) { print $$1; exit }'); \
+		if [ -z "$$path" ]; then echo "$(RED)❌ $$bin does not link $$lib$(NC)"; exit 1; fi; \
+		case "$$path" in \
+			$(BREW_PREFIX)/*) ;; \
+			*) echo "$(RED)❌ $$bin links $$path, not Homebrew's $$lib. Run 'make fix-xml-libs'.$(NC)"; exit 1;; \
+		esac; \
+		if [ ! -e "$$path" ]; then echo "$(RED)❌ $$bin links $$path, which no longer exists (brew upgraded $$lib). Run 'make fix-xml-libs'.$(NC)"; exit 1; fi; \
+		echo "  $$lib: $$path"; \
+	done
 	@echo "$(GREEN)✅ XML libraries resolve to a single Homebrew copy.$(NC)"
+
+# Rebuilds only the crates that link the XML libraries (and so the binary), not
+# the whole target dir. No verify-rust-deps first: its link check would fail on
+# the very binary this target replaces.
+fix-xml-libs: ## (macOS) Relink against Homebrew's libxml2/libxslt/libxmlsec1 after a wrong link or a brew upgrade
+	@echo "$(BLUE)🔧 Relinking the XML libraries...$(NC)"
+	@cargo clean -p libxml -p samael -p sasl2-sys
+	@cargo build
+	@$(MAKE) --no-print-directory verify-xml-libs
 
 install-git-hooks: ## Install git hooks via pre-commit framework
 	@echo "$(BLUE)🔗 Installing git hooks...$(NC)"
@@ -159,6 +186,7 @@ install-deps: install-rust-deps ## Install all local development dependencies (m
 cargo-build: verify-rust-deps ## Build the debug binary
 	@echo "$(BLUE)📦 Building debug binary...$(NC)"
 	@cargo build
+	@$(MAKE) --no-print-directory verify-xml-libs
 	@echo "$(GREEN)✅ Debug build completed!$(NC)"
 
 cargo-build-ci: ## Build all Rust targets/features like CI
@@ -169,6 +197,7 @@ cargo-build-ci: ## Build all Rust targets/features like CI
 cargo-release: verify-rust-deps ## Build the release binary
 	@echo "$(BLUE)📦 Building release binary...$(NC)"
 	@cargo build --release
+	@$(MAKE) --no-print-directory verify-xml-libs
 	@echo "$(GREEN)✅ Release build completed!$(NC)"
 
 npm-install: ## Install frontend npm dependencies
@@ -606,10 +635,25 @@ rust-local: ## Run Rust checks locally with autofix (fmt + clippy --fix + audit 
 	@$(MAKE) test
 	@echo "$(GREEN)✅ Local Rust checks passed!$(NC)"
 
-local: ## Run all local checks with autofix (node-local + rust-local)
-	@$(MAKE) node-local
-	@$(MAKE) rust-local
-	@echo "$(GREEN)✅ All local checks passed!$(NC)"
+# When this make started, for the run's total on local's last line.
+LOCAL_STARTED := $(shell date +%s)
+
+# `make local`: formatting first, alone, since everything after it reads the
+# files it rewrites. Then the checks as groups side by side, then the tests
+# (scripts/local/parallel.sh; each run's logs and summary in
+# tmp/local/<date>_<time>/, tmp/local/latest the newest). The frontend and
+# backend groups touch different folders, so nothing writes what another reads.
+# No `make check`: clippy compiles everything it would, and more. PARALLEL=0
+# runs every group one after another, for a machine short of memory.
+PARALLEL ?= 1
+LOCAL_CHECKS := "frontend=node-local" "backend=clippy audit cargo-build"
+LOCAL_TESTS := "backend-tests=test"
+local: ## Run all local checks with autofix: fmt, then the frontend and backend checks side by side, then the tests (PARALLEL=0: one at a time); ends with the time taken
+	@$(MAKE) fmt
+	@MAKE="$(MAKE)" PARALLEL=$(PARALLEL) bash scripts/local/parallel.sh "Checks" $(LOCAL_CHECKS)
+	@MAKE="$(MAKE)" PARALLEL=$(PARALLEL) bash scripts/local/parallel.sh "Tests" $(LOCAL_TESTS)
+	@secs=$$(( $$(date +%s) - $(LOCAL_STARTED) )); \
+	  echo "$(GREEN)✅ All local checks passed in $$((secs / 60))m $$((secs % 60))s.$(NC)"
 
 # Fail if any tracked files were modified by an autofix step.
 # Call this after all fmt/fix passes so the error lists all changed files at once.

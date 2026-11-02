@@ -32,9 +32,11 @@ plain text. The log file is never rotated by the process. `GET /api/v1/logs/down
 (`logs.view`, administrator by default) downloads it, and `POST /api/v1/logs/truncate`
 (`settings.edit`; reading the log does not allow truncating it) truncates it. The same lines
 reach the dashboard as the log tail: `GET /v1/dashboard/stats` and `GET /v1/dashboard/delta`
-leave them out, and the WebSocket drops the delta's `logs` section, for a caller without
-`logs.view`, and the dashboard shows the Logs page and a Surface's Monitoring log tail only
-to holders of it.
+do not read the log file for a caller without `logs.view` and leave the lines out, the
+WebSocket drops the delta's `logs` section for such a caller, and the dashboard shows the
+Logs page and a Surface's Monitoring log tail only to holders of it. A log tail read goes
+back at most 8 MiB from the end of the file, so when lines are very long it returns fewer
+lines than requested.
 
 Every inbound request is logged to the `agent-stream::access` target with its method, path,
 query string, `Host`, `Accept`, `User-Agent`, `Origin`, `mcp-session-id`, `x-forwarded-for`

@@ -16,6 +16,8 @@ graphify-out
 
 # Configuration files with sensitive data
 config.toml
+# Cargo's own config holds only test environment values, no secrets
+!.cargo/config.toml
 saml.json
 llm.json
 .env

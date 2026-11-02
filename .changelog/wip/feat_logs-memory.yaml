@@ -1,0 +1,44 @@
+branch: feat/logs-memory
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-02T22:25:00.000Z'
+      title: Stop dashboard log updates from reading the whole log file into memory
+      description: >-
+        A dashboard tab that asked for log entries after an old position, for example after
+        sitting in the background or reconnecting after a restart, made Agent Stream parse every
+        line from that position to the end of the log file before keeping the last few hundred.
+        On a large log this spiked memory by hundreds of MB and could get the container killed
+        for running out of memory. Agent Stream now finds the newest lines by scanning back from
+        the end of the file and never goes back more than 8 MiB, however old the position is.
+    - timestamp: '2026-11-02T22:40:00.000Z'
+      title: Keep dashboard log positions correct when a log line holds non-ASCII text
+      description: >-
+        When a tail read of the log file started inside a multi-byte character, the dashboard
+        log tail recorded every following line at the wrong byte position, so later updates could
+        repeat lines. Agent Stream now counts the skipped partial line in bytes.
+    - timestamp: '2026-11-02T23:40:00.000Z'
+      title: Show the full number of newest log lines in the dashboard when lines are long
+      description: >-
+        The dashboard log tail read a fixed 512 bytes per requested line from the end of the log
+        file, so with longer lines, such as JSON logs, it showed fewer lines than requested.
+        Agent Stream now counts lines back from the end of the file, up to 8 MiB, and returns
+        every requested line within that range.
+    - timestamp: '2026-11-02T23:10:00.000Z'
+      title: Skip reading the log file for dashboard callers without logs.view
+      description: >-
+        GET /v1/dashboard/stats and GET /v1/dashboard/delta read and parsed the log file for every
+        caller with dashboard.view and only then dropped the lines for callers without logs.view.
+        Any dashboard user could therefore make Agent Stream read the log repeatedly. The log file
+        is now read only for callers allowed to see it.
+    - timestamp: '2026-11-03T00:00:00.000Z'
+      title: Show the level of INFO and WARN lines in the dashboard log view
+      description: >-
+        Log lines pad the level to five characters, so INFO and WARN lines carry an extra space
+        after the timestamp. The dashboard's log parser split on that space, which left these lines
+        with no level and put the level word at the start of the message, so level filters and
+        colours missed them. The parser now skips the padding before reading the level.
+  removed: []
+  security: []
+  breaking: []
