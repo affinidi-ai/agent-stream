@@ -1957,22 +1957,10 @@ pub async fn get_dashboard_stats(
     let channel_filter = query.surface_id.clone();
     let pipe_filter = query.pipe_id.clone();
     let include_logs = access.logs;
-    let log_entries: Vec<LogEntry> = tokio::task::spawn_blocking(move || {
-        if !include_logs {
-            return Vec::new();
-        }
-        let log_lines = read_log_file(&log_dir, log_read_limit);
-        log_lines
-            .iter()
-            .filter_map(|(offset, line)| {
-                let mut entry = parse_log_entry(line)?;
-                entry.file_position = *offset;
-                Some(entry)
-            })
-            .collect::<Vec<LogEntry>>()
-    })
-    .await
-    .unwrap_or_else(|_| vec![]);
+    let log_entries: Vec<LogEntry> =
+        tokio::task::spawn_blocking(move || dashboard_log_entries(include_logs, &log_dir, log_read_limit))
+            .await
+            .unwrap_or_else(|_| vec![]);
     let mut log_entries = log_entries;
     if let Some(channel_id) = &channel_filter {
         let channel_prefix = format!("[CHANNEL:{}]", channel_id);
@@ -2754,6 +2742,26 @@ fn strip_ansi_codes(s: &str) -> String {
     result
 }
 
+/// The parsed log tail for `GET /v1/dashboard/stats`. Without `include_logs`
+/// the log file is not read at all.
+fn dashboard_log_entries(
+    include_logs: bool,
+    log_directory: &Option<String>,
+    max_lines: usize,
+) -> Vec<LogEntry> {
+    if !include_logs {
+        return Vec::new();
+    }
+    read_log_file(log_directory, max_lines)
+        .iter()
+        .filter_map(|(offset, line)| {
+            let mut entry = parse_log_entry(line)?;
+            entry.file_position = *offset;
+            Some(entry)
+        })
+        .collect()
+}
+
 /// Read the last N lines from the log file, returning (byte_offset, line) pairs.
 fn read_log_file(
     log_directory: &Option<String>,
@@ -3176,7 +3184,7 @@ mod plain_text_log_tests {
 mod log_delta_tests {
     use std::io::Write;
 
-    use super::{LOG_TAIL_MAX_BYTES, LogEntry, read_log_entries_since, read_log_file};
+    use super::{LOG_TAIL_MAX_BYTES, LogEntry, dashboard_log_entries, read_log_entries_since, read_log_file};
 
     fn write_log(
         lines: usize,
@@ -3341,6 +3349,19 @@ mod log_delta_tests {
         let entries = read_log_entries_since(&log_dir(&dir), all[16].file_position, 100).expect("newer entries");
 
         assert_eq!(positions(&entries), positions(&all[17..]));
+    }
+
+    #[test]
+    fn the_stats_log_tail_is_read_only_when_logs_are_included() {
+        let (dir, _) = write_log(5, "x");
+
+        let included = dashboard_log_entries(true, &log_dir(&dir), 10);
+        let excluded = dashboard_log_entries(false, &log_dir(&dir), 10);
+
+        assert_eq!(included.len(), 5);
+        let (_, last) = messages(&included);
+        assert!(last.contains(" 00000004 "), "{last}");
+        assert!(excluded.is_empty());
     }
 
     #[test]

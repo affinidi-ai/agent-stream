@@ -1,13 +1,13 @@
-# Environment for the test binaries, set once when cargo starts them. Tests
-# must not call std::env::set_var or remove_var: another test thread reading
-# the environment at the same moment can crash the whole test process.
+# Environment for every process cargo starts (build scripts, tests, `cargo run`).
+# Tests must not call std::env::set_var or remove_var: another test thread
+# reading the environment at the same moment can crash the whole test process.
 [env]
 # Homebrew's libxml2 and libxslt are keg-only, so without this a bare `cargo`
 # run inside the repo (rust-analyzer, a shell) links macOS's own libxml2 next to
 # Homebrew's libxmlsec1 and the SAML tests crash. cyrus-sasl is here because
 # without it rdkafka's sasl2-sys adds `-L /usr/lib`, which has the same effect.
-# A PKG_CONFIG_PATH already in the environment wins, so Linux and CI builds are
-# unaffected.
+# Apple Silicon prefix only (make exports Intel's). A PKG_CONFIG_PATH already set
+# wins, and pkg-config skips missing directories, so Linux and CI are unaffected.
 PKG_CONFIG_PATH = "/opt/homebrew/opt/libxml2/lib/pkgconfig:/opt/homebrew/opt/libxslt/lib/pkgconfig:/opt/homebrew/opt/libxmlsec1/lib/pkgconfig:/opt/homebrew/opt/cyrus-sasl/lib/pkgconfig"
 AS_TEST_ENCRYPTION_KEY = "zKpMm5w+9x1eZCGHqcRN8vU2yL+fA3bE7nD4oP/jT9s="
 AS_TEST_INVALID_ENCRYPTION_KEY = "tooshort"

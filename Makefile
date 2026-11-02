@@ -148,8 +148,14 @@ verify-xml-libs: ## Verify libxml2/libxslt/libxmlsec1 resolve to a single Homebr
 	done; \
 	if [ -z "$$bin" ]; then echo "$(YELLOW)⚠️  No agent-stream build yet, libxml2/libxslt link check skipped$(NC)"; exit 0; fi; \
 	for lib in libxml2 libxslt; do \
-		path=$$(otool -L "$$bin" | awk -v lib="/$$lib." 'index($$1, lib) { print $$1; exit }'); \
-		if [ -z "$$path" ]; then echo "$(RED)❌ $$bin does not link $$lib$(NC)"; exit 1; fi; \
+		paths=$$(otool -L "$$bin" | awk -v lib="/$$lib." 'index($$1, lib) { print $$1 }'); \
+		count=$$(printf '%s' "$$paths" | grep -c .); \
+		if [ "$$count" -eq 0 ]; then echo "$(RED)❌ $$bin does not link $$lib$(NC)"; exit 1; fi; \
+		if [ "$$count" -ne 1 ]; then \
+			echo "$(RED)❌ $$bin links $$count copies of $$lib:$(NC)"; printf '%s\n' "$$paths"; \
+			echo "$(RED)   Run 'make fix-xml-libs'.$(NC)"; exit 1; \
+		fi; \
+		path=$$paths; \
 		case "$$path" in \
 			$(BREW_PREFIX)/*) ;; \
 			*) echo "$(RED)❌ $$bin links $$path, not Homebrew's $$lib. Run 'make fix-xml-libs'.$(NC)"; exit 1;; \
@@ -642,11 +648,13 @@ LOCAL_STARTED := $(shell date +%s)
 # files it rewrites. Then the checks as groups side by side, then the tests
 # (scripts/local/parallel.sh; each run's logs and summary in
 # tmp/local/<date>_<time>/, tmp/local/latest the newest). The frontend and
-# backend groups touch different folders, so nothing writes what another reads.
-# No `make check`: clippy compiles everything it would, and more. PARALLEL=0
-# runs every group one after another, for a machine short of memory.
+# backend groups touch different folders, so nothing writes what another reads;
+# `audit` runs `npm audit` in the dashboard folder, so it follows `node-local`'s
+# `npm install` in the frontend group. No `make check`: clippy compiles
+# everything it would, and more. PARALLEL=0 runs every group one after another,
+# for a machine short of memory.
 PARALLEL ?= 1
-LOCAL_CHECKS := "frontend=node-local" "backend=clippy audit cargo-build"
+LOCAL_CHECKS := "frontend=node-local audit" "backend=clippy cargo-build"
 LOCAL_TESTS := "backend-tests=test"
 local: ## Run all local checks with autofix: fmt, then the frontend and backend checks side by side, then the tests (PARALLEL=0: one at a time); ends with the time taken
 	@$(MAKE) fmt
