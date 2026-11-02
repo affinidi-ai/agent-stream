@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0]
+## [1.0.0] - 2026-11-02
 
 ### Added
 
@@ -37,3 +37,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support DID-based appliance identity and DIDComm Trust Fabric connections governed by policy.
 - Support encryption at rest, encrypted backups, redacted exports, secret management, and Active/Standby deployment.
 - Redact secrets and personal data from logs and telemetry.
+
