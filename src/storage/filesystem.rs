@@ -3163,60 +3163,70 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_refresh_from_disk_reflects_external_update_and_eviction() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = CachedFilesystemStorage::<TestEntity>::new(temp_dir.path().to_path_buf(), "test_entity")
-            .await
-            .unwrap();
+    #[test]
+    fn test_refresh_from_disk_reflects_external_update_and_eviction() {
+        let _guard = CACHE_REFRESH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let a = TestEntity {
-            id: "a".to_string(),
-            name: "A".to_string(),
-            value: 1,
-        };
-        let b = TestEntity {
-            id: "b".to_string(),
-            name: "B".to_string(),
-            value: 2,
-        };
-        storage
-            .save(&a)
-            .await
-            .unwrap();
-        storage
-            .save(&b)
-            .await
-            .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let temp_dir = TempDir::new().unwrap();
+                let storage = CachedFilesystemStorage::<TestEntity>::new(temp_dir.path().to_path_buf(), "test_entity")
+                    .await
+                    .unwrap();
 
-        let a_updated = TestEntity {
-            id: "a".to_string(),
-            name: "A-updated".to_string(),
-            value: 99,
-        };
-        save_entity_to_disk(&storage.storage_dir, storage.entity_name, &storage.config, &a_updated)
-            .await
-            .unwrap();
-        delete_entity_from_disk::<TestEntity>(&storage.storage_dir, storage.entity_name, "b")
-            .await
-            .unwrap();
+                let a = TestEntity {
+                    id: "a".to_string(),
+                    name: "A".to_string(),
+                    value: 1,
+                };
+                let b = TestEntity {
+                    id: "b".to_string(),
+                    name: "B".to_string(),
+                    value: 2,
+                };
+                storage
+                    .save(&a)
+                    .await
+                    .unwrap();
+                storage
+                    .save(&b)
+                    .await
+                    .unwrap();
 
-        let mut before = storage
-            .list_all()
-            .await
-            .unwrap();
-        before.sort_by(|x, y| x.id.cmp(&y.id));
-        assert_eq!(before, vec![a.clone(), b.clone()]);
+                let a_updated = TestEntity {
+                    id: "a".to_string(),
+                    name: "A-updated".to_string(),
+                    value: 99,
+                };
+                save_entity_to_disk(&storage.storage_dir, storage.entity_name, &storage.config, &a_updated)
+                    .await
+                    .unwrap();
+                delete_entity_from_disk::<TestEntity>(&storage.storage_dir, storage.entity_name, "b")
+                    .await
+                    .unwrap();
 
-        <CachedFilesystemStorage<TestEntity> as StorageBackend<TestEntity>>::refresh_from_disk(&storage)
-            .await
-            .unwrap();
+                let mut before = storage
+                    .list_all()
+                    .await
+                    .unwrap();
+                before.sort_by(|x, y| x.id.cmp(&y.id));
+                assert_eq!(before, vec![a.clone(), b.clone()]);
 
-        let after = storage
-            .list_all()
-            .await
-            .unwrap();
-        assert_eq!(after, vec![a_updated]);
+                <CachedFilesystemStorage<TestEntity> as StorageBackend<TestEntity>>::refresh_from_disk(&storage)
+                    .await
+                    .unwrap();
+
+                let after = storage
+                    .list_all()
+                    .await
+                    .unwrap();
+                assert_eq!(after, vec![a_updated]);
+            });
     }
 
     #[tokio::test]
