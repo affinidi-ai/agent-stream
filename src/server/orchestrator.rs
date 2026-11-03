@@ -4162,6 +4162,18 @@ mod tests {
         use crate::policies::FileSystemPolicyDefinitionStore;
         use crate::policies::policy_definitions::{PolicyDefinition, PolicyType};
 
+        /// Restores the process-wide pipe policy manager when the test ends,
+        /// even on a panic, so no other test resolves definitions from this
+        /// test's store or sees its compiled pipe.
+        struct RestorePipePolicyManager(Option<Arc<FileSystemPolicyDefinitionStore>>);
+
+        impl Drop for RestorePipePolicyManager {
+            fn drop(&mut self) {
+                PIPE_POLICY_MANAGER.replace_policy_definition_store(self.0.take());
+                PIPE_POLICY_MANAGER.remove_pipe("promotion-pipe");
+            }
+        }
+
         fn definition(name: &str) -> PolicyDefinition {
             PolicyDefinition {
                 id: "promotion-gate".to_string(),
@@ -4223,7 +4235,9 @@ mod tests {
                 .save(pipe.clone())
                 .await
                 .unwrap();
-            PIPE_POLICY_MANAGER.set_policy_definition_store(definitions.clone());
+            let _restore = RestorePipePolicyManager(
+                PIPE_POLICY_MANAGER.replace_policy_definition_store(Some(definitions.clone())),
+            );
             PIPE_POLICY_MANAGER
                 .update_pipe_policy(&pipe)
                 .await
@@ -4259,7 +4273,6 @@ mod tests {
                 .policy_evidence("promotion-pipe", None)
                 .expect("the pipe policy is compiled");
             assert_eq!(evidence.name.as_deref(), Some("edited on the active"));
-            PIPE_POLICY_MANAGER.remove_pipe("promotion-pipe");
         });
         assert!(mode::is_ready_to_serve());
     }
