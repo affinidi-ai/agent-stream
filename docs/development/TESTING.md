@@ -50,6 +50,12 @@ Inline, in the module they cover. The crate's tests compile into the `agent-stre
 test target, so filter by module path. Run `make config-test` once first: it generates the
 certificates and backup key the tests need, and the make targets do this for you.
 
+Tests must not change the process environment (`std::env::set_var`, `remove_var`): another
+test thread reading it at the same moment can crash the test process. Variables the tests
+need are set for every run in [`.cargo/config.toml`](../../.cargo/config.toml) `[env]`, and
+code that reads the environment can take a lookup function that tests call with their own
+values, as `TestAuthConfig::from_lookup` does.
+
 ```bash
 cargo test --bin agent-stream "<module path>"
 cargo test --bin agent-stream pipes::prompt_guard::external

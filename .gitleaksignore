@@ -11,11 +11,11 @@ src/jwt_bearer/validator.rs:private-key:275
 src/source_auth/middleware.rs:private-key:1015
 
 # --- Test master keys for encryption at rest ---
-src/encryption/init.rs:generic-api-key:93
+# The test binaries' key, set for every test run by Cargo's [env].
+.cargo/config.toml:generic-api-key:12
 src/encryption/key_management.rs:generic-api-key:377
-src/encryption/serde_encrypted.rs:generic-api-key:390
 # The name of an environment variable that must not exist, not a key.
-src/storage/filesystem.rs:generic-api-key:3978
+src/storage/filesystem.rs:generic-api-key:3977
 
 # --- Redaction test fixtures: inputs must look like secrets ---
 # The log redactor tests feed fake JWTs, a truncated PEM key, a test did:key and

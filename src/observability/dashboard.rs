@@ -528,7 +528,7 @@ async fn compute_broadcast_delta(
         pipe_id: None,
         since_log_position,
     };
-    match compute_dashboard_delta(state, &query, None).await {
+    match compute_dashboard_delta(state, &query, None, true).await {
         Ok(delta) => delta,
         Err(e) => {
             tracing::warn!("Failed to compute broadcast delta: {}", e);
@@ -541,11 +541,14 @@ async fn compute_broadcast_delta(
 }
 
 /// Core logic for computing a dashboard delta. Used by the HTTP handler and
-/// the periodic WebSocket broadcast task.
+/// the periodic WebSocket broadcast task. The log file is read only when
+/// `include_logs` is set, so a caller without `logs.view` cannot make the
+/// appliance read it.
 pub async fn compute_dashboard_delta(
     state: &DashboardState,
     query: &DashboardQuery,
     session_token: Option<&str>,
+    include_logs: bool,
 ) -> Result<DashboardDelta, String> {
     let now = Utc::now();
     let since_timestamp = query
@@ -832,7 +835,7 @@ pub async fn compute_dashboard_delta(
         300
     };
 
-    if let Some(since_pos) = query.since_log_position {
+    if include_logs && let Some(since_pos) = query.since_log_position {
         // Position-based delta: read entries after the given byte offset
         let log_dir = state
             .config
@@ -875,7 +878,7 @@ pub async fn compute_dashboard_delta(
                 changes.logs = Some(LogsDelta { new_entries: entries.clone() });
             }
         }
-    } else {
+    } else if include_logs {
         // No position available: read the last N entries from the end of the file.
         // The frontend deduplicates by file_position so overlap is harmless.
         let log_dir = state
@@ -1360,7 +1363,7 @@ pub async fn get_dashboard_delta(
 ) -> Result<Json<DashboardDelta>, (axum::http::StatusCode, String)> {
     let access = DashboardReadAccess::of_request(&guard, &caller, &pat, &tenant, &delegation).await;
     let session_token = crate::auth_manager::middleware::extract_session_token_from_headers(&headers);
-    compute_dashboard_delta(&state, &query, session_token.as_deref())
+    compute_dashboard_delta(&state, &query, session_token.as_deref(), access.logs)
         .await
         .map(|mut delta| {
             if !access.logs {
@@ -1953,19 +1956,11 @@ pub async fn get_dashboard_stats(
         .clone();
     let channel_filter = query.surface_id.clone();
     let pipe_filter = query.pipe_id.clone();
-    let log_entries: Vec<LogEntry> = tokio::task::spawn_blocking(move || {
-        let log_lines = read_log_file(&log_dir, log_read_limit);
-        log_lines
-            .iter()
-            .filter_map(|(offset, line)| {
-                let mut entry = parse_log_entry(line)?;
-                entry.file_position = *offset;
-                Some(entry)
-            })
-            .collect::<Vec<LogEntry>>()
-    })
-    .await
-    .unwrap_or_else(|_| vec![]);
+    let include_logs = access.logs;
+    let log_entries: Vec<LogEntry> =
+        tokio::task::spawn_blocking(move || dashboard_log_entries(include_logs, &log_dir, log_read_limit))
+            .await
+            .unwrap_or_else(|_| vec![]);
     let mut log_entries = log_entries;
     if let Some(channel_id) = &channel_filter {
         let channel_prefix = format!("[CHANNEL:{}]", channel_id);
@@ -2495,18 +2490,103 @@ async fn build_channel_list(
     channel_infos
 }
 
+/// Size of each chunk read backwards while looking for the start of the log tail.
+const LOG_TAIL_CHUNK_BYTES: u64 = 64 * 1024;
+
+/// Most bytes a tail read goes back from the end of the log file.
+const LOG_TAIL_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Consume the rest of the current line and return how many bytes it held.
+///
+/// Reads bytes, not a `String`: a seek can land inside a multi-byte character,
+/// and a failed UTF-8 read still consumes the line, which would shift every
+/// later `file_position`.
+fn skip_partial_line(reader: &mut impl std::io::BufRead) -> std::io::Result<u64> {
+    let mut partial = Vec::new();
+    reader.read_until(b'\n', &mut partial)?;
+    Ok(partial.len() as u64)
+}
+
+/// Find where the last `max_lines` lines of a log begin.
+///
+/// Scans backwards from `file_len` in chunks, counting newlines, and never
+/// reads before `lower`. Returns the byte offset of the first of those lines,
+/// or `None` when fewer than `max_lines` lines start after `lower`.
+fn log_tail_line_start<R: std::io::Read + std::io::Seek>(
+    file: &mut R,
+    file_len: u64,
+    lower: u64,
+    max_lines: usize,
+) -> std::io::Result<Option<u64>> {
+    use std::io::SeekFrom;
+
+    let mut buf = vec![0u8; LOG_TAIL_CHUNK_BYTES as usize];
+    let mut line_starts = 0;
+    let mut end = file_len;
+    while end > lower && max_lines > 0 {
+        let chunk_start = end
+            .saturating_sub(LOG_TAIL_CHUNK_BYTES)
+            .max(lower);
+        let chunk = &mut buf[..(end - chunk_start) as usize];
+        file.seek(SeekFrom::Start(chunk_start))?;
+        file.read_exact(chunk)?;
+        for (index, byte) in chunk.iter().enumerate().rev() {
+            let line_start = chunk_start + index as u64 + 1;
+            if *byte == b'\n' && line_start < file_len {
+                line_starts += 1;
+                if line_starts == max_lines {
+                    return Ok(Some(line_start));
+                }
+            }
+        }
+        end = chunk_start;
+    }
+    Ok(None)
+}
+
+/// Read the lines of a log from `start` to the end, as (byte_offset, line) pairs.
+///
+/// With `skip_first_line`, the bytes up to the first newline are skipped, for a
+/// `start` that may fall inside a line or names a line the caller already has.
+fn read_log_lines_from<R: std::io::Read + std::io::Seek>(
+    file: &mut R,
+    start: u64,
+    skip_first_line: bool,
+) -> std::io::Result<Vec<(u64, String)>> {
+    use std::io::{BufRead, SeekFrom};
+
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut offset = start;
+    if skip_first_line {
+        offset += skip_partial_line(&mut reader)?;
+    }
+
+    let mut lines = Vec::new();
+    for content in reader
+        .lines()
+        .map_while(Result::ok)
+    {
+        let line_offset = offset;
+        offset += content.len() as u64 + 1;
+        lines.push((line_offset, content));
+    }
+    Ok(lines)
+}
+
 /// Read log entries after the given byte offset in the active log file.
 ///
-/// Seeks directly to `after_position`, skips to the next complete line,
-/// then reads all remaining entries. If more than `max_lines` entries exist,
-/// only the **last** (freshest) `max_lines` are returned so the UX always
-/// shows the end of the file.
+/// Reads only the last `max_lines` lines written after the line at
+/// `after_position`, found by scanning backwards from the end of the file, and
+/// never goes back more than `LOG_TAIL_MAX_BYTES`. A position far behind the
+/// end of a large file therefore costs no more than a recent one. Only the
+/// **last** (freshest) `max_lines` entries are returned so the UX always shows
+/// the end of the file. A read error returns `None`.
 fn read_log_entries_since(
     log_directory: &Option<String>,
     after_position: u64,
     max_lines: usize,
 ) -> Option<Vec<LogEntry>> {
-    use std::io::{BufRead, Seek, SeekFrom};
     use std::path::PathBuf;
 
     let log_dir = log_directory.as_ref()?;
@@ -2526,23 +2606,15 @@ fn read_log_entries_since(
         return None;
     }
 
-    // Seek and discard the (likely partial) first line
-    let _ = file.seek(SeekFrom::Start(after_position));
-    let mut reader = std::io::BufReader::new(&file);
-    let mut partial = String::new();
-    let partial_len = reader
-        .read_line(&mut partial)
-        .unwrap_or(0);
-    let mut offset = after_position + partial_len as u64;
+    let lower = after_position.max(file_len.saturating_sub(LOG_TAIL_MAX_BYTES));
+    let lines = match log_tail_line_start(&mut file, file_len, lower, max_lines).ok()? {
+        Some(start) => read_log_lines_from(&mut file, start, false),
+        None => read_log_lines_from(&mut file, lower, true),
+    }
+    .ok()?;
 
     let mut entries = Vec::new();
-    for content in reader
-        .lines()
-        .map_while(Result::ok)
-    {
-        let line_offset = offset;
-        offset += content.len() as u64 + 1;
-
+    for (line_offset, content) in lines {
         if let Some(mut entry) = parse_log_entry(&content) {
             entry.file_position = line_offset;
             entries.push(entry);
@@ -2628,8 +2700,8 @@ fn parse_plain_text_log_entry(line: &str) -> Option<LogEntry> {
         .ok()?
         .timestamp_millis();
 
-    // Get the rest of the line after timestamp
-    let rest = &line[first_space + 1..];
+    // Get the rest of the line after timestamp, ignoring level-column padding
+    let rest = line[first_space + 1..].trim_start();
 
     // Find the next space to separate level from message
     let second_space = rest.find(' ')?;
@@ -2670,12 +2742,31 @@ fn strip_ansi_codes(s: &str) -> String {
     result
 }
 
+/// The parsed log tail for `GET /v1/dashboard/stats`. Without `include_logs`
+/// the log file is not read at all.
+fn dashboard_log_entries(
+    include_logs: bool,
+    log_directory: &Option<String>,
+    max_lines: usize,
+) -> Vec<LogEntry> {
+    if !include_logs {
+        return Vec::new();
+    }
+    read_log_file(log_directory, max_lines)
+        .iter()
+        .filter_map(|(offset, line)| {
+            let mut entry = parse_log_entry(line)?;
+            entry.file_position = *offset;
+            Some(entry)
+        })
+        .collect()
+}
+
 /// Read the last N lines from the log file, returning (byte_offset, line) pairs.
 fn read_log_file(
     log_directory: &Option<String>,
     max_lines: usize,
 ) -> Vec<(u64, String)> {
-    use std::io::{BufRead, Read, Seek, SeekFrom};
     use std::path::PathBuf;
 
     let log_dir = match log_directory {
@@ -2693,54 +2784,24 @@ fn read_log_file(
 
     match std::fs::File::open(&log_path) {
         Ok(mut file) => {
-            // Read only the tail of the file to avoid loading hundreds of MB into memory.
-            // Seek backwards from the end, reading a chunk that is very likely to contain
-            // at least `max_lines` lines (assuming ~512 bytes per log line on average).
             let file_len = file
                 .metadata()
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let tail_bytes = (max_lines as u64) * 512;
+            let lower = file_len.saturating_sub(LOG_TAIL_MAX_BYTES);
+            let lines = log_tail_line_start(&mut file, file_len, lower, max_lines).and_then(|start| match start {
+                Some(start) => read_log_lines_from(&mut file, start, false),
+                None => read_log_lines_from(&mut file, lower, lower > 0),
+            });
 
-            if file_len > tail_bytes {
-                let seek_pos = file_len - tail_bytes;
-                let _ = file.seek(SeekFrom::Start(seek_pos));
-                // Read and discard the first (likely partial) line after seeking
-                let mut reader = std::io::BufReader::new(&file);
-                let mut partial = String::new();
-                let partial_len = reader
-                    .read_line(&mut partial)
-                    .unwrap_or(0);
-                let mut offset = seek_pos + partial_len as u64;
-
-                let mut lines: Vec<(u64, String)> = Vec::new();
-                for content in reader
-                    .lines()
-                    .map_while(Result::ok)
-                {
-                    let line_offset = offset;
-                    offset += content.len() as u64 + 1;
-                    lines.push((line_offset, content));
+            match lines {
+                Ok(lines) => {
+                    let start = lines
+                        .len()
+                        .saturating_sub(max_lines);
+                    lines[start..].to_vec()
                 }
-
-                let start = lines
-                    .len()
-                    .saturating_sub(max_lines);
-                lines[start..].to_vec()
-            } else {
-                // File is small enough to read entirely
-                let mut content = String::new();
-                let _ = file.read_to_string(&mut content);
-                let mut offset: u64 = 0;
-                let mut lines: Vec<(u64, String)> = Vec::new();
-                for line_str in content.lines() {
-                    lines.push((offset, line_str.to_string()));
-                    offset += line_str.len() as u64 + 1;
-                }
-                let start = lines
-                    .len()
-                    .saturating_sub(max_lines);
-                lines[start..].to_vec()
+                Err(e) => vec![(0, format!("Failed to read log file: {}", e))],
             }
         }
         Err(e) => {
@@ -3070,5 +3131,243 @@ mod read_access_tests {
             access(Some(&admin), Some("user-1"), Some(&["surfaces.capture"])).await,
             DashboardReadAccess { logs: false, captures: true }
         );
+    }
+}
+
+#[cfg(test)]
+mod plain_text_log_tests {
+    use super::parse_plain_text_log_entry;
+
+    #[test]
+    fn parses_padded_info_log_level() {
+        let entry = parse_plain_text_log_entry("2026-09-17T12:34:56.123456Z  INFO stream started")
+            .expect("INFO log should parse");
+
+        assert_eq!(entry.level, "INFO");
+        assert_eq!(entry.message, "stream started");
+    }
+
+    #[test]
+    fn parses_padded_warn_log_level() {
+        let entry = parse_plain_text_log_entry("2026-09-17T12:34:56.123456Z  WARN request denied")
+            .expect("WARN log should parse");
+
+        assert_eq!(entry.level, "WARN");
+        assert_eq!(entry.message, "request denied");
+    }
+
+    #[test]
+    fn parses_unpadded_error_log_level() {
+        let entry = parse_plain_text_log_entry("2026-09-17T12:34:56.123456Z ERROR upstream unavailable")
+            .expect("ERROR log should parse");
+
+        assert_eq!(entry.level, "ERROR");
+        assert_eq!(entry.message, "upstream unavailable");
+    }
+
+    #[test]
+    fn parses_unpadded_debug_log_level() {
+        let entry = parse_plain_text_log_entry("2026-09-17T12:34:56.123456Z DEBUG request details")
+            .expect("DEBUG log should parse");
+
+        assert_eq!(entry.level, "DEBUG");
+        assert_eq!(entry.message, "request details");
+    }
+
+    #[test]
+    fn rejects_a_line_without_a_timestamp() {
+        assert!(parse_plain_text_log_entry("not a timestamp  INFO message").is_none());
+    }
+}
+
+#[cfg(test)]
+mod log_delta_tests {
+    use std::io::Write;
+
+    use super::{LOG_TAIL_MAX_BYTES, LogEntry, dashboard_log_entries, read_log_entries_since, read_log_file};
+
+    fn write_log(
+        lines: usize,
+        padding: &str,
+    ) -> (tempfile::TempDir, u64) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut file = std::fs::File::create(log_path(&dir)).expect("log file");
+        for i in 0..lines {
+            writeln!(file, "2026-11-02T16:17:10.{i:06}Z  INFO line {i:08} {padding}").expect("log line");
+        }
+        let len = file
+            .metadata()
+            .expect("log metadata")
+            .len();
+        (dir, len)
+    }
+
+    fn log_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path()
+            .join("agent-stream.log")
+    }
+
+    fn assert_line_start(
+        bytes: &[u8],
+        position: u64,
+    ) {
+        let position = usize::try_from(position).expect("position fits usize");
+        let line = &bytes[position..];
+        assert!(position == 0 || bytes[position - 1] == b'\n', "{position} is not a line start");
+        assert!(line.starts_with(b"2026-"), "{position} is not a log line");
+    }
+
+    fn log_dir(dir: &tempfile::TempDir) -> Option<String> {
+        Some(
+            dir.path()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    fn positions(entries: &[LogEntry]) -> Vec<u64> {
+        entries
+            .iter()
+            .map(|entry| entry.file_position)
+            .collect()
+    }
+
+    fn messages(entries: &[LogEntry]) -> (&str, &str) {
+        let first = entries
+            .first()
+            .expect("oldest entry");
+        let last = entries
+            .last()
+            .expect("newest entry");
+        (first.message.as_str(), last.message.as_str())
+    }
+
+    #[test]
+    fn a_stale_position_returns_the_last_max_lines_entries() {
+        let (dir, _) = write_log(10_000, &"x".repeat(400));
+
+        let entries = read_log_entries_since(&log_dir(&dir), 0, 10).expect("tail entries");
+
+        assert_eq!(entries.len(), 10);
+        let (first, last) = messages(&entries);
+        assert!(first.contains(" 00009990 "), "{first}");
+        assert!(last.contains(" 00009999 "), "{last}");
+    }
+
+    #[test]
+    fn long_lines_still_return_the_last_max_lines_entries() {
+        let (dir, _) = write_log(100, &"x".repeat(3_000));
+
+        let entries = read_log_entries_since(&log_dir(&dir), 0, 10).expect("tail entries");
+
+        assert_eq!(entries.len(), 10);
+        let (first, last) = messages(&entries);
+        assert!(first.contains(" 00000090 "), "{first}");
+        assert!(last.contains(" 00000099 "), "{last}");
+    }
+
+    #[test]
+    fn a_stale_position_never_reads_before_the_byte_cap_even_inside_a_character() {
+        for pad in 0..2 {
+            let (dir, _) = write_log(12, &"é".repeat(512 * 1024));
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(log_path(&dir))
+                .expect("log file");
+            writeln!(file, "{}", "x".repeat(pad)).expect("pad line");
+            drop(file);
+            let bytes = std::fs::read(log_path(&dir)).expect("log bytes");
+            let len = bytes.len() as u64;
+
+            let entries = read_log_entries_since(&log_dir(&dir), 0, 10).expect("tail entries");
+
+            assert!(entries.len() < 10, "pad {pad}");
+            for position in positions(&entries) {
+                assert!(position >= len - LOG_TAIL_MAX_BYTES, "pad {pad}: {position}");
+                assert_line_start(&bytes, position);
+            }
+            let (_, last) = messages(&entries);
+            assert!(last.contains(" 00000011 "), "pad {pad}");
+        }
+    }
+
+    #[test]
+    fn a_recent_position_returns_every_line_after_it_when_lines_are_long() {
+        let (dir, _) = write_log(20, &"x".repeat(1_000));
+        let all = read_log_entries_since(&log_dir(&dir), 0, 100).expect("all entries");
+
+        let entries = read_log_entries_since(&log_dir(&dir), all[11].file_position, 10).expect("newer entries");
+
+        assert_eq!(positions(&entries), positions(&all[12..]));
+    }
+
+    #[test]
+    fn the_initial_tail_returns_max_lines_when_lines_are_long() {
+        let (dir, _) = write_log(100, &"x".repeat(3_000));
+
+        let lines = read_log_file(&log_dir(&dir), 10);
+
+        assert_eq!(lines.len(), 10);
+        let (first, last) = (&lines[0].1, &lines[9].1);
+        assert!(first.contains(" 00000090 "), "{first}");
+        assert!(last.contains(" 00000099 "), "{last}");
+    }
+
+    #[test]
+    fn a_stale_position_returns_the_byte_offset_of_each_line() {
+        let (dir, _) = write_log(1_000, &"…".repeat(150));
+        let bytes = std::fs::read(log_path(&dir)).expect("log bytes");
+
+        for max_lines in 1..=20 {
+            let entries = read_log_entries_since(&log_dir(&dir), 0, max_lines).expect("tail entries");
+            assert_eq!(entries.len(), max_lines);
+            for position in positions(&entries) {
+                assert_line_start(&bytes, position);
+            }
+        }
+    }
+
+    #[test]
+    fn the_initial_tail_returns_the_byte_offset_of_each_line() {
+        let (dir, _) = write_log(1_000, &"…".repeat(150));
+        let bytes = std::fs::read(log_path(&dir)).expect("log bytes");
+
+        for max_lines in 1..=20 {
+            let lines = read_log_file(&log_dir(&dir), max_lines);
+            assert_eq!(lines.len(), max_lines);
+            for (position, _) in lines {
+                assert_line_start(&bytes, position);
+            }
+        }
+    }
+
+    #[test]
+    fn a_recent_position_returns_only_the_lines_after_it() {
+        let (dir, _) = write_log(20, &"x".repeat(400));
+        let all = read_log_entries_since(&log_dir(&dir), 0, 100).expect("all entries");
+
+        let entries = read_log_entries_since(&log_dir(&dir), all[16].file_position, 100).expect("newer entries");
+
+        assert_eq!(positions(&entries), positions(&all[17..]));
+    }
+
+    #[test]
+    fn the_stats_log_tail_is_read_only_when_logs_are_included() {
+        let (dir, _) = write_log(5, "x");
+
+        let included = dashboard_log_entries(true, &log_dir(&dir), 10);
+        let excluded = dashboard_log_entries(false, &log_dir(&dir), 10);
+
+        assert_eq!(included.len(), 5);
+        let (_, last) = messages(&included);
+        assert!(last.contains(" 00000004 "), "{last}");
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn a_position_at_the_end_of_the_file_returns_nothing() {
+        let (dir, len) = write_log(5, &"x".repeat(400));
+
+        assert!(read_log_entries_since(&log_dir(&dir), len, 10).is_none());
     }
 }

@@ -74,13 +74,17 @@ impl TestAuthConfig {
     /// unset or blank, the endpoint stays disabled rather than falling back to a
     /// well-known default token (which would hand out administrator sessions).
     pub fn from_env() -> Self {
-        let requested = std::env::var("AS_TEST_MODE")
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Create configuration from variables read through `lookup`, so tests can
+    /// supply them without changing the process environment.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let requested = lookup("AS_TEST_MODE")
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
 
-        let token = std::env::var("AS_TEST_TOKEN")
-            .ok()
-            .filter(|t| !t.trim().is_empty());
+        let token = lookup("AS_TEST_TOKEN").filter(|t| !t.trim().is_empty());
 
         let enabled = match (requested, token.is_some()) {
             (true, true) => {
@@ -99,9 +103,9 @@ impl TestAuthConfig {
         Self {
             enabled,
             test_token: token.unwrap_or_default(),
-            test_username: std::env::var("AS_TEST_USERNAME").unwrap_or_else(|_| "test-user".to_string()),
-            test_user_id: std::env::var("AS_TEST_USER_ID").unwrap_or_else(|_| "test-user-001".to_string()),
-            allow_role_override: std::env::var("AS_TEST_ALLOW_ROLE_OVERRIDE")
+            test_username: lookup("AS_TEST_USERNAME").unwrap_or_else(|| "test-user".to_string()),
+            test_user_id: lookup("AS_TEST_USER_ID").unwrap_or_else(|| "test-user-001".to_string()),
+            allow_role_override: lookup("AS_TEST_ALLOW_ROLE_OVERRIDE")
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
                 .unwrap_or(false),
         }
@@ -383,32 +387,21 @@ pub async fn test_login(
 
 #[cfg(test)]
 mod tests {
-    use lazy_static::lazy_static;
-    use std::sync::Mutex;
     use tempfile::tempdir;
 
     use super::*;
 
-    // required as each test modifies environment variables,
-    // which impacts other tests so we use a global mutex
-    // to serialize them
-    lazy_static! {
-        static ref TEST_LOCK: Mutex<bool> = Mutex::new(true);
+    fn config_from(vars: &[(&str, &str)]) -> TestAuthConfig {
+        TestAuthConfig::from_lookup(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
     }
 
     #[test]
     fn test_config_default_disabled() {
-        let _unused = TEST_LOCK.lock();
-
-        // Clear env vars for clean test
-        unsafe {
-            std::env::remove_var("AS_TEST_MODE");
-            std::env::remove_var("AS_TEST_TOKEN");
-            std::env::remove_var("AS_TEST_USERNAME");
-            std::env::remove_var("AS_TEST_USER_ID");
-        }
-
-        let config = TestAuthConfig::from_env();
+        let config = config_from(&[]);
         assert!(!config.enabled);
         assert!(config.test_token.is_empty());
         assert_eq!(config.test_username, "test-user");
@@ -417,44 +410,26 @@ mod tests {
 
     #[test]
     fn test_config_fails_closed_without_token() {
-        let _unused = TEST_LOCK.lock();
-
-        unsafe {
-            std::env::remove_var("AS_TEST_TOKEN");
-            std::env::set_var("AS_TEST_MODE", "true");
-        }
-
         // Requested but tokenless ⇒ stays disabled (fail-closed), no default token.
-        let config = TestAuthConfig::from_env();
+        let config = config_from(&[("AS_TEST_MODE", "true")]);
         assert!(!config.enabled);
         assert!(config.test_token.is_empty());
     }
 
     #[test]
     fn test_config_fails_closed_with_blank_token() {
-        let _unused = TEST_LOCK.lock();
-
-        unsafe {
-            std::env::set_var("AS_TEST_MODE", "true");
-            std::env::set_var("AS_TEST_TOKEN", "   ");
-        }
-
-        let config = TestAuthConfig::from_env();
+        let config = config_from(&[("AS_TEST_MODE", "true"), ("AS_TEST_TOKEN", "   ")]);
         assert!(!config.enabled);
     }
 
     #[test]
     fn test_config_enabled_from_env() {
-        let _unused = TEST_LOCK.lock();
-
-        unsafe {
-            std::env::set_var("AS_TEST_MODE", "true");
-            std::env::set_var("AS_TEST_TOKEN", "custom-token");
-            std::env::set_var("AS_TEST_USERNAME", "custom-user");
-            std::env::set_var("AS_TEST_USER_ID", "custom-id");
-        }
-
-        let config = TestAuthConfig::from_env();
+        let config = config_from(&[
+            ("AS_TEST_MODE", "true"),
+            ("AS_TEST_TOKEN", "custom-token"),
+            ("AS_TEST_USERNAME", "custom-user"),
+            ("AS_TEST_USER_ID", "custom-id"),
+        ]);
         assert!(config.enabled);
         assert_eq!(config.test_token, "custom-token");
         assert_eq!(config.test_username, "custom-user");
@@ -463,36 +438,19 @@ mod tests {
 
     #[test]
     fn test_config_enabled_with_1() {
-        let _unused = TEST_LOCK.lock();
-
-        unsafe {
-            std::env::remove_var("AS_TEST_USERNAME");
-            std::env::remove_var("AS_TEST_USER_ID");
-            std::env::set_var("AS_TEST_MODE", "1");
-            std::env::set_var("AS_TEST_TOKEN", "custom-token");
-        }
-
-        let config = TestAuthConfig::from_env();
+        let config = config_from(&[("AS_TEST_MODE", "1"), ("AS_TEST_TOKEN", "custom-token")]);
         assert!(config.enabled);
         assert_eq!(config.test_token, "custom-token");
     }
 
     #[test]
     fn test_config_disabled_with_false() {
-        let _unused = TEST_LOCK.lock();
-
-        unsafe {
-            std::env::set_var("AS_TEST_MODE", "false");
-        }
-
-        let config = TestAuthConfig::from_env();
+        let config = config_from(&[("AS_TEST_MODE", "false"), ("AS_TEST_TOKEN", "custom-token")]);
         assert!(!config.enabled);
     }
 
     #[tokio::test]
     async fn test_ensure_test_user_creates_approved_administrator() {
-        let _unused = TEST_LOCK.lock();
-
         let temp_dir = tempdir().unwrap();
         let storage_path = temp_dir.path().join("users");
         let avatars_path = temp_dir
@@ -538,8 +496,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_test_user_upgrades_existing_user() {
-        let _unused = TEST_LOCK.lock();
-
         let temp_dir = tempdir().unwrap();
         let storage_path = temp_dir.path().join("users");
         let avatars_path = temp_dir

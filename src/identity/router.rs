@@ -2878,6 +2878,49 @@ mod pipe_connection_test_route_tests {
     }
 
     #[tokio::test]
+    async fn the_dashboard_delta_reads_the_log_file_only_when_logs_are_included() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _issuer_dir) = dashboard_state(temp.path()).await;
+        let log_path = temp
+            .path()
+            .join("logs")
+            .join("agent-stream.log");
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(log_path)
+            .unwrap();
+        writeln!(log, r#"{{"timestamp":"2026-10-20T10:00:01Z","level":"INFO","message":"second log line"}}"#).unwrap();
+
+        for since_log_position in [None, Some(0)] {
+            let query: crate::observability::DashboardQuery =
+                serde_json::from_value(serde_json::json!({ "since_log_position": since_log_position })).unwrap();
+            let included = crate::observability::compute_dashboard_delta(&state, &query, None, true)
+                .await
+                .unwrap();
+            let excluded = crate::observability::compute_dashboard_delta(&state, &query, None, false)
+                .await
+                .unwrap();
+
+            assert!(
+                included
+                    .changes
+                    .logs
+                    .is_some(),
+                "{since_log_position:?}"
+            );
+            assert!(
+                excluded
+                    .changes
+                    .logs
+                    .is_none(),
+                "{since_log_position:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dashboard_reads_need_dashboard_view() {
         let mut rbac = crate::rbac::RbacConfig::default();
         rbac.permissions

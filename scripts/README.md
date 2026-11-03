@@ -60,4 +60,5 @@ Files starting with `_` are internal helpers called by other scripts or targets.
 | `setup-dynamodb.sh` | Creates the DynamoDB configuration table and loads the example configuration | `make setup-dynamodb` |
 | `check-toolchain-sync.sh` | Fails when a workflow `toolchain:` pin differs from `rust-version` in `Cargo.toml` | the `release-guards` workflow; run directly |
 | `checks.sh` | Runs `cargo fmt`, `cargo check`, Clippy (with fixes), build and tests in one go (Rust only) | run directly; `make ci` and `make lint` are the usual entry points |
+| `local/parallel.sh` | Runs groups of make targets side by side, each logged to `tmp/local/<date>_<time>/<group>.log`, then prints a summary and fails if any group failed (`PARALLEL=0`: one at a time) | `make local` |
 | `githooks/npm-audit`, `githooks/npm-lint` | Frontend audit and lint hook scripts | run directly; `make install-git-hooks` installs the pre-commit hooks |

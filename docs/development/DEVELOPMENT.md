@@ -118,6 +118,12 @@ server.
 | `make config-debug-dev` | Prepare the local debug configuration without a static dashboard build                      |
 | `make config-release`   | Prepare the release environment, including the optimised binary                             |
 
+The repository's [`.cargo/config.toml`](../../.cargo/config.toml) is tracked: it sets the test
+environment and a default `PKG_CONFIG_PATH` for Apple Silicon Homebrew for every cargo command. Keep personal
+Cargo settings, such as `sccache` or a linker choice, in `~/.cargo/config.toml`; Cargo merges
+both. If you kept an untracked `.cargo/config.toml` in your checkout, move its settings there
+and delete it before pulling this change.
+
 ## Named Instances
 
 Run isolated local instances by supplying `x`:
@@ -322,6 +328,7 @@ calling them directly.
 | `bdd-gherkin.py`                                               | BDD inventory and lint; see [`../testing/bdd-gherkin-tool.md`](../testing/bdd-gherkin-tool.md)                                           |
 | `checks.sh`                                                    | Runs `cargo fmt`, `cargo check`, Clippy (with fixes), build and tests in one go (Rust only); run it directly                             |
 | `githooks/`                                                    | Frontend audit and lint hook scripts; run them directly. `make install-git-hooks` installs the separate pre-commit hooks                 |
+| `local/parallel.sh`                                            | Runs groups of make targets side by side with a log per group in `tmp/local/` and one summary (`make local`)                             |
 
 ## Tests And Quality Checks
 
@@ -355,6 +362,8 @@ checks expected before a pull request.
 | `fmt-www-all`, `npm-lint-www-all`                 | Format, or lint with autofix, Rust and every frontend app                                                                                                                    |
 | `audit-www-all`, `audit-fix`, `audit-fix-www-all` | Audit Rust and every frontend app, or update dependencies to patched versions and audit again                                                                                |
 | `verify-rust-deps`, `verify-xml-libs`             | Check the Rust toolchain dependencies, or that the XML libraries resolve to one Homebrew copy                                                                                |
+| `fix-xml-libs`                                    | (macOS) Rebuild `libxml`, `samael` and `sasl2-sys` and the binary, then rerun `verify-xml-libs`; use it after a wrong link or a `brew upgrade`                                |
+| `local`                                           | `fmt`, then the frontend and backend checks side by side, then the tests; logs in `tmp/local/<date>_<time>/`, `PARALLEL=0` runs the groups one at a time                   |
 | `full-setup`                                      | `install-deps` then `dev`                                                                                                                                                    |
 | `clean-cargo`, `clean-www`                        | Remove Rust build output, or the dashboard build output and `node_modules`                                                                                                   |
 | `make-client`                                     | Build the VS Code extension `.vsix` and copy it to `clients/vscode-agent-stream/versions/`                                                                                   |

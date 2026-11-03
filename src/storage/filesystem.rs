@@ -2498,7 +2498,6 @@ pub async fn rwlock_storage_with_config<T: StorableEntity>(
 mod tests {
     use super::*;
     use crate::encryption::{KeyManager, KeySource};
-    use base64::Engine;
     use serde::{Deserialize, Serialize};
     use tempfile::TempDir;
 
@@ -3996,19 +3995,12 @@ mod tests {
 
     #[test]
     fn test_storage_config_with_valid_key() {
-        // Test creating StorageConfig with a valid encryption key from environment
-        use std::env;
-
-        // Generate a valid 32-byte key
-        let key: [u8; 32] = rand::random();
-        let key_str = base64::engine::general_purpose::STANDARD.encode(key);
-
-        unsafe { env::set_var("TEST_VALID_ENCRYPTION_KEY", &key_str) };
-
+        // Test creating StorageConfig with a valid encryption key from environment.
+        // `AS_TEST_ENCRYPTION_KEY` is a valid 32-byte key set by `.cargo/config.toml` `[env]`.
         let encryption_config = crate::config::EncryptionConfig {
             enabled: true,
             key_source: crate::config::KeySourceConfig::Environment,
-            key_env_var: "TEST_VALID_ENCRYPTION_KEY".to_string(),
+            key_env_var: "AS_TEST_ENCRYPTION_KEY".to_string(),
             key_file: None,
             kms_key_id: None,
             kms_max_concurrent_ops: 16,
@@ -4022,7 +4014,5 @@ mod tests {
                 .encryption_service
                 .is_some()
         );
-
-        unsafe { env::remove_var("TEST_VALID_ENCRYPTION_KEY") };
     }
 }

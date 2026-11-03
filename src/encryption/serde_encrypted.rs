@@ -385,15 +385,11 @@ mod tests {
     }
 
     fn init_test_encryption() {
-        // Set a deterministic test key via environment variable
-        unsafe {
-            std::env::set_var("SERDE_TEST_ENCRYPTION_KEY", "zKpMm5w+9x1eZCGHqcRN8vU2yL+fA3bE7nD4oP/jT9s=");
-        }
-
+        // A deterministic test key, set by `.cargo/config.toml` `[env]`.
         let config = crate::config::EncryptionConfig {
             enabled: true,
             field_encryption_enabled: true,
-            key_env_var: "SERDE_TEST_ENCRYPTION_KEY".to_string(),
+            key_env_var: "AS_TEST_ENCRYPTION_KEY".to_string(),
             ..Default::default()
         };
 
