@@ -576,6 +576,33 @@ allow if {
     }
 
     #[tokio::test]
+    async fn clearing_the_policy_evicts_a_compiled_engine() {
+        let manager = GatewayPolicyManager::new();
+        let mut gateway = create_test_gateway(
+            "gw-cleared",
+            GatewayType::SelfGateway,
+            Some(GatewayOpaPolicyConfig {
+                enabled: true,
+                policy: "package agentstream.policy\ndefault allow = false".to_string(),
+                policy_definition_id: None,
+                policy_definition_ids: Vec::new(),
+            }),
+        );
+        manager
+            .update_gateway_policy(&gateway)
+            .await
+            .unwrap();
+        assert!(manager.is_enforced("gw-cleared"));
+
+        gateway.opa_policy_config = None;
+        manager
+            .update_gateway_policy(&gateway)
+            .await
+            .unwrap();
+        assert!(!manager.is_enforced("gw-cleared"), "a removed policy is no longer enforced");
+    }
+
+    #[tokio::test]
     async fn test_remove_gateway_policy() {
         let manager = GatewayPolicyManager::new();
         let gateway = create_test_gateway(

@@ -200,7 +200,9 @@ On `SIGUSR1` the instance reports `503` at once, then:
 2. re-reads Surfaces from storage and rebuilds the Surface route table,
 3. recompiles every policy engine (Surfaces and their variants, internal surface records,
    gateways and the appliance-wide sets) from the stored definitions, so the instance
-   enforces the policy the previous Active saved, not the one it compiled at startup,
+   enforces the policy the previous Active saved, not the one it compiled at startup.
+   Every enabled Surface and every gateway is visited, so an engine whose policy the
+   previous Active removed is dropped,
 4. re-reads the rest of the shared state, so what the previous Active wrote is kept and
    extended rather than overwritten:
    - Members (rebuilding the identifier index the team gate uses), Teams, dashboard users

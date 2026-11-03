@@ -200,6 +200,40 @@ impl<'a> EngineScope<'a> {
     }
 }
 
+/// Whether `surface`'s engine is rebuilt for `scope`. A full pass takes every
+/// enabled surface, because the policy may come from the default variant or
+/// may have been removed, and the manager compiles or evicts accordingly.
+fn surface_in_scope(
+    surface: &crate::config::agent_surface::AgentSurface,
+    scope: EngineScope<'_>,
+) -> bool {
+    surface.status.is_enabled()
+        && match scope {
+            EngineScope::All => true,
+            EngineScope::Referencing(id) => surface_references_policy(surface, id),
+        }
+}
+
+/// Whether `gateway`'s engine is rebuilt for `scope`. A full pass takes every
+/// gateway, so one whose policy was removed has its engine evicted.
+fn gateway_in_scope(
+    gateway: &crate::gateways::types::Gateway,
+    scope: EngineScope<'_>,
+) -> bool {
+    match scope {
+        EngineScope::All => true,
+        EngineScope::Referencing(policy_id) => gateway
+            .opa_policy_config
+            .as_ref()
+            .is_some_and(|c| {
+                c.enabled
+                    && c.all_policy_definition_ids()
+                        .iter()
+                        .any(|id| id == policy_id)
+            }),
+    }
+}
+
 /// Recompile the pipe, surface, gateway and appliance-wide policy engines in
 /// `scope` from the stored definitions. A recompile that fails evicts the
 /// engine, so the object denies rather than keeping a stale policy.
@@ -250,13 +284,10 @@ pub(crate) async fn recompile_policy_engines(
             match surface_store {
                 Ok(store) => match store.list_all().await {
                     Ok(surfaces) => {
-                        for surface in surfaces.iter().filter(|s| {
-                            s.status.is_enabled()
-                                && match scope {
-                                    EngineScope::All => s.opa_enabled(),
-                                    EngineScope::Referencing(id) => surface_references_policy(s, id),
-                                }
-                        }) {
+                        for surface in surfaces
+                            .iter()
+                            .filter(|s| surface_in_scope(s, scope))
+                        {
                             match policy_manager
                                 .update_channel_policy(surface)
                                 .await
@@ -295,18 +326,7 @@ pub(crate) async fn recompile_policy_engines(
                     Ok(gateways) => {
                         for gateway in gateways
                             .iter()
-                            .filter(|g| match scope {
-                                EngineScope::All => g.opa_policy_config.is_some(),
-                                EngineScope::Referencing(policy_id) => g
-                                    .opa_policy_config
-                                    .as_ref()
-                                    .is_some_and(|c| {
-                                        c.enabled
-                                            && c.all_policy_definition_ids()
-                                                .iter()
-                                                .any(|id| id == policy_id)
-                                    }),
-                            })
+                            .filter(|g| gateway_in_scope(g, scope))
                         {
                             match gw_manager
                                 .update_gateway_policy(gateway)
@@ -1336,5 +1356,95 @@ mod tests {
         let err =
             resolve_simulation(&d, None, Some("package x.policy\ndefault allow := true"), Some("bogus")).unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    fn variant_policy_surface(def_id: &str) -> crate::config::agent_surface::AgentSurface {
+        use crate::config::agent_surface::{AgentSurface, PolicyRef};
+        use crate::config::agent_surface_variants::{SurfaceOverrides, SurfaceVariant, TargetOverrides};
+
+        AgentSurface {
+            surface_id: "surf-variant".to_string(),
+            default_variant_id: Some("v1".to_string()),
+            variants: vec![SurfaceVariant {
+                id: "v1".to_string(),
+                alias: "default".to_string(),
+                name: "Default".to_string(),
+                description: String::new(),
+                enabled: true,
+                overrides: SurfaceOverrides {
+                    target: Some(TargetOverrides {
+                        policy: Some(PolicyRef {
+                            policy_definition_id: def_id.to_string(),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn gateway(policy: Option<crate::gateways::types::GatewayOpaPolicyConfig>) -> crate::gateways::types::Gateway {
+        use crate::gateways::types::{Gateway, GatewayCreationType, GatewayStatus, GatewayType};
+
+        Gateway {
+            id: "gw-1".to_string(),
+            name: "gw".to_string(),
+            description: String::new(),
+            did: "did:example:gw".to_string(),
+            gateway_type: GatewayType::SelfGateway,
+            status: GatewayStatus::Active,
+            tenant_id: None,
+            creation_type: GatewayCreationType::User,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            exposed_channels: Vec::new(),
+            opa_policy_config: policy,
+        }
+    }
+
+    #[test]
+    fn full_recompile_includes_every_enabled_surface() {
+        let variant_only = variant_policy_surface("def");
+        assert!(!variant_only.opa_enabled(), "the base target carries no policy");
+        assert!(surface_in_scope(&variant_only, EngineScope::All));
+
+        let no_policy = crate::config::agent_surface::AgentSurface::default();
+        assert!(surface_in_scope(&no_policy, EngineScope::All));
+
+        let disabled = crate::config::agent_surface::AgentSurface {
+            status: crate::entity_status::EntityStatus::Disabled,
+            ..variant_policy_surface("def")
+        };
+        assert!(!surface_in_scope(&disabled, EngineScope::All));
+    }
+
+    #[test]
+    fn targeted_recompile_includes_only_referencing_surfaces() {
+        let surface = variant_policy_surface("def");
+        assert!(surface_in_scope(&surface, EngineScope::Referencing("def")));
+        assert!(!surface_in_scope(&surface, EngineScope::Referencing("other")));
+    }
+
+    #[test]
+    fn full_recompile_includes_gateways_without_a_policy() {
+        assert!(gateway_in_scope(&gateway(None), EngineScope::All));
+    }
+
+    #[test]
+    fn targeted_recompile_includes_only_gateways_enforcing_the_policy() {
+        use crate::gateways::types::GatewayOpaPolicyConfig;
+
+        let config = |enabled| GatewayOpaPolicyConfig {
+            enabled,
+            policy: String::new(),
+            policy_definition_id: Some("def".to_string()),
+            policy_definition_ids: Vec::new(),
+        };
+        assert!(gateway_in_scope(&gateway(Some(config(true))), EngineScope::Referencing("def")));
+        assert!(!gateway_in_scope(&gateway(Some(config(true))), EngineScope::Referencing("other")));
+        assert!(!gateway_in_scope(&gateway(Some(config(false))), EngineScope::Referencing("def")));
+        assert!(!gateway_in_scope(&gateway(None), EngineScope::Referencing("def")));
     }
 }

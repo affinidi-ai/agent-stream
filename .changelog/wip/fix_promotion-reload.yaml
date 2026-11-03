@@ -22,6 +22,13 @@ changes:
         A storage read error on the request log, time series, system metrics history
         or member provisioning config now holds readiness back and is retried, instead
         of starting empty and overwriting the previous Active's history on the next save.
+    - timestamp: '2026-11-03T14:00:00.000Z'
+      title: Recompile every enabled Surface and gateway policy when a Standby is promoted
+      description: >-
+        Promotion now rebuilds the policy engine of every enabled Surface and gateway,
+        not only those with a policy on the base target. A Surface whose policy comes
+        from its default variant gets the current policy, and a gateway whose policy
+        was removed no longer enforces it.
   removed: []
   security: []
   breaking: []
