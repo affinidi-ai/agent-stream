@@ -152,6 +152,9 @@ pub trait TimeSeriesBackend<S: RrdSample>: Send + Sync {
 
     /// Replace in-memory state with what is persisted now, so an instance
     /// promoted to Active continues the series the previous Active wrote. A
-    /// backend whose state is not held in this process has nothing to reload.
-    async fn reload(&self) {}
+    /// storage error leaves the in-memory state unchanged. A backend whose
+    /// state is not held in this process has nothing to reload.
+    async fn reload(&self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

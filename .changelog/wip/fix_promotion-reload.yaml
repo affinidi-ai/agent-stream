@@ -16,6 +16,12 @@ changes:
         Metrics persistence, governance and drift retention, and drift evaluation now
         run only on the Active, so a Standby sharing storage no longer overwrites what
         the Active writes.
+    - timestamp: '2026-11-03T12:00:00.000Z'
+      title: Retry a promotion when monitoring history cannot be read from storage
+      description: >-
+        A storage read error on the request log, time series, system metrics history
+        or member provisioning config now holds readiness back and is retried, instead
+        of starting empty and overwriting the previous Active's history on the next save.
   removed: []
   security: []
   breaking: []

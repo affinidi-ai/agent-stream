@@ -154,8 +154,7 @@ impl crate::server::mode::ReloadOnPromotion for TelemetryStore {
     /// Continue the usage series the previous Active wrote instead of
     /// overwriting them with this instance's startup copy.
     async fn reload_from_storage(&self) -> std::io::Result<()> {
-        self.backend.reload().await;
-        Ok(())
+        self.backend.reload().await
     }
 }
 

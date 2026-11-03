@@ -127,27 +127,28 @@ impl SystemMetricsStore {
         self.remove_stale_temp_files()
             .await;
 
-        if self.storage_path.exists() {
-            match tokio::fs::read_to_string(&self.storage_path).await {
-                Ok(content) => match serde_json::from_str::<Vec<SystemMetricsSample>>(&content) {
-                    Ok(mut loaded) => {
-                        if loaded.len() > MAX_SAMPLES {
-                            loaded.drain(..loaded.len() - MAX_SAMPLES);
-                        }
-                        info!("Loaded {} system metrics samples from {:?}", loaded.len(), self.storage_path);
-                        let mut samples = self.samples.write().await;
-                        *samples = loaded;
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse system metrics file, starting fresh: {}", e);
-                    }
-                },
-                Err(e) => {
-                    warn!("Failed to read system metrics file, starting fresh: {}", e);
-                }
+        let content = match tokio::fs::read_to_string(&self.storage_path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("No previous system metrics file found, starting fresh");
+                return Ok(());
             }
-        } else {
-            info!("No previous system metrics file found, starting fresh");
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to read system metrics file {:?}", self.storage_path));
+            }
+        };
+        match serde_json::from_str::<Vec<SystemMetricsSample>>(&content) {
+            Ok(mut loaded) => {
+                if loaded.len() > MAX_SAMPLES {
+                    loaded.drain(..loaded.len() - MAX_SAMPLES);
+                }
+                info!("Loaded {} system metrics samples from {:?}", loaded.len(), self.storage_path);
+                let mut samples = self.samples.write().await;
+                *samples = loaded;
+            }
+            Err(e) => {
+                warn!("Failed to parse system metrics file, starting fresh: {}", e);
+            }
         }
         Ok(())
     }
@@ -598,6 +599,40 @@ mod tests {
             .await;
 
         assert_eq!(persisted_cpu(dir.path()).await, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[tokio::test]
+    async fn reload_from_unreadable_storage_fails_and_keeps_samples() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemMetricsStore::new(dir.path());
+        store
+            .append(sample(9.0))
+            .await;
+        tokio::fs::create_dir(
+            dir.path()
+                .join("system_metrics.json"),
+        )
+        .await
+        .expect("create_dir");
+
+        assert!(
+            store
+                .reload_from_storage()
+                .await
+                .is_err(),
+            "a read error is retried, not read as no history"
+        );
+
+        let kept: Vec<f32> = store
+            .get_response_since(None)
+            .await
+            .samples
+            .iter()
+            .map(|s| s.process_cpu_percent)
+            .collect();
+        assert_eq!(kept, vec![9.0]);
     }
 
     #[tokio::test]

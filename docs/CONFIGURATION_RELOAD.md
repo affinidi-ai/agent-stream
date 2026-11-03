@@ -220,8 +220,8 @@ On `SIGUSR1` the instance reports `503` at once, then:
 
    A read in steps 1 or 4 that fails with a storage error is logged and retried, with a
    backoff of up to 30 seconds, until it succeeds or the instance is demoted. A request log,
-   settings file or member provisioning config that cannot be parsed is logged and does not
-   hold readiness back,
+   time series file, system metrics history, settings file or member provisioning config
+   that cannot be parsed is logged and does not hold readiness back,
 5. migrates the credentials integrations still store inline to the secrets store, then pins
    the destination of each integration whose references have no pin yet
    ([INTEGRATIONS.md](INTEGRATIONS.md#secrets-in-integration-configuration)). A failure here is
