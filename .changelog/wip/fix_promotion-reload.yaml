@@ -29,6 +29,13 @@ changes:
         not only those with a policy on the base target. A Surface whose policy comes
         from its default variant gets the current policy, and a gateway whose policy
         was removed no longer enforces it.
+    - timestamp: '2026-11-03T15:00:00.000Z'
+      title: Stop a scheduled drift evaluation when its instance is demoted
+      description: >-
+        A scheduled replay evaluation still running when the instance is demoted now
+        stops before its next session and records nothing. Previously it kept spending
+        on the upstream and wrote drift series, evaluation state and a run record over
+        what the new Active had stored.
   removed: []
   security: []
   breaking: []

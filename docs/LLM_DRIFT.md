@@ -197,7 +197,10 @@ it with the **target** Surface's baseline and thresholds.
 
 The scheduler ([`src/drift/scheduler.rs`](../src/drift/scheduler.rs)) runs every
 Surface whose `eval.schedule` is enabled, one run at a time, at intervals of at least
-five minutes. A per-Surface state ([`src/drift/eval_state.rs`](../src/drift/eval_state.rs))
+five minutes, and only while the instance is Active. When the instance is demoted, or
+demoted and promoted again, a scheduled run already in progress stops before its next
+session and records nothing: no drift samples, run record, or change to the failure count.
+A per-Surface state ([`src/drift/eval_state.rs`](../src/drift/eval_state.rs))
 counts consecutive failed runs; at `eval_max_consecutive_failures` the Surface's
 scheduled evaluation is suspended. A manual run always executes, even while
 suspended, and a successful run clears the count and the suspension.
