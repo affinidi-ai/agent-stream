@@ -678,6 +678,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                             e
                                         );
                                         error_count += 1;
+                                        crate::metrics::backends::prometheus::track_storage_load_error(
+                                            entity_name,
+                                            "migrate_failed",
+                                        );
                                     }
                                     continue;
                                 }
@@ -691,6 +695,7 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                         loggable_path::<T>(&file_to_load, &id)
                     );
                     error_count += 1;
+                    crate::metrics::backends::prometheus::track_storage_load_error(entity_name, "missing");
                     processed_ids.insert(id);
                     continue;
                 }
@@ -724,6 +729,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                             entity_name, logged_id, e
                                         );
                                         error_count += 1;
+                                        crate::metrics::backends::prometheus::track_storage_load_error(
+                                            entity_name,
+                                            "decrypt_failed",
+                                        );
                                         continue;
                                     }
                                 };
@@ -737,6 +746,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                             e
                                         );
                                         error_count += 1;
+                                        crate::metrics::backends::prometheus::track_storage_load_error(
+                                            entity_name,
+                                            "decrypt_failed",
+                                        );
                                         continue;
                                     }
                                 }
@@ -757,6 +770,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                     e
                                 );
                                 error_count += 1;
+                                crate::metrics::backends::prometheus::track_storage_load_error(
+                                    entity_name,
+                                    "parse_failed",
+                                );
                                 processed_ids.insert(id);
                                 continue;
                             }
@@ -776,6 +793,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                         e
                                     );
                                     error_count += 1;
+                                    crate::metrics::backends::prometheus::track_storage_load_error(
+                                        entity_name,
+                                        "migrate_failed",
+                                    );
                                 }
                                 processed_ids.insert(id);
                                 continue;
@@ -876,12 +897,17 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                     e
                                 );
                                 error_count += 1;
+                                crate::metrics::backends::prometheus::track_storage_load_error(
+                                    entity_name,
+                                    "parse_failed",
+                                );
                             }
                         }
                     }
                     Err(e) => {
                         error!("Failed to read {} from {}: {}", entity_name, loggable_path::<T>(&file_to_load, &id), e);
                         error_count += 1;
+                        crate::metrics::backends::prometheus::track_storage_load_error(entity_name, "read_failed");
                     }
                 }
 
@@ -3946,6 +3972,56 @@ mod tests {
             Some(entity("kept", 1))
         );
         assert!(!dir.exists(), "a refresh does not recreate the directory");
+    }
+
+    #[tokio::test]
+    async fn test_skipped_record_is_counted_by_entity_and_reason() {
+        const ENTITY: &str = "load_error_counted_entity";
+        let skipped = |reason: &str| {
+            crate::metrics::backends::prometheus::STORAGE_LOAD_ERRORS
+                .with_label_values(&[ENTITY, reason])
+                .get()
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_path_buf();
+        let storage = RwLockFilesystemStorage::<TestEntity>::new(dir.clone(), ENTITY)
+            .await
+            .unwrap();
+        for id in ["good", "corrupt"] {
+            storage
+                .save(&entity(id, 1))
+                .await
+                .unwrap();
+        }
+        let before = skipped("parse_failed");
+
+        storage
+            .refresh_from_disk()
+            .await
+            .unwrap();
+        assert_eq!(skipped("parse_failed"), before, "readable records are not counted");
+
+        std::fs::write(dir.join("corrupt.json"), "not json").unwrap();
+        storage
+            .refresh_from_disk()
+            .await
+            .unwrap();
+        assert_eq!(skipped("parse_failed"), before + 1);
+        assert_eq!(
+            storage
+                .get("corrupt")
+                .await
+                .unwrap(),
+            None,
+            "the unreadable record is skipped"
+        );
+        assert_eq!(
+            storage
+                .get("good")
+                .await
+                .unwrap(),
+            Some(entity("good", 1))
+        );
     }
 
     #[tokio::test]

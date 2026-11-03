@@ -185,6 +185,19 @@ lazy_static! {
         counter
     };
 
+    /// Stored records skipped because they could not be loaded (labeled by entity, reason).
+    /// A non-zero value means one or more persisted records are missing from memory.
+    pub static ref STORAGE_LOAD_ERRORS: IntCounterVec = {
+        let opts = Opts::new(
+            names::STORAGE_LOAD_ERRORS_TOTAL,
+            "Stored records skipped because they could not be loaded \
+             (reason = missing|read_failed|decrypt_failed|parse_failed|migrate_failed)",
+        );
+        let counter = IntCounterVec::new(opts, &["entity", "reason"]).unwrap();
+        REGISTRY.register(Box::new(counter.clone())).unwrap();
+        counter
+    };
+
     /// Number of identities seen
     pub static ref UNIQUE_IDENTITIES: IntGauge = {
         let opts = Opts::new(names::UNIQUE_IDENTITIES, "Number of unique agent identities observed");
@@ -692,6 +705,16 @@ pub fn track_user_event(
 pub fn track_user_login(role: &str) {
     USER_LOGINS
         .with_label_values(&[role])
+        .inc();
+}
+
+/// Track a stored record that was skipped because it could not be loaded.
+pub fn track_storage_load_error(
+    entity: &str,
+    reason: &str,
+) {
+    STORAGE_LOAD_ERRORS
+        .with_label_values(&[entity, reason])
         .inc();
 }
 

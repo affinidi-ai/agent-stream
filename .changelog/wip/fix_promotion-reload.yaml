@@ -1,6 +1,13 @@
 branch: fix/promotion-reload
 changes:
-  added: []
+  added:
+    - timestamp: '2026-11-03T17:00:00.000Z'
+      title: Count stored records skipped on load in storage_load_errors_total
+      description: >-
+        The Prometheus counter agent_stream_storage_load_errors_total, labelled by entity
+        and reason, counts every stored record that could not be read, decrypted, parsed
+        or migrated and was skipped, as Agent Gateway does, so a policy or gateway missing
+        after startup or promotion can be alerted on.
   changed: []
   fixed:
     - timestamp: '2026-11-03T07:44:38.000Z'

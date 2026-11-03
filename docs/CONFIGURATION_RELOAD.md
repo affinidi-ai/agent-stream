@@ -223,7 +223,12 @@ On `SIGUSR1` the instance reports `503` at once, then:
    A read in steps 1 or 4 that fails with a storage error is logged and retried, with a
    backoff of up to 30 seconds, until it succeeds or the instance is demoted. A request log,
    time series file, system metrics history, settings file or member provisioning config
-   that cannot be parsed is logged and does not hold readiness back,
+   that cannot be parsed is logged and does not hold readiness back. A single stored
+   record, such as a policy definition, the appliance-wide assignments or a gateway, that
+   cannot be read, decrypted or parsed is skipped: the instance goes ready without it,
+   logs the file at `ERROR` and counts it in `agent_stream_storage_load_errors_total`.
+   This matches Agent Gateway and favours availability, so a skipped policy record is
+   not enforced; alert on that counter,
 5. migrates the credentials integrations still store inline to the secrets store, then pins
    the destination of each integration whose references have no pin yet
    ([INTEGRATIONS.md](INTEGRATIONS.md#secrets-in-integration-configuration)). A failure here is
