@@ -3667,8 +3667,8 @@ mod tests {
         use crate::server::mode::ReloadOnPromotion;
 
         let dir = tempfile::tempdir().unwrap();
-        let standby = store_in(dir.path()).await;
-        let active = store_in(dir.path()).await;
+        let standby = store_in(dir.path());
+        let active = store_in(dir.path());
         record_channel_round_trip(&active, "ch-promoted", "t1", 10, 20, ConnectionStatus::Success).await;
         let connections = recorded_connections(&active, 2).await;
         crate::metrics::backends::FileMetricsBackend::new(
@@ -3721,20 +3721,15 @@ mod tests {
         }
     }
 
-    async fn store_in(dir: &std::path::Path) -> MetricsStore {
-        MetricsStore::new_with_ws_and_retention(
-            100,
-            std::sync::Arc::new(crate::server::WsState::new(8)),
-            60,
-            dir.to_string_lossy()
-                .into_owned(),
-            None,
-            None,
-            None,
-            None,
-            1,
-        )
-        .await
+    /// A store backed by `dir/metrics.json` through the same multi-backend the
+    /// server uses, without the periodic save, so nothing but the test writes
+    /// the file.
+    fn store_in(dir: &std::path::Path) -> MetricsStore {
+        let file = std::sync::Arc::new(crate::metrics::backends::FileMetricsBackend::new(dir.join("metrics.json")));
+        MetricsStore {
+            backend: Some(std::sync::Arc::new(crate::metrics::backends::MultiBackend::new().add_backend(file))),
+            ..MetricsStore::new(100)
+        }
     }
 
     #[tokio::test]
@@ -3742,7 +3737,7 @@ mod tests {
         use crate::server::mode::ReloadOnPromotion;
 
         let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path()).await;
+        let store = store_in(dir.path());
         record_channel_round_trip(&store, "ch-kept", "t1", 10, 20, ConnectionStatus::Success).await;
         recorded_connections(&store, 2).await;
         std::fs::create_dir(
@@ -3771,7 +3766,7 @@ mod tests {
         use crate::server::mode::ReloadOnPromotion;
 
         let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path()).await;
+        let store = store_in(dir.path());
         record_channel_round_trip(&store, "ch-dropped", "t1", 10, 20, ConnectionStatus::Success).await;
         recorded_connections(&store, 2).await;
         std::fs::write(
