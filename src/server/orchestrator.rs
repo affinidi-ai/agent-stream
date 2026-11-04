@@ -402,6 +402,40 @@ impl crate::server::mode::ReloadOnPromotion for ActivationPolicyStores {
     }
 }
 
+/// The Surface routes and policy engines a promotion rebuilds once the policy
+/// stores are re-read.
+struct ActivationSurfaces {
+    pipes: Option<(Arc<crate::pipes::FileSystemPipeStore>, Arc<crate::pipes::PipeRouteManager>)>,
+    engines: Option<Arc<crate::identity::handlers::policy_definitions::EngineStores>>,
+}
+
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for ActivationSurfaces {
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        if let Some((pipe_store, route_manager)) = &self.pipes {
+            pipe_store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+            match route_manager
+                .reload_all_pipes(pipe_store)
+                .await
+            {
+                Ok(routes) => info!("Activation reloaded {routes} pipe route(s) from storage"),
+                Err(error) => warn!("Promotion pipe route reload failed: {error}"),
+            }
+        }
+        if let Some(engines) = &self.engines {
+            crate::identity::handlers::policy_definitions::recompile_policy_engines(
+                engines,
+                crate::identity::handlers::policy_definitions::EngineScope::All,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
 /// Run `reload`, retrying with backoff until it succeeds. Returns `false` once
 /// a later mode change supersedes `generation`.
 async fn reload_until_done(
@@ -590,27 +624,16 @@ impl Activation {
                 info!("Activation for generation {generation} was superseded while reloading policies");
                 return false;
             }
-            if let (Some(pipe_store), Some(route_manager)) = (&self.pipe_store, &self.route_manager) {
-                if let Err(error) = pipe_store
-                    .refresh_from_disk()
-                    .await
-                {
-                    warn!("Promotion pipe refresh failed: {error}");
-                }
-                match route_manager
-                    .reload_all_pipes(pipe_store)
-                    .await
-                {
-                    Ok(routes) => info!("Activation reloaded {routes} pipe route(s) from storage"),
-                    Err(error) => warn!("Promotion pipe route reload failed: {error}"),
-                }
-            }
-            if let Some(engines) = &self.policy_engines {
-                crate::identity::handlers::policy_definitions::recompile_policy_engines(
-                    engines,
-                    crate::identity::handlers::policy_definitions::EngineScope::All,
-                )
-                .await;
+            let surfaces = ActivationSurfaces {
+                pipes: self
+                    .pipe_store
+                    .clone()
+                    .zip(self.route_manager.clone()),
+                engines: self.policy_engines.clone(),
+            };
+            if !reload_until_done(&surfaces, generation).await {
+                info!("Activation for generation {generation} was superseded while reloading Surfaces");
+                return false;
             }
             if !self
                 .reload_shared_state(generation)

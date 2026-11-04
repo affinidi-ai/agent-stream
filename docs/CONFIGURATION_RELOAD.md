@@ -186,7 +186,7 @@ only; elsewhere the process stays in its configured mode. A `[failover]` block w
 
 | Endpoint | Meaning |
 | --- | --- |
-| `GET /api/v1/health` | Readiness. `200` once the instance is Active, has re-read its policies and Surfaces and recompiled every policy engine, has reloaded the other shared state listed under [What promotion does](#what-promotion-does), and has migrated inline integration credentials and pinned integration destinations. A failed Surface reload, policy compile, migration or pin is logged as a warning and does not hold readiness back; a policy that fails to compile denies. A shared-state read that fails with a storage error holds readiness at `503` and is retried until it succeeds. `503` while starting, activating, or Standby. Readiness does not wait for connection-point listeners or any other external dependency. |
+| `GET /api/v1/health` | Readiness. `200` once the instance is Active, has re-read its policies and Surfaces and recompiled every policy engine, has reloaded the other shared state listed under [What promotion does](#what-promotion-does), and has migrated inline integration credentials and pinned integration destinations. A Surface route conflict, policy compile, migration or pin that fails is logged as a warning and does not hold readiness back; a policy that fails to compile denies. A shared-state, Surface or gateway read that fails with a storage error holds readiness at `503` and is retried until it succeeds. `503` while starting, activating, or Standby. Readiness does not wait for connection-point listeners or any other external dependency. |
 | `GET /api/v1/alive` | Liveness. `200` whenever the process is running, in either mode. |
 
 Route client traffic on `/api/v1/health`. Restart a process only on `/api/v1/alive` failures;
@@ -220,7 +220,8 @@ On `SIGUSR1` the instance reports `503` at once, then:
      Active stay in force.
    - The head of every governance chain, so the next record links to the last one on disk.
 
-   A read in steps 1 or 4 that fails with a storage error is logged and retried, with a
+   A read in steps 1, 2 or 4 that fails with a storage error, or a Surface or gateway
+   store that cannot be read for step 3, is logged and retried, with a
    backoff of up to 30 seconds, until it succeeds or the instance is demoted. A request log,
    time series file, system metrics history, settings file or member provisioning config
    that cannot be parsed is logged and does not hold readiness back. A single stored

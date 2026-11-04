@@ -43,6 +43,13 @@ changes:
         stops before its next session and records nothing. Previously it kept spending
         on the upstream and wrote drift series, evaluation state and a run record over
         what the new Active had stored.
+    - timestamp: '2026-11-04T10:00:00.000Z'
+      title: Retry a promotion when Surfaces or gateways cannot be read for policy
+      description: >-
+        A storage error reading Surfaces, or the Surface or gateway store while policy
+        engines are recompiled, now holds readiness at 503 and is retried. Previously the
+        instance went ready with the policy engines it compiled at startup, and a Surface
+        first seen on promotion had none.
   removed: []
   security: []
   breaking: []

@@ -152,7 +152,7 @@ async fn refresh_referencing_engines(
     state: &IdentityApiState,
     policy_id: &str,
 ) {
-    recompile_policy_engines(
+    if let Err(e) = recompile_policy_engines(
         &EngineStores {
             pipe_store: state.pipe_store.clone(),
             global_policy_store: state
@@ -171,7 +171,10 @@ async fn refresh_referencing_engines(
         },
         EngineScope::Referencing(policy_id),
     )
-    .await;
+    .await
+    {
+        error!(policy_id = %policy_id, error = %e, "Policy engines referencing the changed definition were not all refreshed");
+    }
 }
 
 /// Where [`recompile_policy_engines`] reads the objects whose engines it compiles.
@@ -234,14 +237,97 @@ fn gateway_in_scope(
     }
 }
 
+/// Recompile the inbound, response and variant engines of every surface in
+/// `scope` stored under `surfaces_path`. Returns how many recompiled and how
+/// many failed (and were evicted), or an error when the store cannot be read.
+async fn recompile_surface_engines(
+    policy_manager: &crate::policies::SurfacePolicyManager,
+    surfaces_path: &str,
+    scope: EngineScope<'_>,
+) -> std::io::Result<(usize, usize)> {
+    let store = crate::surfaces::FileSystemAgentSurfaceStore::new(std::path::PathBuf::from(surfaces_path))
+        .await
+        .map_err(|e| std::io::Error::other(format!("cannot open surface store: {e}")))?;
+    let surfaces = store
+        .list_all()
+        .await
+        .map_err(|e| std::io::Error::other(format!("cannot list surfaces: {e}")))?;
+    let policy_id = scope.label();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    for surface in surfaces
+        .iter()
+        .filter(|s| surface_in_scope(s, scope))
+    {
+        match policy_manager
+            .update_channel_policy(surface)
+            .await
+        {
+            Ok(()) => {
+                ok += 1;
+                info!(policy_id = %policy_id, surface = %surface.name, "Recompiled surface OPA engine");
+            }
+            Err(e) => {
+                failed += 1;
+                warn!(policy_id = %policy_id, surface = %surface.name, error = %e, "Failed to recompile surface OPA engine");
+            }
+        }
+    }
+    Ok((ok, failed))
+}
+
+/// Recompile the Trust Fabric engine of every gateway in `scope` stored under
+/// `gateways_path`. A gateway references a reusable policy by id, so a
+/// definition change recompiles every gateway that references it. Returns how
+/// many recompiled and how many failed (and were evicted), or an error when the
+/// store cannot be read.
+async fn recompile_gateway_engines(
+    gw_manager: &crate::policies::GatewayPolicyManager,
+    gateways_path: &str,
+    scope: EngineScope<'_>,
+) -> std::io::Result<(usize, usize)> {
+    use crate::gateways::store::GatewayStore as _;
+    let store = crate::gateways::FileSystemGatewayStore::new(std::path::PathBuf::from(gateways_path), None)
+        .await
+        .map_err(|e| std::io::Error::other(format!("cannot open gateway store: {e}")))?;
+    let gateways = store
+        .list_all()
+        .await
+        .map_err(|e| std::io::Error::other(format!("cannot list gateways: {e}")))?;
+    let policy_id = scope.label();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    for gateway in gateways
+        .iter()
+        .filter(|g| gateway_in_scope(g, scope))
+    {
+        match gw_manager
+            .update_gateway_policy(gateway)
+            .await
+        {
+            Ok(()) => {
+                ok += 1;
+                info!(policy_id = %policy_id, gateway_id = %gateway.id, "Recompiled gateway OPA engine");
+            }
+            Err(e) => {
+                failed += 1;
+                warn!(policy_id = %policy_id, gateway_id = %gateway.id, error = %e, "Failed to recompile gateway OPA engine");
+            }
+        }
+    }
+    Ok((ok, failed))
+}
+
 /// Recompile the pipe, surface, gateway and appliance-wide policy engines in
 /// `scope` from the stored definitions. A recompile that fails evicts the
-/// engine, so the object denies rather than keeping a stale policy.
+/// engine, so the object denies rather than keeping a stale policy. Returns an
+/// error when the surface or gateway store cannot be opened or listed, since
+/// their engines were then left as they were; every other class is still
+/// recompiled first.
 pub(crate) async fn recompile_policy_engines(
     stores: &EngineStores,
     scope: EngineScope<'_>,
-) {
+) -> std::io::Result<()> {
     let policy_id = scope.label();
+    let mut store_error = None;
     // ── Pipes: front-door, variants, IDE members ────────────────────────────
     let (mut pipes_ok, mut pipes_failed) = (0usize, 0usize);
     if let Some(ref pipe_store) = stores.pipe_store {
@@ -261,11 +347,11 @@ pub(crate) async fn recompile_policy_engines(
             {
                 Ok(()) => {
                     pipes_ok += 1;
-                    info!(policy_id = %policy_id, pipe_id = %pipe.id, "Recompiled pipe OPA engine after policy definition change");
+                    info!(policy_id = %policy_id, pipe_id = %pipe.id, "Recompiled pipe OPA engine");
                 }
                 Err(e) => {
                     pipes_failed += 1;
-                    warn!(policy_id = %policy_id, pipe_id = %pipe.id, error = %e, "Failed to recompile pipe OPA engine after policy definition change");
+                    warn!(policy_id = %policy_id, pipe_id = %pipe.id, error = %e, "Failed to recompile pipe OPA engine");
                 }
             }
         }
@@ -277,77 +363,27 @@ pub(crate) async fn recompile_policy_engines(
     let (mut surfaces_ok, mut surfaces_failed) = (0usize, 0usize);
     match crate::gateways::get_policy_manager() {
         Some(policy_manager) => {
-            let surface_store = crate::surfaces::FileSystemAgentSurfaceStore::new(std::path::PathBuf::from(
-                &stores.agent_surfaces_path,
-            ))
-            .await;
-            match surface_store {
-                Ok(store) => match store.list_all().await {
-                    Ok(surfaces) => {
-                        for surface in surfaces
-                            .iter()
-                            .filter(|s| surface_in_scope(s, scope))
-                        {
-                            match policy_manager
-                                .update_channel_policy(surface)
-                                .await
-                            {
-                                Ok(()) => {
-                                    surfaces_ok += 1;
-                                    info!(policy_id = %policy_id, surface = %surface.name, "Recompiled surface OPA engine after policy definition change");
-                                }
-                                Err(e) => {
-                                    surfaces_failed += 1;
-                                    warn!(policy_id = %policy_id, surface = %surface.name, error = %e, "Failed to recompile surface OPA engine after policy definition change");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => warn!(policy_id = %policy_id, error = %e, "Failed to list surfaces for OPA recompile"),
-                },
-                Err(e) => warn!(policy_id = %policy_id, error = %e, "Failed to open surface store for OPA recompile"),
+            match recompile_surface_engines(&policy_manager, &stores.agent_surfaces_path, scope).await {
+                Ok((ok, failed)) => (surfaces_ok, surfaces_failed) = (ok, failed),
+                Err(e) => {
+                    warn!(policy_id = %policy_id, error = %e, "Surface OPA engines not refreshed");
+                    store_error = Some(e);
+                }
             }
         }
         None => warn!(policy_id = %policy_id, "Surface policy manager unavailable; surface OPA engines not refreshed"),
     }
 
     // ── Gateways (Trust Fabric): appliance↔appliance policy engines ──────────
-    // A gateway references a reusable policy by id (reference-only), so a
-    // definition change must recompile every gateway that references it — exactly
-    // like pipes and surfaces. A failed recompile evicts → deny (fail closed).
-    use crate::gateways::store::GatewayStore as _;
     let (mut gateways_ok, mut gateways_failed) = (0usize, 0usize);
     match crate::gateways::get_gateway_policy_manager() {
-        Some(gw_manager) => {
-            match crate::gateways::FileSystemGatewayStore::new(std::path::PathBuf::from(&stores.gateways_path), None)
-                .await
-            {
-                Ok(gw_store) => match gw_store.list_all().await {
-                    Ok(gateways) => {
-                        for gateway in gateways
-                            .iter()
-                            .filter(|g| gateway_in_scope(g, scope))
-                        {
-                            match gw_manager
-                                .update_gateway_policy(gateway)
-                                .await
-                            {
-                                Ok(()) => {
-                                    gateways_ok += 1;
-                                    info!(policy_id = %policy_id, gateway_id = %gateway.id, "Recompiled gateway OPA engine after policy definition change");
-                                }
-                                Err(e) => {
-                                    gateways_failed += 1;
-                                    warn!(policy_id = %policy_id, gateway_id = %gateway.id, error = %e, "Failed to recompile gateway OPA engine after policy definition change");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => warn!(policy_id = %policy_id, error = %e, "Failed to list gateways for OPA recompile"),
-                },
-                Err(e) => warn!(policy_id = %policy_id, error = %e, "Failed to open gateway store for OPA recompile"),
+        Some(gw_manager) => match recompile_gateway_engines(&gw_manager, &stores.gateways_path, scope).await {
+            Ok((ok, failed)) => (gateways_ok, gateways_failed) = (ok, failed),
+            Err(e) => {
+                warn!(policy_id = %policy_id, error = %e, "Gateway OPA engines not refreshed");
+                store_error = Some(e);
             }
-        }
+        },
         None => warn!(policy_id = %policy_id, "Gateway policy manager unavailable; gateway OPA engines not refreshed"),
     }
 
@@ -367,10 +403,10 @@ pub(crate) async fn recompile_policy_engines(
                 .await
             {
                 Ok(()) => {
-                    info!(policy_id = %policy_id, "Recompiled appliance-wide policy sets after definition change")
+                    info!(policy_id = %policy_id, "Recompiled appliance-wide policy sets")
                 }
                 Err(e) => {
-                    warn!(policy_id = %policy_id, error = %e, "Failed to recompile appliance-wide policy sets after definition change")
+                    warn!(policy_id = %policy_id, error = %e, "Failed to recompile appliance-wide policy sets")
                 }
             }
         }
@@ -384,12 +420,13 @@ pub(crate) async fn recompile_policy_engines(
         surfaces_failed = surfaces_failed,
         gateways_refreshed = gateways_ok,
         gateways_failed = gateways_failed,
-        "Policy definition change fan-out: refreshed {} pipe(s), {} surface(s), and {} gateway(s), {} failed",
+        "Policy engine recompile: refreshed {} pipe(s), {} surface(s), and {} gateway(s), {} failed",
         pipes_ok,
         surfaces_ok,
         gateways_ok,
         pipes_failed + surfaces_failed + gateways_failed,
     );
+    store_error.map_or(Ok(()), Err)
 }
 
 /// List all policy definitions, optionally filtered by type
@@ -1446,5 +1483,59 @@ mod tests {
         assert!(!gateway_in_scope(&gateway(Some(config(true))), EngineScope::Referencing("other")));
         assert!(!gateway_in_scope(&gateway(Some(config(false))), EngineScope::Referencing("def")));
         assert!(!gateway_in_scope(&gateway(None), EngineScope::Referencing("def")));
+    }
+
+    #[tokio::test]
+    async fn engine_recompile_reports_a_store_it_cannot_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let not_a_dir = temp_dir
+            .path()
+            .join("not-a-dir");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        let not_a_dir = not_a_dir
+            .to_string_lossy()
+            .to_string();
+
+        let surfaces =
+            recompile_surface_engines(&crate::policies::SurfacePolicyManager::new(), &not_a_dir, EngineScope::All)
+                .await;
+        assert!(surfaces.is_err_and(|e| {
+            e.to_string()
+                .contains("surface store")
+        }));
+        let gateways =
+            recompile_gateway_engines(&crate::policies::GatewayPolicyManager::new(), &not_a_dir, EngineScope::All)
+                .await;
+        assert!(gateways.is_err_and(|e| {
+            e.to_string()
+                .contains("gateway store")
+        }));
+    }
+
+    #[tokio::test]
+    async fn engine_recompile_of_empty_stores_succeeds() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = |name: &str| {
+            temp_dir
+                .path()
+                .join(name)
+                .to_string_lossy()
+                .to_string()
+        };
+
+        let surfaces = recompile_surface_engines(
+            &crate::policies::SurfacePolicyManager::new(),
+            &dir("surfaces"),
+            EngineScope::All,
+        )
+        .await;
+        assert_eq!(surfaces.unwrap(), (0, 0));
+        let gateways = recompile_gateway_engines(
+            &crate::policies::GatewayPolicyManager::new(),
+            &dir("gateways"),
+            EngineScope::Referencing("unused"),
+        )
+        .await;
+        assert_eq!(gateways.unwrap(), (0, 0));
     }
 }
