@@ -301,6 +301,14 @@ Breaking one of these is a correctness bug, not a style question.
 | Every platform-key call is admitted against the budget just before it is sent, and only the default upstream's main call is offered the caller's key. | Spend could exceed budget, or a caller's key could reach the wrong upstream. |
 | Upstream headers go only to the upstream and origin they were configured for, and a secret a Surface references is sent only after its tenancy check passes. | Credentials could reach another origin or another tenant's secret could be spent. |
 | DashMap is authoritative at runtime; disk is written immediately. | Reads and writes would disagree after a reload. |
+
+Loading stored records is the one deliberate exception to failing closed. A record that
+cannot be read, decrypted or parsed at startup or promotion is skipped, logged at `ERROR` and
+counted in `agent_stream_storage_load_errors_total`, favouring availability as Agent Gateway
+does. A Surface or appliance-wide set that references a skipped policy definition still
+denies, but a skipped appliance-wide assignments document leaves no appliance-wide policy
+enforced, so alert on that counter. A store that cannot be read at all holds readiness back
+([what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does)).
 | Governance Records never embed raw media bytes, only digests. | Recorded media would bypass the multimedia store and its encryption at rest. |
 | An outbound client that checks addresses at connect time follows no redirects and ignores `HTTP_PROXY` and `HTTPS_PROXY` ([`src/http_client.rs`](src/http_client.rs)). | A redirect or a proxy that resolves the host itself would bypass the address check. |
 

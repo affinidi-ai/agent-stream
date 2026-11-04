@@ -123,6 +123,10 @@ after its tenancy check passes. Choosing where a stored secret is sent needs `se
 which can still obtain a value when `secrets.reveal_values` is `false`; that accepted
 risk is recorded in
 [`docs/PROVIDERS_AND_CREDENTIALS.md`](docs/PROVIDERS_AND_CREDENTIALS.md#reading-a-secret-back).
+The deliberate exception is loading stored records: one that cannot be read, decrypted or
+parsed is skipped and counted in `agent_stream_storage_load_errors_total` rather than
+failing closed, so a skipped appliance-wide assignments document leaves no appliance-wide
+policy enforced. See [`ARCHITECTURE.md`](ARCHITECTURE.md#invariants).
 
 ### Where the detail lives
 

@@ -8,7 +8,15 @@ changes:
         and reason, counts every stored record that could not be read, decrypted, parsed
         or migrated and was skipped, as Agent Gateway does, so a policy or gateway missing
         after startup or promotion can be alerted on.
-  changed: []
+  changed:
+    - timestamp: '2026-11-04T11:00:00.000Z'
+      title: Document that unreadable stored policy records are skipped, not denied
+      description: >-
+        The policy and architecture docs now state that a policy definition or the
+        appliance-wide assignments document that cannot be read is skipped and counted in
+        agent_stream_storage_load_errors_total rather than failing closed, so a skipped
+        assignments document leaves no appliance-wide policy enforced and operators should
+        alert on that counter.
   fixed:
     - timestamp: '2026-11-03T07:44:38.000Z'
       title: Reload shared state from disk when a Standby is promoted to Active
