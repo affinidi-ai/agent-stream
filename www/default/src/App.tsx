@@ -151,8 +151,8 @@ const App: React.FC = () => {
   }, []);
 
   const handleLogout = () =>
-    sessionManager.logout().then(() => {
-      setAuthState('signed_out');
+    sessionManager.signOut().then(leaving => {
+      if (!leaving) setAuthState('signed_out');
     });
 
   if (typeof window !== 'undefined' && window.location.pathname === SANDBOX_CALLBACK_PATH) {

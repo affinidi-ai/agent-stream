@@ -65,4 +65,31 @@ describe('LoginPage single sign-on', () => {
     fireEvent.click(button);
     await waitFor(() => expect(window.location.href).toBe('/api/saml/login'));
   });
+
+  it('says the person has signed out when the provider sends them back, then drops the marker', async () => {
+    const replaceState = jest.spyOn(window.history, 'replaceState').mockImplementation(() => {});
+    Object.defineProperty(window, 'location', {
+      value: {
+        href: '/?signed_out=1&tab=a',
+        pathname: '/',
+        search: '?signed_out=1&tab=a',
+        hash: '',
+      },
+      writable: true,
+    });
+    answerAuthMode({ mode: 'oidc', label: 'Example IdP' });
+    render(<LoginPage onLogin={jest.fn()} />);
+
+    expect(await screen.findByRole('status')).toHaveTextContent('You have signed out.');
+    expect(replaceState).toHaveBeenCalledWith(null, '', '/?tab=a');
+    replaceState.mockRestore();
+  });
+
+  it('shows no signed-out notice on an ordinary visit', async () => {
+    answerAuthMode({ mode: 'oidc', label: 'Example IdP' });
+    render(<LoginPage onLogin={jest.fn()} />);
+
+    await screen.findByTestId('login-oidc-button');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
 });

@@ -17,7 +17,9 @@ use crate::auth::oidc::config::TokenEndpointAuthMethod;
 use crate::auth::oidc::test_support::{
     CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, StubProvider, config_for, id_token_claims, logout_claims, sign_logout,
 };
-use crate::auth::oidc::{OidcConfig, OidcState, oidc_backchannel_logout, oidc_callback, oidc_initiate, oidc_login};
+use crate::auth::oidc::{
+    OidcConfig, OidcState, oidc_backchannel_logout, oidc_callback, oidc_initiate, oidc_login, oidc_logout,
+};
 use crate::auth::session::SessionManager;
 use crate::auth::storage::{OidcIdentity, PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
@@ -82,6 +84,8 @@ impl Flow {
             .route("/oidc/callback", get(oidc_callback))
             .route("/oidc/initiate", get(oidc_initiate).post(oidc_initiate))
             .route("/oidc/backchannel-logout", axum::routing::post(oidc_backchannel_logout))
+            .route("/oidc/logout", axum::routing::post(oidc_logout))
+            .route("/auth/logout", axum::routing::post(oidc_logout))
             .with_state(oidc.clone());
         Self {
             app,
@@ -1033,6 +1037,144 @@ async fn a_logout_that_cannot_end_a_session_fails_and_the_provider_can_send_it_a
     );
 }
 
+impl Flow {
+    async fn sign_out(
+        &self,
+        path: &str,
+        session: Option<&str>,
+    ) -> Response<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path);
+        if let Some(session) = session {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {session}"));
+        }
+        self.app
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+}
+
+async fn sign_out_answer(response: Response<Body>) -> Value {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, header::CACHE_CONTROL), "no-store");
+    assert!(
+        header_value(&response, header::SET_COOKIE).starts_with("session_token=;"),
+        "the session cookie is cleared"
+    );
+    serde_json::from_str(&body(response).await).unwrap()
+}
+
+#[tokio::test]
+async fn signing_out_ends_the_session_and_gives_the_providers_sign_out_address() {
+    let flow = Flow::with_config(|config| {
+        config
+            .logout
+            .post_logout_redirect_uri = Some("https://stream.example.com/?signed_out=1".to_string())
+    })
+    .await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+
+    for path in ["/auth/logout", "/oidc/logout"] {
+        let answer = if path == "/auth/logout" {
+            sign_out_answer(
+                flow.sign_out(path, Some(&session))
+                    .await,
+            )
+            .await
+        } else {
+            let again = flow
+                .signed_in_with_sid("op-session-2")
+                .await;
+            sign_out_answer(
+                flow.sign_out(path, Some(&again))
+                    .await,
+            )
+            .await
+        };
+        let address = url::Url::parse(
+            answer["end_session_url"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            address
+                .as_str()
+                .starts_with(&format!("{}/logout?", flow.provider.issuer)),
+            "{path}: {address}"
+        );
+        let query: HashMap<String, String> = address
+            .query_pairs()
+            .into_owned()
+            .collect();
+        assert_eq!(query["client_id"], CLIENT_ID, "{path}");
+        assert_eq!(query["post_logout_redirect_uri"], "https://stream.example.com/?signed_out=1", "{path}");
+        assert!(!query["state"].is_empty(), "{path}");
+        let hint = &query["id_token_hint"];
+        let claims = jsonwebtoken::dangerous::insecure_decode::<Value>(hint)
+            .unwrap()
+            .claims;
+        assert_eq!(claims["sub"], "user-1", "{path}: the hint is the session's ID token");
+    }
+    assert!(
+        !flow
+            .session_is_live(&session)
+            .await,
+        "the dashboard session ended"
+    );
+}
+
+#[tokio::test]
+async fn sign_out_stays_local_when_the_provider_has_no_sign_out_or_it_is_turned_off() {
+    let flow = Flow::with_config(|config| config.logout.rp_initiated = false).await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    assert_eq!(
+        sign_out_answer(
+            flow.sign_out("/auth/logout", Some(&session))
+                .await
+        )
+        .await,
+        json!({})
+    );
+    assert!(
+        !flow
+            .session_is_live(&session)
+            .await
+    );
+    drop(flow);
+
+    let flow = Flow::new().await;
+    flow.provider
+        .without_end_session();
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    assert_eq!(
+        sign_out_answer(
+            flow.sign_out("/auth/logout", Some(&session))
+                .await
+        )
+        .await,
+        json!({})
+    );
+    assert!(
+        !flow
+            .session_is_live(&session)
+            .await
+    );
+}
+
 #[tokio::test]
 async fn a_logout_request_that_is_not_a_form_is_refused_like_any_invalid_request() {
     let flow = Flow::new().await;
@@ -1205,4 +1347,21 @@ async fn a_logout_posted_to_a_standby_answers_unavailable_and_ends_nothing() {
         flow.session_is_live(&session)
             .await
     );
+}
+
+#[tokio::test]
+async fn signing_out_without_a_live_session_still_clears_the_browser() {
+    let flow = Flow::new().await;
+
+    for session in [None, Some("not-a-session")] {
+        assert_eq!(
+            sign_out_answer(
+                flow.sign_out("/auth/logout", session)
+                    .await
+            )
+            .await,
+            json!({}),
+            "{session:?}"
+        );
+    }
 }

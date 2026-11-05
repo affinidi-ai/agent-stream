@@ -623,6 +623,7 @@ mod tests {
             issuer: "https://idp.example.com".to_string(),
             subject: "user-1".to_string(),
             sid: sid.map(str::to_string),
+            id_token: None,
         }
     }
 

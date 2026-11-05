@@ -32,6 +32,8 @@ pub struct ProviderMetadata {
     pub code_challenge_methods_supported: Option<Vec<String>>,
     #[serde(default)]
     pub backchannel_logout_supported: Option<bool>,
+    #[serde(default)]
+    pub end_session_endpoint: Option<String>,
 }
 
 /// How long a document whose refresh failed is used before the next attempt.
@@ -228,7 +230,14 @@ fn check(
         ("authorization_endpoint", &metadata.authorization_endpoint),
         ("token_endpoint", &metadata.token_endpoint),
         ("jwks_uri", &metadata.jwks_uri),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        metadata
+            .end_session_endpoint
+            .as_ref()
+            .map(|endpoint| ("end_session_endpoint", endpoint)),
+    ) {
         let url = Url::parse(endpoint).map_err(|_| format!("discovery {field} is not an absolute URL"))?;
         if let Some(problem) = transport_problem(&url) {
             return Err(format!("discovery {field} {problem}"));

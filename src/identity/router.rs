@@ -301,7 +301,8 @@ fn saml_auth_routes(
 
 /// The OIDC sign-in routes, with the same per-client throttle as
 /// [`passkey_auth_routes`], and the unthrottled back-channel logout route.
-/// `/auth/check` and `/auth/logout` behave as in SAML mode.
+/// `/auth/check` behaves as in SAML mode, and `/auth/logout` is the OIDC
+/// sign-out.
 fn oidc_auth_routes(
     oidc_state: std::sync::Arc<crate::auth::oidc::OidcState>,
     sessions: std::sync::Arc<crate::auth::SessionManager>,
@@ -337,6 +338,8 @@ fn oidc_auth_routes(
                 .post(crate::auth::oidc::oidc_initiate)
                 .layer(axum::middleware::from_fn(crate::auth::throttle::sign_in_start)),
         )
+        .route("/oidc/logout", post(crate::auth::oidc::oidc_logout))
+        .route("/auth/logout", post(crate::auth::oidc::oidc_logout))
         .merge(backchannel_logout)
         .with_state(oidc_state)
         .merge(
@@ -348,7 +351,6 @@ fn oidc_auth_routes(
                         crate::auth::throttle::auth_check,
                     )),
                 )
-                .route("/auth/logout", post(crate::auth::saml::saml_logout_generic))
                 .layer(Extension(sessions)),
         )
 }
@@ -730,7 +732,7 @@ pub fn create_identity_api_router(
                     .layer(Extension(label))
                     .merge(oidc_auth_routes(oidc_state_arc, session_mgr.clone()))
                     .merge(test_support_router(storage.clone(), session_mgr.clone(), terms_manager.clone()));
-                info!("OIDC routes registered (login, callback, initiate, logout, check)");
+                info!("OIDC routes registered (login, callback, initiate, logout, back-channel logout, check)");
                 (router, Some(storage), Some(session_mgr))
             }
             None => {

@@ -332,6 +332,7 @@ async fn complete_sign_in(
         issuer: oidc.config.issuer.clone(),
         subject: verified.subject.clone(),
         sid: verified.sid,
+        id_token: Some(id_token),
     };
     let identity = OidcIdentity {
         issuer: oidc.config.issuer.clone(),

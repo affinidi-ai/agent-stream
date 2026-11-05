@@ -20,4 +20,4 @@ pub mod user_provisioning;
 pub use config::OidcConfig;
 pub use handlers::{OidcState, oidc_callback, oidc_login};
 pub use initiate::oidc_initiate;
-pub use logout::{MAX_BACKCHANNEL_LOGOUT_BYTES, oidc_backchannel_logout};
+pub use logout::{MAX_BACKCHANNEL_LOGOUT_BYTES, oidc_backchannel_logout, oidc_logout};

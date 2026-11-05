@@ -57,18 +57,29 @@ struct OidcFile {
     logout: LogoutSettings,
 }
 
-/// How a logout at the provider reaches the dashboard.
+/// How a sign-out at either end reaches the other.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LogoutSettings {
     /// Serve `POST /oidc/backchannel-logout`, so the provider can end
     /// dashboard sessions when someone signs out there.
     pub backchannel: bool,
+    /// Signing out of the dashboard also sends the browser to the provider's
+    /// `end_session_endpoint`, signing the person out there too.
+    pub rp_initiated: bool,
+    /// Where the provider sends the browser after that sign-out: a URL on the
+    /// dashboard's origin, registered at the provider. Without it the
+    /// provider shows its own page.
+    pub post_logout_redirect_uri: Option<String>,
 }
 
 impl Default for LogoutSettings {
     fn default() -> Self {
-        Self { backchannel: true }
+        Self {
+            backchannel: true,
+            rp_initiated: true,
+            post_logout_redirect_uri: None,
+        }
     }
 }
 
@@ -375,6 +386,13 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
         if claim.trim().is_empty() {
             return Err(format!("{field} must not be empty"));
         }
+    }
+    if let Some(post_logout) = &file
+        .logout
+        .post_logout_redirect_uri
+        && provider_url("logout.post_logout_redirect_uri", post_logout)?.origin() != redirect_uri.origin()
+    {
+        return Err("logout.post_logout_redirect_uri must be on the same origin as redirect_uri".to_string());
     }
     let required_claims = required_claims(file.required_claims)?;
     let role_mapping = role_mapping(file.role_mapping)?;
@@ -845,6 +863,48 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(refused.contains("is not a usable regular expression"), "{refused}");
+        }
+    }
+
+    #[tokio::test]
+    async fn signing_out_at_the_provider_too_is_on_and_returns_only_to_the_dashboard() {
+        let config = load(valid_file())
+            .await
+            .unwrap();
+        assert!(config.logout.rp_initiated);
+        assert_eq!(
+            config
+                .logout
+                .post_logout_redirect_uri,
+            None
+        );
+
+        let config = load(with(
+            valid_file(),
+            &["logout"],
+            json!({ "rp_initiated": false, "post_logout_redirect_uri": "https://stream.example.com/?signed_out=1" }),
+        ))
+        .await
+        .unwrap();
+        assert!(!config.logout.rp_initiated);
+        assert_eq!(
+            config
+                .logout
+                .post_logout_redirect_uri
+                .as_deref(),
+            Some("https://stream.example.com/?signed_out=1")
+        );
+
+        for (uri, expected) in [
+            ("https://evil.example/", "same origin"),
+            ("https://stream.example.com:8443/", "same origin"),
+            ("http://stream.example.com/", "https://"),
+            ("/?signed_out=1", "not an absolute URL"),
+        ] {
+            let refused = load(with(valid_file(), &["logout"], json!({ "post_logout_redirect_uri": uri })))
+                .await
+                .unwrap_err();
+            assert!(refused.contains(expected), "{uri}: {refused}");
         }
     }
 
