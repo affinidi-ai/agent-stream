@@ -178,6 +178,22 @@ impl PipePolicyManager {
             .expect("pipe policy_definition_store lock poisoned") = Some(store);
     }
 
+    /// Replace the policy-definition store, returning the previous one so a
+    /// test can restore it.
+    #[cfg(test)]
+    pub(crate) fn replace_policy_definition_store(
+        &self,
+        store: Option<Arc<FileSystemPolicyDefinitionStore>>,
+    ) -> Option<Arc<FileSystemPolicyDefinitionStore>> {
+        std::mem::replace(
+            &mut *self
+                .policy_definition_store
+                .write()
+                .expect("pipe policy_definition_store lock poisoned"),
+            store,
+        )
+    }
+
     /// Returns true when a compiled OPA engine exists for the given pipe.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn has_policy(

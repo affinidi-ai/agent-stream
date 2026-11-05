@@ -33,7 +33,7 @@ Project glossary (ubiquitous language) lives in [`CONTEXT.md`](CONTEXT.md). Use 
 10. **The Surface is the routing unit for model traffic.** In code it is `PipeConfig` ([`src/pipes/config.rs`](src/pipes/config.rs)), served by `src/pipes/` (executor, route manager, per-type handlers). LLM and IDE Surfaces are its user-facing types (the code also keeps a `webhook` type). Read the Surface before changing pipeline behaviour. A separate internal record, `AgentSurface` ([`src/config/agent_surface.rs`](src/config/agent_surface.rs)), is what a peer appliance reaches over the Fabric, received in `src/gateways/connection_points/`; channel-shaped read accessors on it remain in `src/config/agent_surface_accessors.rs`, mapping its access-point protocol onto the `ChannelProtocol` enum that stored configs still use. See [`ARCHITECTURE.md`](ARCHITECTURE.md).
 11. **"Agent Surface" is a code identifier, never a product term.** It must not appear in the dashboard, in `docs/`, or in Gherkin. Users see **Surfaces** — **LLM Surface** and **IDE Surface** — as [`CONTEXT.md`](CONTEXT.md) defines them.
 12. **OPA = Regorus** (Rust-native Rego, no external process). Appliance-wide policy runs before the Surface's own policy (Trust Fabric policy on the Fabric path), and its deny is final. Each policy layer has its own Rego package and query; the wrong package fails closed. See [`docs/POLICY.md`](docs/POLICY.md).
-13. **DashMap is authoritative at runtime.** Disk writes immediate. Manual `_storage/` edits to Surfaces and the other refreshed stores are picked up within `cache_refresh_interval_secs` when it is > 0; Members, Teams, Prompts, policy definitions and the other stores loaded at startup need a restart. See [`docs/CONFIGURATION_RELOAD.md`](docs/CONFIGURATION_RELOAD.md). `POST /api/v1/config/reload` rebuilds the internal surface records and rebinds listeners from `agent-stream.json`; it does not re-read Surfaces, Members, Teams or `config.toml`.
+13. **DashMap is authoritative at runtime.** Disk writes immediate. Manual `_storage/` edits to Surfaces and the other refreshed stores are picked up within `cache_refresh_interval_secs` when it is > 0; Members, Teams, Prompts, policy definitions and the other stores loaded at startup need a restart, or a promotion on a Standby ([what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does)). See [`docs/CONFIGURATION_RELOAD.md`](docs/CONFIGURATION_RELOAD.md). `POST /api/v1/config/reload` rebuilds the internal surface records and rebinds listeners from `agent-stream.json`; it does not re-read Surfaces, Members, Teams or `config.toml`.
 14. **Leave code better** — DRY, no dead code, single-responsibility functions.
 15. **Always test** — positive and negative cases.
 
@@ -123,6 +123,10 @@ after its tenancy check passes. Choosing where a stored secret is sent needs `se
 which can still obtain a value when `secrets.reveal_values` is `false`; that accepted
 risk is recorded in
 [`docs/PROVIDERS_AND_CREDENTIALS.md`](docs/PROVIDERS_AND_CREDENTIALS.md#reading-a-secret-back).
+The deliberate exception is loading stored records: one that cannot be read, decrypted or
+parsed is skipped and counted in `agent_stream_storage_load_errors_total` rather than
+failing closed, so a skipped appliance-wide assignments document leaves no appliance-wide
+policy enforced. See [`ARCHITECTURE.md`](ARCHITECTURE.md#invariants).
 
 ### Where the detail lives
 

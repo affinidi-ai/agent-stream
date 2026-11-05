@@ -243,6 +243,7 @@ Metric families ([`metric_names.rs`](../src/metrics/backends/metric_names.rs), `
 | Failover and spend | `agent_stream_llm_failover_total`, `_llm_failover_backup_attempts_total`, `_llm_failover_suppressed_total`, `_llm_failover_duration_seconds`, `_budget_skipped_total`, `_stream_usage_estimated_total` |
 | Users | `agent_stream_user_events_total`, `_users_active`, `_user_logins_total`, `_auth_attempts_total`, `_auth_failures_total` |
 | Encryption and terms | `agent_stream_kms_operation_total`, `_kms_operation_duration_seconds`, `_affinidi_terms_refresh_total`, `_affinidi_terms_refresh_duration_seconds`, `_affinidi_terms_cache_age_seconds`, `_affinidi_terms_publication_sequence` |
+| Storage | `agent_stream_storage_load_errors_total` (`entity`, `reason` = `missing`, `read_failed`, `decrypt_failed`, `parse_failed`, `migrate_failed`): stored records skipped because they could not be loaded |
 
 ### CloudWatch
 

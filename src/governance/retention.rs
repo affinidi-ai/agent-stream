@@ -24,6 +24,10 @@ pub async fn periodic_retention_sweep(pipe_store: Arc<FileSystemPipeStore>) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
+        // Pruning rewrites the shared logs, which only the Active instance may do.
+        if !crate::server::mode::is_ready_to_serve() {
+            continue;
+        }
         let Some(store) = super::capture::store() else {
             continue;
         };

@@ -246,7 +246,12 @@ impl<S: RrdSample> RrdStore<S> {
     async fn build(storage_dir: impl Into<PathBuf>) -> Self {
         let storage_dir = storage_dir.into();
         let now = Utc::now().timestamp();
-        let inner = Self::load_from_disk(&storage_dir).await;
+        let inner = Self::load_from_disk(&storage_dir)
+            .await
+            .unwrap_or_else(|e| {
+                warn!("Starting with empty time series, cannot read {}: {e}", storage_dir.display());
+                HashMap::new()
+            });
         let _ = tokio::fs::create_dir_all(&storage_dir).await;
         Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -266,27 +271,36 @@ impl<S: RrdSample> RrdStore<S> {
     }
 
     /// Read every per-tier snapshot file from `storage_dir` into a fresh map,
-    /// sanitising each tier's buckets.
-    async fn load_from_disk(storage_dir: &Path) -> HashMap<String, SeriesTiers<S>> {
+    /// sanitising each tier's buckets. A missing or unparseable tier file loads
+    /// as empty; any other read error is returned.
+    async fn load_from_disk(storage_dir: &Path) -> std::io::Result<HashMap<String, SeriesTiers<S>>> {
         let mut inner: HashMap<String, SeriesTiers<S>> = HashMap::new();
         let now = Utc::now().timestamp();
         for (idx, tier) in TIERS.iter().enumerate() {
             let path = storage_dir.join(format!("{}.json", tier.label));
-            if let Ok(bytes) = tokio::fs::read(&path).await
-                && let Ok(map) = serde_json::from_slice::<TierMap<S>>(&bytes)
-            {
-                for (series, mut buckets) in map {
-                    sanitize_loaded_buckets(&mut buckets, tier, now);
-                    if buckets.is_empty() {
-                        continue;
-                    }
-                    inner
-                        .entry(series)
-                        .or_insert_with(empty_tiers)[idx] = buckets;
+            let bytes = match tokio::fs::read(&path).await {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
+            };
+            let map = match serde_json::from_slice::<TierMap<S>>(&bytes) {
+                Ok(map) => map,
+                Err(e) => {
+                    warn!("Ignoring unparseable time series tier {}: {e}", path.display());
+                    continue;
                 }
+            };
+            for (series, mut buckets) in map {
+                sanitize_loaded_buckets(&mut buckets, tier, now);
+                if buckets.is_empty() {
+                    continue;
+                }
+                inner
+                    .entry(series)
+                    .or_insert_with(empty_tiers)[idx] = buckets;
             }
         }
-        inner
+        Ok(inner)
     }
 
     fn maybe_snapshot(
@@ -470,6 +484,15 @@ impl<S: RrdSample> TimeSeriesBackend<S> for RrdStore<S> {
         for d in &self.dirty {
             d.store(false, Ordering::Relaxed);
         }
+    }
+
+    async fn reload(&self) -> std::io::Result<()> {
+        let mut inner = self.inner.write().await;
+        *inner = Self::load_from_disk(&self.storage_dir).await?;
+        for d in &self.dirty {
+            d.store(false, Ordering::Relaxed);
+        }
+        Ok(())
     }
 }
 
@@ -787,6 +810,88 @@ mod tests {
             .await;
         assert_eq!(resp.points.len(), 1);
         assert_eq!(resp.points[0].value, Counter { n: 7, peak: 3 });
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reload_from_unreadable_storage_fails_and_keeps_series() {
+        let dir = std::env::temp_dir().join(format!("rrd-unreadable-{}", uuid::Uuid::new_v4()));
+        let now = Utc::now().timestamp();
+        let store = RrdStore::<Counter>::new(&dir).await;
+        store
+            .record_many(vec![("surface:a".to_string(), Counter { n: 2, peak: 0 })], at(now))
+            .await;
+        store.flush().await;
+        let tier_file = dir.join(format!("{}.json", TIERS[0].label));
+        tokio::fs::remove_file(&tier_file)
+            .await
+            .unwrap();
+        tokio::fs::create_dir(&tier_file)
+            .await
+            .unwrap();
+
+        assert!(store.reload().await.is_err(), "a read error is not read as an empty tier");
+
+        let resp = store
+            .range("surface:a", now - 600, now + 60, 500, None)
+            .await;
+        assert_eq!(resp.points.len(), 1);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reload_skips_an_unparseable_tier() {
+        let dir = std::env::temp_dir().join(format!("rrd-unparseable-{}", uuid::Uuid::new_v4()));
+        let now = Utc::now().timestamp();
+        let store = RrdStore::<Counter>::new(&dir).await;
+        store
+            .record_many(vec![("surface:a".to_string(), Counter { n: 2, peak: 0 })], at(now))
+            .await;
+        store.flush().await;
+        for tier in TIERS {
+            tokio::fs::write(dir.join(format!("{}.json", tier.label)), "not json")
+                .await
+                .unwrap();
+        }
+
+        store.reload().await.unwrap();
+
+        let resp = store
+            .range("surface:a", now - 600, now + 60, 500, None)
+            .await;
+        assert!(resp.points.is_empty());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_series_another_instance_persisted() {
+        let dir = std::env::temp_dir().join(format!("rrd-promote-{}", uuid::Uuid::new_v4()));
+        let now = Utc::now().timestamp();
+        let standby = RrdStore::<Counter>::new(&dir).await;
+        {
+            let active = RrdStore::<Counter>::new(&dir).await;
+            active
+                .record_many(vec![("surface:a".to_string(), Counter { n: 5, peak: 0 })], at(now - 120))
+                .await;
+            active.flush().await;
+        }
+
+        standby
+            .reload()
+            .await
+            .unwrap();
+        standby
+            .record_many(vec![("surface:b".to_string(), Counter { n: 1, peak: 0 })], at(now))
+            .await;
+        standby.flush().await;
+
+        let restarted = RrdStore::<Counter>::new(&dir).await;
+        for key in ["surface:a", "surface:b"] {
+            let resp = restarted
+                .range(key, now - 600, now + 60, 500, None)
+                .await;
+            assert_eq!(resp.points.len(), 1, "{key} survives");
+        }
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

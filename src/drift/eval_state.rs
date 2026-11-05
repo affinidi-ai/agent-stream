@@ -139,6 +139,17 @@ pub struct DriftEvalStateStore {
     storage: Box<dyn StorageBackend<DriftEvalState>>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for DriftEvalStateStore {
+    /// Re-read the drift evaluation state another instance stored, so its failure counters continue.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
 impl DriftEvalStateStore {
     pub async fn new(storage_dir: String) -> Result<Self> {
         let storage = rwlock_storage(PathBuf::from(storage_dir), "drift_eval_state").await?;

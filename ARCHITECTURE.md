@@ -40,7 +40,7 @@ reaches over the [Fabric path](#fabric-path).
 | --- | --- |
 | Runtime | DashMap caches are authoritative ([`src/storage/filesystem.rs`](src/storage/filesystem.rs)). |
 | Disk | JSON files under `_storage/`, written immediately on change. Every path comes from `[storage_paths]` in `config.toml`, relative to that file. |
-| External edits | Edits to Surfaces and the other refreshed stores are picked up within `cache_refresh_interval_secs` when it is greater than 0 (default 0, off); otherwise restart. Members, Teams, Prompts, policy definitions, and the other stores loaded at startup need a restart. See [`docs/CONFIGURATION_RELOAD.md`](docs/CONFIGURATION_RELOAD.md). `POST /api/v1/config/reload` rebuilds only the internal surface records, not Surfaces, Members, or Teams. |
+| External edits | Edits to Surfaces and the other refreshed stores are picked up within `cache_refresh_interval_secs` when it is greater than 0 (default 0, off); otherwise restart. Members, Teams, Prompts, policy definitions, and the other stores loaded at startup need a restart, or a promotion on a Standby ([what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does)). See [`docs/CONFIGURATION_RELOAD.md`](docs/CONFIGURATION_RELOAD.md). `POST /api/v1/config/reload` rebuilds only the internal surface records, not Surfaces, Members, or Teams. |
 | Time series | An embedded round-robin store ([`src/timeseries/`](src/timeseries/)) behind usage telemetry, operational metrics, and drift. Flushed on shutdown. |
 | Governance | Signed, hash-chained records with one writer task per Surface ([`src/governance/`](src/governance/)). |
 | Media | A content-addressed multimedia store, encrypted when encryption at rest is enabled. |
@@ -67,7 +67,7 @@ router and binds the listeners.
 10. Compile Trust Fabric policies; a compile failure exits the process.
 11. Open the budget, response-cache, Member, Prompt, and Team stores, seeding default Members and Teams.
 12. Open the telemetry and drift stores and start the governance retention sweep, drift evaluator, and drift scheduler.
-13. Create the connection-point listener manager and start activation in the background. Activation reloads Surfaces and the Surface, Member and Team spend counters, migrates inline integration credentials to the secrets store and pins integration destinations, marks the process ready, then validates integrations and starts the Connection Points in the background.
+13. Create the connection-point listener manager and start activation in the background. Activation re-reads policy definitions, Surfaces, Members, Teams, spend counters and the other shared state listed in [what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does), recompiles every policy engine, migrates inline integration credentials to the secrets store and pins integration destinations, marks the process ready, then validates integrations and starts the Connection Points in the background.
 14. Build source authentication, the management router, the vault router, and the DID router. A route-prefix collision with the dashboard exits the process.
 15. Bind one server per configured port, then start the periodic metrics and session-cleanup tasks.
 
@@ -78,8 +78,9 @@ Demotion stops the Connection Points; HTTP listeners stay up. See
 [`docs/CONFIGURATION_RELOAD.md#server-mode`](docs/CONFIGURATION_RELOAD.md#server-mode).
 
 `SIGTERM` or Ctrl-C stops the process: `main.rs` flushes the system metrics, usage
-telemetry, operational metrics and drift stores to disk, shuts down OpenTelemetry, and exits,
-allowing each step 10 seconds. In-flight requests are not drained.
+telemetry, operational metrics and drift stores to disk (on a Standby the flush does nothing,
+see [shared storage](docs/CONFIGURATION_RELOAD.md#shared-storage)), shuts down
+OpenTelemetry, and exits, allowing each step 10 seconds. In-flight requests are not drained.
 
 ## Request path
 
@@ -300,6 +301,14 @@ Breaking one of these is a correctness bug, not a style question.
 | Every platform-key call is admitted against the budget just before it is sent, and only the default upstream's main call is offered the caller's key. | Spend could exceed budget, or a caller's key could reach the wrong upstream. |
 | Upstream headers go only to the upstream and origin they were configured for, and a secret a Surface references is sent only after its tenancy check passes. | Credentials could reach another origin or another tenant's secret could be spent. |
 | DashMap is authoritative at runtime; disk is written immediately. | Reads and writes would disagree after a reload. |
+
+Loading stored records is the one deliberate exception to failing closed. A record that
+cannot be read, decrypted or parsed at startup or promotion is skipped, logged at `ERROR` and
+counted in `agent_stream_storage_load_errors_total`, favouring availability as Agent Gateway
+does. A Surface or appliance-wide set that references a skipped policy definition still
+denies, but a skipped appliance-wide assignments document leaves no appliance-wide policy
+enforced, so alert on that counter. A store that cannot be read at all holds readiness back
+([what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does)).
 | Governance Records never embed raw media bytes, only digests. | Recorded media would bypass the multimedia store and its encryption at rest. |
 | An outbound client that checks addresses at connect time follows no redirects and ignores `HTTP_PROXY` and `HTTPS_PROXY` ([`src/http_client.rs`](src/http_client.rs)). | A redirect or a proxy that resolves the host itself would bypass the address check. |
 

@@ -109,6 +109,10 @@ pub struct EvalTask {
     /// The target surface's drift thresholds, for the eval-vs-baseline verdict.
     pub target_warn_threshold: Option<f64>,
     pub target_drift_threshold: Option<f64>,
+    /// The activation generation a scheduled run started in. Once a mode change
+    /// supersedes it the run stops and records nothing, because the drift state
+    /// now belongs to whichever instance is Active. `None` for operator runs.
+    pub activation_generation: Option<u64>,
 }
 
 impl EvalTask {
@@ -116,6 +120,16 @@ impl EvalTask {
     fn experiment_target(&self) -> Option<String> {
         (self.target_surface_id != self.source_surface_id).then(|| self.target_surface_id.clone())
     }
+
+    fn superseded(&self) -> bool {
+        generation_superseded(self.activation_generation)
+    }
+}
+
+/// Whether a run bound to `generation` must stop: the instance was demoted or
+/// re-promoted since it started. A run bound to no generation never is.
+fn generation_superseded(generation: Option<u64>) -> bool {
+    generation.is_some_and(|g| !crate::server::mode::is_serving_generation(g))
 }
 
 /// Spend consumed by one replayed session, per pipeline stage. Built from a
@@ -510,6 +524,9 @@ pub async fn run_eval_task(task: EvalTask) {
         );
     }
     for session in &sessions {
+        if task.superseded() {
+            break;
+        }
         // Cooperative cancel, checked between sessions (the replay is sequential).
         if task
             .handle
@@ -695,6 +712,16 @@ pub async fn run_eval_task(task: EvalTask) {
         task.handle
             .progress
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    if task.superseded() {
+        deregister_run(&task.run_id);
+        tracing::info!(
+            "[DRIFT] scheduled eval {} for {} discarded: the instance is no longer the Active it started on",
+            task.run_id,
+            task.source_surface_id
+        );
+        return;
     }
 
     // Sessions actually attempted — equal to the planned count on a full run,
@@ -1397,6 +1424,28 @@ mod tests {
             config.team_attribution = Some(attribution);
             assert!(replay_call_budget(&config, &member, &[]).is_some());
         }
+    }
+
+    #[test]
+    fn only_a_run_bound_to_a_superseded_generation_stops() {
+        use crate::server::mode::{self, ServerMode};
+
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mode::set_server_mode(ServerMode::Active);
+        let started = mode::current_activation_generation();
+        assert!(mode::mark_activation_ready(started));
+        assert!(!generation_superseded(Some(started)));
+        assert!(!generation_superseded(None));
+
+        mode::set_server_mode(ServerMode::Standby);
+        assert!(generation_superseded(Some(started)), "a demotion stops a scheduled run");
+        assert!(!generation_superseded(None), "an operator run is never bound to a generation");
+
+        mode::set_server_mode(ServerMode::Active);
+        assert!(mode::mark_activation_ready(mode::current_activation_generation()));
+        assert!(generation_superseded(Some(started)), "a re-promotion does not revive it");
     }
 
     #[test]

@@ -1,0 +1,63 @@
+branch: fix/promotion-reload
+changes:
+  added:
+    - timestamp: '2026-11-03T17:00:00.000Z'
+      title: Count stored records skipped on load in storage_load_errors_total
+      description: >-
+        The Prometheus counter agent_stream_storage_load_errors_total, labelled by entity
+        and reason, counts every stored record that could not be read, decrypted, parsed
+        or migrated and was skipped, as Agent Gateway does, so a policy or gateway missing
+        after startup or promotion can be alerted on.
+  changed:
+    - timestamp: '2026-11-04T11:00:00.000Z'
+      title: Document that unreadable stored policy records are skipped, not denied
+      description: >-
+        The policy and architecture docs now state that a policy definition or the
+        appliance-wide assignments document that cannot be read is skipped and counted in
+        agent_stream_storage_load_errors_total rather than failing closed, so a skipped
+        assignments document leaves no appliance-wide policy enforced and operators should
+        alert on that counter.
+  fixed:
+    - timestamp: '2026-11-03T07:44:38.000Z'
+      title: Reload shared state from disk when a Standby is promoted to Active
+      description: >-
+        A promoted Standby now re-reads Members, Teams, dashboard users and sessions,
+        policy engines, usage and monitoring series, the request log, system metrics,
+        dashboard settings, credential revocations, governance chains, prompts, terms,
+        provisioning and drift records, so data written on the previous Active is kept.
+    - timestamp: '2026-11-03T07:44:38.000Z'
+      title: Stop a Standby from writing shared monitoring, governance and drift state
+      description: >-
+        Metrics persistence, governance and drift retention, and drift evaluation now
+        run only on the Active, so a Standby sharing storage no longer overwrites what
+        the Active writes.
+    - timestamp: '2026-11-03T12:00:00.000Z'
+      title: Retry a promotion when monitoring history cannot be read from storage
+      description: >-
+        A storage read error on the request log, time series, system metrics history
+        or member provisioning config now holds readiness back and is retried, instead
+        of starting empty and overwriting the previous Active's history on the next save.
+    - timestamp: '2026-11-03T14:00:00.000Z'
+      title: Recompile every enabled Surface and gateway policy when a Standby is promoted
+      description: >-
+        Promotion now rebuilds the policy engine of every enabled Surface and gateway,
+        not only those with a policy on the base target. A Surface whose policy comes
+        from its default variant gets the current policy, and a gateway whose policy
+        was removed no longer enforces it.
+    - timestamp: '2026-11-03T15:00:00.000Z'
+      title: Stop a scheduled drift evaluation when its instance is demoted
+      description: >-
+        A scheduled replay evaluation still running when the instance is demoted now
+        stops before its next session and records nothing. Previously it kept spending
+        on the upstream and wrote drift series, evaluation state and a run record over
+        what the new Active had stored.
+    - timestamp: '2026-11-04T10:00:00.000Z'
+      title: Retry a promotion when Surfaces or gateways cannot be read for policy
+      description: >-
+        A storage error reading Surfaces, or the Surface or gateway store while policy
+        engines are recompiled, now holds readiness at 503 and is retried. Previously the
+        instance went ready with the policy engines it compiled at startup, and a Surface
+        first seen on promotion had none.
+  removed: []
+  security: []
+  breaking: []

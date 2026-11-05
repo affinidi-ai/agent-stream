@@ -41,6 +41,14 @@ Every layer combines **deny-overrides** and fails closed: any deny, evaluation e
 missing engine, or missing, disabled, or uncompilable referenced definition denies. A
 deny at an earlier layer is final; a later allow cannot override it.
 
+Loading the stored policy records is the exception. A policy definition or the
+appliance-wide assignments document that cannot be read, decrypted or parsed at startup or
+promotion is skipped, logged at `ERROR` and counted in
+`agent_stream_storage_load_errors_total`, favouring availability. A layer that references a
+skipped definition still denies, but a skipped assignments document leaves no appliance-wide
+set enforced; alert on that counter
+([CONFIGURATION_RELOAD.md](CONFIGURATION_RELOAD.md#what-promotion-does)).
+
 The layers each path runs, in order:
 
 ```mermaid

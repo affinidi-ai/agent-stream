@@ -60,15 +60,17 @@ impl MetricsBackend for MultiBackend {
     }
 
     async fn load(&self) -> Result<MetricsSnapshot> {
-        // Load from the first backend that supports it (typically file backend)
+        // Load from the first backend that has data (typically the file backend).
+        // A backend that fails to load fails the whole load, so the caller can
+        // tell an unreadable log from an empty one.
         for backend in &self.backends {
-            if let Ok(snapshot) = backend.load().await
-                && (!snapshot
-                    .connections
+            let snapshot = backend.load().await?;
+            if !snapshot
+                .connections
+                .is_empty()
+                || !snapshot
+                    .rule_validation_events
                     .is_empty()
-                    || !snapshot
-                        .rule_validation_events
-                        .is_empty())
             {
                 return Ok(snapshot);
             }

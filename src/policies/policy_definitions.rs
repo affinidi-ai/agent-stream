@@ -363,6 +363,13 @@ impl FileSystemPolicyDefinitionStore {
         Ok(Self { storage })
     }
 
+    /// Re-read every policy document from disk.
+    pub async fn refresh_from_disk(&self) -> Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+    }
+
     /// Get the flat (current-version) view of a policy by ID.
     pub async fn get(
         &self,

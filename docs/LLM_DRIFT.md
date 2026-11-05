@@ -95,7 +95,7 @@ per Variant.
 | `warn_threshold`, `drift_threshold` | `0.25`, `0.5` | Relative-change thresholds. Non-positive values fall back to the defaults, and `drift_threshold` is raised to at least `warn_threshold`. |
 | `gate_on_regression` | `false` | Refuse Surface saves while drifting; see [Regression gating](#regression-gating). |
 | `eval.enabled` | `false` | Turns replay evaluation on. |
-| `eval.schedule` | none | `{enabled, interval_secs}`; the interval is floored at 300 seconds. |
+| `eval.schedule` | none | `{enabled, interval_secs}`; the interval is floored at 300 seconds. Scheduled runs happen only on the Active instance. |
 | `eval.embeddings` | none | The embeddings model for `semantic_distance`, chosen from the model catalog. |
 | `eval.max_sessions` | `50` | Sessions replayed per run, capped at 200. |
 | `eval.max_run_cost_usd` | appliance default | Spend ceiling for one run. `0` opts this Surface out of the ceiling. |
@@ -197,7 +197,10 @@ it with the **target** Surface's baseline and thresholds.
 
 The scheduler ([`src/drift/scheduler.rs`](../src/drift/scheduler.rs)) runs every
 Surface whose `eval.schedule` is enabled, one run at a time, at intervals of at least
-five minutes. A per-Surface state ([`src/drift/eval_state.rs`](../src/drift/eval_state.rs))
+five minutes, and only while the instance is Active. When the instance is demoted, or
+demoted and promoted again, a scheduled run already in progress stops before its next
+session and records nothing: no drift samples, run record, or change to the failure count.
+A per-Surface state ([`src/drift/eval_state.rs`](../src/drift/eval_state.rs))
 counts consecutive failed runs; at `eval_max_consecutive_failures` the Surface's
 scheduled evaluation is suspended. A manual run always executes, even while
 suspended, and a successful run clears the count and the suspension.

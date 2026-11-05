@@ -578,6 +578,19 @@ pub struct MemberProvisioner {
     creation_window: Mutex<VecDeque<i64>>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for MemberProvisioner {
+    /// Re-read the provisioning config another instance saved. A missing or
+    /// invalid file keeps the current config; a storage error is returned so
+    /// the reload is retried.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        if let Some(config) = Self::load_from_disk(&self.storage_path).await? {
+            *self.config.write().await = config;
+        }
+        Ok(())
+    }
+}
+
 impl MemberProvisioner {
     /// Construct a provisioner, loading the config from the `storage_dir`
     /// directory (the config is stored as `member_provisioning.json` inside it)
@@ -592,6 +605,10 @@ impl MemberProvisioner {
             .join(PROVISIONING_CONFIG_FILENAME);
         let config = Self::load_from_disk(&storage_path)
             .await
+            .unwrap_or_else(|e| {
+                warn!("Failed to read member provisioning config {}: {e}", storage_path.display());
+                None
+            })
             .unwrap_or_default();
         Self {
             config: RwLock::new(config),
@@ -603,15 +620,18 @@ impl MemberProvisioner {
         }
     }
 
-    async fn load_from_disk(path: &PathBuf) -> Option<MemberProvisioningConfig> {
-        let bytes = tokio::fs::read(path)
-            .await
-            .ok()?;
+    /// The stored config, or `None` when the file is missing or invalid.
+    async fn load_from_disk(path: &PathBuf) -> std::io::Result<Option<MemberProvisioningConfig>> {
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
         match serde_json::from_slice::<MemberProvisioningConfig>(&bytes) {
-            Ok(config) => Some(config),
+            Ok(config) => Ok(Some(config)),
             Err(e) => {
                 warn!("Failed to parse member provisioning config {}: {e}", path.display());
-                None
+                Ok(None)
             }
         }
     }
@@ -1147,6 +1167,67 @@ mod tests {
             .await
             .unwrap();
         p
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_the_config_another_instance_saved() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = std::env::temp_dir().join(format!("prov_shared_{}", uuid::Uuid::new_v4()));
+        let (m, t) = stores().await;
+        let standby = MemberProvisioner::new(dir.clone(), m.clone(), t.clone()).await;
+        let active = MemberProvisioner::new(dir.clone(), m, t).await;
+        active
+            .update_config(base_config())
+            .await
+            .unwrap();
+        assert!(!standby.config().await.enabled);
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        assert_eq!(standby.config().await, base_config());
+
+        tokio::fs::write(dir.join(PROVISIONING_CONFIG_FILENAME), "not json")
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        assert_eq!(standby.config().await, base_config(), "an invalid file keeps the current config");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reload_from_unreadable_storage_fails_and_keeps_the_config() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = std::env::temp_dir().join(format!("prov_unreadable_{}", uuid::Uuid::new_v4()));
+        let (m, t) = stores().await;
+        let provisioner = MemberProvisioner::new(dir.clone(), m, t).await;
+        provisioner
+            .update_config(base_config())
+            .await
+            .unwrap();
+        let config_path = dir.join(PROVISIONING_CONFIG_FILENAME);
+        tokio::fs::remove_file(&config_path)
+            .await
+            .unwrap();
+        tokio::fs::create_dir(&config_path)
+            .await
+            .unwrap();
+
+        assert!(
+            provisioner
+                .reload_from_storage()
+                .await
+                .is_err(),
+            "a read error is retried, not read as a missing config"
+        );
+        assert_eq!(provisioner.config().await, base_config());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
