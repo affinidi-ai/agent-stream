@@ -25,6 +25,7 @@ The bootstrap TOML is the entry point. It names every other file.
 | `limits.json` | Ceilings on how many records of each kind may exist | No; every dimension is unconstrained | Startup |
 | `llm.json` | Seed for the Model catalog | No; the catalog starts empty | First start only |
 | `saml.json` | SAML identity provider | Only when `auth_mode = "saml"` | Startup |
+| `oidc.json` | OpenID provider, client and role mapping | Only when `auth_mode = "oidc"` | Startup |
 | `prompt-guard.json` | Built-in Prompt Guard pattern definitions | No; built-in patterns are unavailable | Startup |
 | `rejection_categories.json` | Rejection-reason taxonomy | No; a compiled-in copy is used | On change (mtime-gated) |
 | `audio_streams.json` | Catalog of voice filler clips for the realtime relay | No; no filler clips | Startup |
@@ -75,6 +76,7 @@ rbac = "rbac.json"
 limits = "limits.json"
 llm = "llm.json"
 saml = "saml.json"
+oidc = "oidc.json"
 prompt_guard = "prompt-guard.json"
 rejection_taxonomy = "rejection_categories.json"
 audio_streams = "audio_streams.json"
@@ -89,6 +91,7 @@ flowchart LR
     T --> L[limits.json]
     T --> LL[llm.json]
     T --> S[saml.json]
+    T --> O[oidc.json]
     T --> P[prompt-guard.json]
     T --> RC[rejection_categories.json]
     T --> AU[audio_streams.json]
@@ -130,6 +133,7 @@ in a deployment.
 | `prompt-guard.json` | Read before logging starts. A missing or invalid file leaves built-in Prompt Guard patterns unavailable, and the warning is not written to the log. |
 | `metrics.json` | `opentelemetry` and `cloudwatch` and their nested required fields have no defaults. A file missing any of them fails to parse and OpenTelemetry stays off, with the error on stderr only. |
 | `saml.json` role mapping | Each SAML sign-in sets the user's role again from the identity provider, except the primary administrator's, which is `administrator` at every sign-in. Only a `role_mapping` entry grants a role, and its key must equal the identity provider's value exactly, case and spaces included: a value with no entry is `user` whatever it reads, including `admin` or `Administrator`. The target is read without regard to case, and a target other than `administrator`, `poweruser` or `user` is `user` and logs a warning. An identity provider that sends `Admin` needs `"Admin": "administrator"`, with one entry per spelling it sends. A value with no entry that earlier versions granted by name (`admin`, `administrator`, `poweruser`, `power_user` or `power-user`, in any case) logs a warning naming the entry to add. |
+| `oidc.json` `role_mapping` and `required_claims` | Each OIDC sign-in sets the user's role again from the ID token, in both directions, and there is no primary administrator: a mapping that sends a value to `administrator` grants full management access to every account the provider gives that value. A value matches only exactly, case included. Leave `unmapped` at `deny` unless every account at the provider should get a role, and set `required_claims` to bind the deployment to your tenant at the provider: without it, every account the provider signs in can reach the dashboard (startup logs a warning). |
 | `llm_catalog.refresh_url` | Validated when `agent-stream.json` loads, so an unacceptable URL fails startup. An empty or blank value counts as unset: the dashboard does not offer the refresh action. |
 | `secrets.reveal_values` | `true` by default. `false` makes `GET /api/v1/secrets/{id}` answer the record without its value and removes the dashboard's control to show it; values can still be set and replaced. It also refuses any integration create, update or test that would send a stored secret to a new destination, unless every secret it references is the URL its type delivers to (`url_secret_id` for a webhook, `webhook_url_secret_id` for Slack, `redis_url_secret_id` for a stream with `platform: redis`) and nothing else secret or routing goes with it; see [`INTEGRATIONS.md`](INTEGRATIONS.md#secrets-in-integration-configuration). |
 | `did_cache.allow_private_hosts` | Off by default, which refuses `did:web` and `did:webvh` resolution on loopback, private-network and link-local hosts. A local stack whose mediator runs on `localhost` needs it on; `make run-debug` turns it on in `envs/local/config/config.toml`. On also lets attacker-supplied DIDs reach internal addresses, cloud metadata included. |
@@ -150,6 +154,7 @@ forms:
 | `encryption` master key | An environment variable, a key file, or AWS KMS, chosen by `key_source`. See [`ENCRYPTION_AT_REST.md`](ENCRYPTION_AT_REST.md). |
 | `metrics.json` `opentelemetry.auth.secret_id` | The id of a secret in the secrets vault. The header value is read from the vault at startup and on each metrics-config save. `GET /api/v1/metrics/config` never returns it, and a save that leaves it out keeps the stored one. |
 | `saml.json` `graph_api.client_secret` | Literal only. The value sits in the file in plain text. |
+| `oidc.json` `client_secret` | `env://NAME`, `file://PATH`, `aws_secrets://NAME` or `aws_parameter_store://NAME`, resolved at startup; leading and trailing whitespace is dropped. A literal value or `string://` is refused, so the file never holds the secret. |
 
 Provider API keys and other runtime credentials live in the secrets vault, not in a
 configuration file. See [`PROVIDERS_AND_CREDENTIALS.md`](PROVIDERS_AND_CREDENTIALS.md).
@@ -211,8 +216,8 @@ The bootstrap file, read once at startup. Fields and defaults are in
 | --- | --- | --- |
 | `channel_config_source` | `"local"` | `local` loads internal surface records from `storage_paths.agent_surfaces`. `dynamodb` loads them from `dynamodb_table` (using `aws_region` and `aws_profile`), falling back to the last snapshot in `storage_paths.config_cache` when DynamoDB is unreachable. Surfaces, Members and Teams always come from `_storage/`. |
 | `secrets_backend` | `"filesystem"` | `filesystem` keeps secrets under `storage_paths.secrets`. It is the only supported value; any other value stops startup with an error. |
-| `auth_mode` | `"passkey"` | `passkey` uses WebAuthn with `agent-stream.json` `webauthn`. `saml` requires `saml.json`; startup fails if it cannot be read. |
-| `session_timeout_minutes` | `20` | Dashboard session lifetime, for passkey and SAML alike. |
+| `auth_mode` | `"passkey"` | `passkey` uses WebAuthn with `agent-stream.json` `webauthn`. `saml` requires `saml.json`; startup fails if it cannot be read. `oidc` requires `oidc.json`; startup fails if it cannot be read or a setting is refused. |
+| `session_timeout_minutes` | `20` | Dashboard session lifetime, for passkey, SAML and OIDC sign-in alike. |
 | `server_mode` | `"active"` | `active` or `standby`. See [Server mode](CONFIGURATION_RELOAD.md#server-mode). |
 | `cache_refresh_interval_secs` | `0` | Above 0, cached stores reconcile with disk on this interval and Surface changes written by another node are mounted. See [`CONFIGURATION_RELOAD.md`](CONFIGURATION_RELOAD.md). |
 | `[a2a] max_inflight_dispatches` | `256` | Fabric requests one connection-point listener dispatches concurrently. Must be greater than 0. |
@@ -343,6 +348,57 @@ provider never reassigns, such as Entra ID's
 name. Users created by SAML are approved
 automatically and count against the `users` limit. `idp_metadata_url` in the example is not
 read.
+
+## `oidc.json`
+
+Read only when `auth_mode = "oidc"` ([`OidcConfig`](../src/auth/oidc/config.rs)); see
+[`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md#oidc-sign-in) for the sign-in it drives and
+[`oidc.example.json`](../config/examples/oidc.example.json) for an example. A field the file
+does not define stops startup, so a misspelt `required_claims` cannot pass unnoticed.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `label` | `"SSO"` | The provider name on the sign-in button: "Sign in with {label}". |
+| `issuer` | Required | The provider's issuer, exactly as its discovery document gives it. `https`, with no query or fragment. |
+| `client_id` | Required | The client registered at the provider. It is not secret, so it may be written as is, or given as a secret reference (`env://`, `file://`, `aws_secrets://`, `aws_parameter_store://`) to keep it beside the client secret. |
+| `client_secret` | Required | A secret reference (see [Secret references](#secret-references)). |
+| `token_endpoint_auth_method` | `"client_secret_basic"` | `client_secret_basic` or `client_secret_post`. |
+| `redirect_uri` | Required | The callback URL registered at the provider, verbatim: the dashboard's public origin and the API prefix, for example `https://stream.example.com/api/oidc/callback`. `https`, and never derived from a request. |
+| `scopes` | `["openid", "profile", "email"]` | Must include `openid`. Add any scope the provider needs before it puts the role and tenant claims in the ID token. |
+| `id_token_signing_algs` | `["ES256"]` | The algorithms an ID token may be signed with: any of `ES256`, `ES384`, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512` and `EdDSA`. `none` and `HS*` are refused. |
+| `claims` | `preferred_username`, `email`, `given_name`, `family_name` | Which claim fills `username`, `email`, `first_name` and `last_name`. Display data only. |
+| `required_claims` | `{}` | Claim name to the values allowed, each a string, a boolean, or a `regex:` pattern: the token passes when each named claim is present and matches one of its values (the claim itself, or any element when it is an array). Types must match, so `true` does not match the string `"true"`; list both for a provider that sends the string. For example `{"org_id": ["org_123"], "email_verified": [true]}`. Any other value type stops startup. |
+| `role_mapping.claim` | Required | The top-level claim carrying the role values (a string or an array of strings). |
+| `role_mapping.values` | Required, at least one | Claim value, or `regex:` pattern, to `administrator`, `poweruser` or `user`; any other role name stops startup. An exact entry for a value wins over every pattern it matches, so it can raise or lower one person; otherwise the highest role among the matching patterns applies. |
+| `role_mapping.unmapped` | `"deny"` | What an account with no mapped value gets: `deny`, or a role name. |
+
+A value written as `regex:<pattern>` in `required_claims` or `role_mapping.values` is a regular
+expression ([Rust `regex` syntax](https://docs.rs/regex/latest/regex/#syntax)) that must match
+the whole claim value: `"regex:.*@affinidi\\.com"` matches every address at that domain and
+not `x@affinidi.com.example`. Any other value is matched exactly, so the dots and `+` in an
+email address are literal. In JSON a regex backslash is written twice (`\\.`). Matching is
+case-sensitive; start the pattern with `(?i)` to ignore case. A pattern that does not compile
+stops startup. For example, every address at one domain as a power user, with one
+administrator:
+
+```json
+"required_claims": { "email_verified": [true] },
+"role_mapping": {
+  "claim": "email",
+  "values": { "regex:(?i).*@affinidi\\.com": "poweruser", "adam.l@affinidi.com": "administrator" },
+  "unmapped": "deny"
+}
+```
+
+Match on an email address only when the provider is authoritative for that domain (it hosts the
+domain's accounts). A provider that merely verified the address once, as Google does for an
+address it does not host, still vouches for it after the person has left the organisation.
+
+A debug build also accepts plain `http` for `issuer`, `redirect_uri` and the provider's
+endpoints when the host is `localhost` or a loopback address, for a provider running on the
+same machine. A release build refuses it. Outbound requests to loopback are still refused, so
+the debug build also needs `AS_TEST_MODE=true` and the provider's discovery, token and JWKS
+URLs listed exactly in `AS_TEST_SERVICE_ENDPOINT_ALLOWLIST` (comma-separated).
 
 ## `prompt-guard.json`
 

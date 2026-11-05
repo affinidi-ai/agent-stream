@@ -663,12 +663,12 @@ pub async fn resolve_api_key(
 
 /// Generate a PKCE code_verifier (RFC 7636 §4.1): 43 characters of the
 /// unreserved set, within the 43-128 the RFC allows.
-fn generate_pkce_verifier() -> String {
+pub(crate) fn generate_pkce_verifier() -> String {
     random_url_token()
 }
 
 /// 32 random bytes, base64url-encoded without padding (43 characters).
-fn random_url_token() -> String {
+pub(crate) fn random_url_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     base64_url_encode_bytes(&bytes)
@@ -676,7 +676,7 @@ fn random_url_token() -> String {
 
 /// Generate a PKCE code_challenge from a code_verifier (RFC 7636 §4.2)
 /// code_challenge = BASE64URL(SHA256(code_verifier))
-fn generate_pkce_challenge(verifier: &str) -> String {
+pub(crate) fn generate_pkce_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     base64_url_encode_bytes(&digest)
 }

@@ -1,0 +1,28 @@
+{
+  "label": "SOME_OIDC",
+  "issuer": "https://YOUR_PROVIDER",
+  "client_id": "YOUR_CLIENT_ID",
+  "client_secret": "env://AS_OIDC_CLIENT_SECRET",
+  "token_endpoint_auth_method": "client_secret_basic",
+  "redirect_uri": "https://YOUR_DOMAIN/api/oidc/callback",
+  "scopes": ["openid", "profile", "email"],
+  "id_token_signing_algs": ["ES256"],
+  "claims": {
+    "username": "preferred_username",
+    "email": "email",
+    "first_name": "given_name",
+    "last_name": "family_name"
+  },
+  "required_claims": {
+    "claim_org": ["YOUR_ORG_ID"]
+  },
+  "role_mapping": {
+    "claim": "org_roles",
+    "values": {
+      "admin": "administrator",
+      "operator": "poweruser",
+      "member": "user"
+    },
+    "unmapped": "deny"
+  }
+}

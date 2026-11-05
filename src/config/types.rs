@@ -1293,6 +1293,10 @@ pub struct ConfigFilePaths {
     #[serde(default = "crate::auth::auth_config::default_saml_config_path")]
     pub saml: String,
 
+    /// OpenID Connect sign-in configuration file path (the OpenID provider, client and role mapping)
+    #[serde(default = "crate::auth::auth_config::default_oidc_config_path")]
+    pub oidc: String,
+
     /// Prompt guard configuration file path - defines built-in PII pattern definitions
     #[serde(default = "default_prompt_guard_config_path")]
     pub prompt_guard: String,
@@ -1333,6 +1337,7 @@ impl Default for ConfigFilePaths {
             limits: default_limits_config_path(),
             llm: default_llm_config_path(),
             saml: crate::auth::auth_config::default_saml_config_path(),
+            oidc: crate::auth::auth_config::default_oidc_config_path(),
             prompt_guard: default_prompt_guard_config_path(),
             marketplace_models: default_marketplace_models_config_path(),
             rejection_taxonomy: default_rejection_taxonomy_path(),
@@ -1938,7 +1943,7 @@ pub struct BootstrapConfig {
     #[serde(default = "default_metrics_cache_ttl")]
     pub metrics_cache_ttl_seconds_legacy: u64,
 
-    /// Authentication mode (passkey or saml)
+    /// Authentication mode (passkey, saml or oidc)
     #[serde(default)]
     pub auth_mode: crate::auth::auth_config::AuthMode,
 

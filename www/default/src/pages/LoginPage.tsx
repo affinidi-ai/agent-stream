@@ -17,6 +17,14 @@ interface LoginPageProps {
   onLogin: () => void;
 }
 
+type AuthMode = 'passkey' | 'saml' | 'oidc';
+
+/** Where each single sign-on mode starts its sign-in. */
+const SSO_LOGIN_PATHS: Record<Exclude<AuthMode, 'passkey'>, string> = {
+  saml: '/api/saml/login',
+  oidc: '/api/oidc/login',
+};
+
 const COPY = {
   login: {
     heading: 'Sign in',
@@ -112,7 +120,8 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const [success, setSuccess] = useState<string | null>(null);
   const [supported, setSupported] = useState(false);
   const [platformAuthAvailable, setPlatformAuthAvailable] = useState(false);
-  const [authMode, setAuthMode] = useState<'passkey' | 'saml' | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode | null>(null);
+  const [ssoLabel, setSsoLabel] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(true);
   const registrationTerms = useRegistrationTerms(mode === 'register', setError);
 
@@ -141,6 +150,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
         const response = await apiClient.fetch('/api/v1/auth/mode');
         const data = await response.json();
         setAuthMode(data.mode);
+        setSsoLabel(data.label ?? null);
         if (data.mode === 'passkey') {
           setSupported(isWebAuthnSupported());
           isPlatformAuthenticatorAvailable().then(setPlatformAuthAvailable);
@@ -189,9 +199,9 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
     setSuccess(null);
     setLoading(true);
 
-    if (authMode === 'saml') {
+    if (authMode === 'saml' || authMode === 'oidc') {
       await new Promise(resolve => setTimeout(resolve, 100));
-      window.location.href = '/api/saml/login';
+      window.location.href = SSO_LOGIN_PATHS[authMode];
       return;
     }
 
@@ -225,7 +235,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
       );
     }
 
-    if (authMode === 'saml') {
+    if (authMode === 'saml' || authMode === 'oidc') {
       return (
         <>
           {error && <Alert variant="danger">{error}</Alert>}
@@ -237,6 +247,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                 style={{ height: '48px' }}
                 disabled={loading}
                 className={`d-flex align-items-center justify-content-center gap-2 ${styles.submitBtn}`}
+                data-testid={`login-${authMode}-button`}
               >
                 {loading ? (
                   <>
@@ -244,7 +255,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                     Signing in
                   </>
                 ) : (
-                  <>Sign in with SSO</>
+                  <>Sign in with {authMode === 'oidc' && ssoLabel ? ssoLabel : 'SSO'}</>
                 )}
               </Button>
             </div>

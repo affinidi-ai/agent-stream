@@ -299,6 +299,73 @@ fn saml_auth_routes(
         )
 }
 
+/// The OIDC sign-in routes, with the same per-client throttle as
+/// [`passkey_auth_routes`]. `/auth/check` and `/auth/logout` behave as in SAML
+/// mode.
+fn oidc_auth_routes(
+    oidc_state: std::sync::Arc<crate::auth::oidc::OidcState>,
+    sessions: std::sync::Arc<crate::auth::SessionManager>,
+) -> Router {
+    Router::new()
+        .route(
+            "/oidc/login",
+            get(crate::auth::oidc::oidc_login).layer(axum::middleware::from_fn(crate::auth::throttle::sign_in_start)),
+        )
+        .route(
+            "/oidc/callback",
+            get(crate::auth::oidc::oidc_callback)
+                .layer(axum::middleware::from_fn(crate::auth::throttle::sign_in_finish)),
+        )
+        .with_state(oidc_state)
+        .merge(
+            Router::new()
+                .route(
+                    "/auth/check",
+                    get(crate::auth::saml::saml_check_auth).layer(axum::middleware::from_fn_with_state(
+                        sessions.clone(),
+                        crate::auth::throttle::auth_check,
+                    )),
+                )
+                .route("/auth/logout", post(crate::auth::saml::saml_logout_generic))
+                .layer(Extension(sessions)),
+        )
+}
+
+/// The internal UI-test sign-in bootstrap. Compiled into debug builds only
+/// (`debug_assertions`) so it can never ship in a release binary; even in
+/// debug it stays disabled unless AS_TEST_MODE and a non-empty AS_TEST_TOKEN
+/// are both set (see TestAuthConfig::from_env). Every sign-in mode stores
+/// users in PasskeyStorage and shares one SessionManager, so it mints the same
+/// session in any of them.
+#[cfg(debug_assertions)]
+fn test_support_router(
+    storage: std::sync::Arc<crate::auth::storage::PasskeyStorage>,
+    sessions: std::sync::Arc<crate::auth::SessionManager>,
+    terms_manager: std::sync::Arc<crate::terms::TermsManager>,
+) -> Router {
+    let test_auth_config = crate::auth::test_auth::TestAuthConfig::from_env();
+    if !test_auth_config.enabled {
+        return Router::new();
+    }
+    Router::new()
+        .route("/internal/test-support/auth/login", post(crate::auth::test_auth::test_login))
+        .with_state(std::sync::Arc::new(crate::auth::test_auth::TestAuthState::new(
+            storage,
+            sessions,
+            terms_manager,
+            test_auth_config,
+        )))
+}
+
+#[cfg(not(debug_assertions))]
+fn test_support_router(
+    _storage: std::sync::Arc<crate::auth::storage::PasskeyStorage>,
+    _sessions: std::sync::Arc<crate::auth::SessionManager>,
+    _terms_manager: std::sync::Arc<crate::terms::TermsManager>,
+) -> Router {
+    Router::new()
+}
+
 /// Create the identity API router with all routes configured
 pub fn create_identity_api_router(
     state: IdentityApiState,
@@ -306,6 +373,7 @@ pub fn create_identity_api_router(
     dashboard_state: crate::observability::DashboardState,
     auth_state: Option<std::sync::Arc<crate::auth::AuthState>>,
     saml_state: Option<std::sync::Arc<crate::auth::saml::SamlState>>,
+    oidc_state: Option<std::sync::Arc<crate::auth::oidc::OidcState>>,
     rbac_guard: RbacGuard,
     gateway_store: Option<std::sync::Arc<crate::gateways::FileSystemGatewayStore>>,
     mediator_store: Option<std::sync::Arc<crate::mediators::FileSystemMediatorStore>>,
@@ -554,11 +622,12 @@ pub fn create_identity_api_router(
     // Pipe routes are registered in the port listener (proxy/server.rs) like channels and MCP proxies
     // See: proxy/server.rs where LLM pipe routes are registered from network_config.pipe_paths
 
-    // Determine auth mode from what was actually passed to this function
-    // If saml_state is Some, we're in SAML mode
-    // If auth_state is Some, we're in Passkey mode
+    // Determine auth mode from what was actually passed to this function:
+    // SAML or OIDC state when that mode is on, otherwise passkey.
     let auth_mode = if saml_state.is_some() {
         crate::auth::AuthMode::Saml
+    } else if oidc_state.is_some() {
+        crate::auth::AuthMode::Oidc
     } else {
         crate::auth::AuthMode::Passkey
     };
@@ -572,35 +641,13 @@ pub fn create_identity_api_router(
                 let session_mgr = auth_state_arc
                     .session_manager
                     .clone();
-                // Internal UI-test auth bootstrap. Compiled into debug builds only
-                // (`debug_assertions`) so it can never ship in a release binary; even
-                // in debug it stays disabled unless AS_TEST_MODE and a non-empty
-                // AS_TEST_TOKEN are both set (see TestAuthConfig::from_env).
-                #[cfg(debug_assertions)]
-                let test_support_router = {
-                    let test_auth_config = crate::auth::test_auth::TestAuthConfig::from_env();
-                    if test_auth_config.enabled {
-                        Router::new()
-                            .route("/internal/test-support/auth/login", post(crate::auth::test_auth::test_login))
-                            .with_state(std::sync::Arc::new(crate::auth::test_auth::TestAuthState::new(
-                                storage.clone(),
-                                session_mgr.clone(),
-                                terms_manager.clone(),
-                                test_auth_config,
-                            )))
-                    } else {
-                        Router::new()
-                    }
-                };
-                #[cfg(not(debug_assertions))]
-                let test_support_router = Router::new();
 
                 let router = Router::new()
                     // Auth mode endpoint (unauthenticated)
                     .route("/v1/auth/mode", get(crate::auth::mode_handler::get_auth_mode))
                     .layer(Extension(auth_mode.clone()))
                     .merge(passkey_auth_routes(auth_state_arc.clone(), session_mgr.clone()))
-                    .merge(test_support_router);
+                    .merge(test_support_router(storage.clone(), session_mgr.clone(), terms_manager.clone()));
 
                 (router, Some(storage), Some(session_mgr))
             } else {
@@ -622,37 +669,12 @@ pub fn create_identity_api_router(
                     .clone();
                 let storage = saml_state_arc.storage.clone();
 
-                // Internal UI-test auth bootstrap. Compiled into debug builds only
-                // (`debug_assertions`) so it can never ship in a release binary; even
-                // in debug it stays disabled unless AS_TEST_MODE and a non-empty
-                // AS_TEST_TOKEN are both set (see TestAuthConfig::from_env). SAML and
-                // passkey modes both store users in PasskeyStorage and share the same
-                // SessionManager, so the bypass mints an identical session in either.
-                #[cfg(debug_assertions)]
-                let test_support_router = {
-                    let test_auth_config = crate::auth::test_auth::TestAuthConfig::from_env();
-                    if test_auth_config.enabled {
-                        Router::new()
-                            .route("/internal/test-support/auth/login", post(crate::auth::test_auth::test_login))
-                            .with_state(std::sync::Arc::new(crate::auth::test_auth::TestAuthState::new(
-                                storage.clone(),
-                                session_mgr.clone(),
-                                terms_manager.clone(),
-                                test_auth_config,
-                            )))
-                    } else {
-                        Router::new()
-                    }
-                };
-                #[cfg(not(debug_assertions))]
-                let test_support_router = Router::new();
-
                 let router = Router::new()
                     // Auth mode endpoint (unauthenticated)
                     .route("/v1/auth/mode", get(crate::auth::mode_handler::get_auth_mode))
                     .layer(Extension(auth_mode.clone()))
                     .merge(saml_auth_routes(saml_state_arc.clone(), session_mgr.clone()))
-                    .merge(test_support_router);
+                    .merge(test_support_router(storage.clone(), session_mgr.clone(), terms_manager.clone()));
                 info!("SAML routes registered (login, acs, metadata, logout, check)");
 
                 // Return storage and session manager for auth_manager_router setup
@@ -668,6 +690,38 @@ pub fn create_identity_api_router(
                 )
             }
         }
+        crate::auth::AuthMode::Oidc => match oidc_state {
+            Some(oidc_state_arc) => {
+                let session_mgr = oidc_state_arc
+                    .session_manager
+                    .clone();
+                let storage = oidc_state_arc.storage.clone();
+                let label = crate::auth::mode_handler::SignInLabel(
+                    oidc_state_arc
+                        .config
+                        .label
+                        .clone(),
+                );
+                let router = Router::new()
+                    .route("/v1/auth/mode", get(crate::auth::mode_handler::get_auth_mode))
+                    .layer(Extension(auth_mode.clone()))
+                    .layer(Extension(label))
+                    .merge(oidc_auth_routes(oidc_state_arc, session_mgr.clone()))
+                    .merge(test_support_router(storage.clone(), session_mgr.clone(), terms_manager.clone()));
+                info!("OIDC routes registered (login, callback, logout, check)");
+                (router, Some(storage), Some(session_mgr))
+            }
+            None => {
+                error!("OIDC mode enabled but no OIDC state available");
+                (
+                    Router::new()
+                        .route("/v1/auth/mode", get(crate::auth::mode_handler::get_auth_mode))
+                        .layer(Extension(auth_mode.clone())),
+                    None,
+                    None,
+                )
+            }
+        },
     };
 
     // Create auth manager routes if passkey storage and session manager are available
@@ -901,14 +955,7 @@ pub fn create_identity_api_router(
                 .with_state(state.clone()),
         );
 
-        info!(
-            "Auth manager routes registered (users, profile, permissions) for {} mode",
-            if auth_mode == crate::auth::AuthMode::Saml {
-                "SAML"
-            } else {
-                "Passkey"
-            }
-        );
+        info!("Auth manager routes registered (users, profile, permissions) for {} mode", auth_mode.as_str());
 
         router
     } else {
@@ -1778,6 +1825,7 @@ mod pipe_connection_test_route_tests {
                 updated_at: now,
                 last_logged_in: None,
                 saml_id: None,
+                oidc: None,
             })
             .await
             .unwrap();
@@ -3335,6 +3383,7 @@ mod token_scope_route_tests {
                 updated_at: now,
                 last_logged_in: None,
                 saml_id: None,
+                oidc: None,
             })
             .await
             .unwrap();
@@ -3797,5 +3846,103 @@ mod auth_throttle_route_tests {
         );
 
         assert_auth_check_throttled(&app, "192.0.2.53:5000").await;
+    }
+
+    fn retry_after(response: &axum::response::Response) -> u64 {
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_oidc_callbacks_whose_code_was_refused_count_toward_the_lockout() {
+        use crate::auth::oidc::test_support::{StubProvider, config_for};
+
+        let provider = StubProvider::start().await;
+        let _allowed = crate::url_validation::test_service_endpoints::allow(&[
+            provider.discovery_url(),
+            provider.token_endpoint(),
+            provider.jwks_uri(),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| {
+            dir.path()
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let sessions = Arc::new(crate::auth::SessionManager::new());
+        let oidc = Arc::new(
+            crate::auth::oidc::OidcState::new(
+                config_for(&provider.issuer),
+                Arc::new(
+                    crate::auth::storage::PasskeyStorage::new(path("users"), path("avatars"))
+                        .await
+                        .unwrap(),
+                ),
+                sessions.clone(),
+                Arc::new(crate::terms::TermsManager::disabled()),
+            )
+            .unwrap(),
+        );
+        let app = oidc_auth_routes(oidc, sessions);
+
+        let unbound = "192.0.2.61:5000";
+        for _ in 0..SIGN_IN_REQUESTS_PER_WINDOW {
+            assert_eq!(
+                status(&app, request("GET", "/oidc/callback?code=c&state=unknown", unbound, None)).await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let limited = app
+            .clone()
+            .oneshot(request("GET", "/oidc/callback?code=c&state=unknown", unbound, None))
+            .await
+            .unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry_after(&limited) <= 60, "rate limited, not locked out");
+
+        let starter = "192.0.2.62:5000";
+        let refused = "192.0.2.63:5000";
+        for _ in 0..SIGN_IN_REQUESTS_PER_WINDOW {
+            let started = app
+                .clone()
+                .oneshot(request("GET", "/oidc/login", starter, None))
+                .await
+                .unwrap();
+            let location = url::Url::parse(
+                started
+                    .headers()
+                    .get(axum::http::header::LOCATION)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let state = location
+                .query_pairs()
+                .find(|(name, _)| name == "state")
+                .unwrap()
+                .1
+                .into_owned();
+            let mut callback = request("GET", &format!("/oidc/callback?code=c&state={state}"), refused, None);
+            callback.headers_mut().insert(
+                axum::http::header::COOKIE,
+                format!("__Host-oidc_state={state}")
+                    .parse()
+                    .unwrap(),
+            );
+            assert_eq!(status(&app, callback).await, StatusCode::UNAUTHORIZED, "invalid_grant");
+        }
+        let locked = app
+            .clone()
+            .oneshot(request("GET", "/oidc/callback?code=c&state=unknown", refused, None))
+            .await
+            .unwrap();
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry_after(&locked) > 60, "locked out after refused codes");
     }
 }

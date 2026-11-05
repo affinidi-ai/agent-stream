@@ -61,7 +61,7 @@ router and binds the listeners.
 4. Load `agent-stream.json` (required), Prompt Guard definitions, logging and OpenTelemetry, and resource limits.
 5. Initialise encryption at rest and run its fail-closed preflight.
 6. Load the internal surface records, validate configuration, and hand over to the orchestrator.
-7. Open the settings, identity, secrets, and policy-definition stores, and the authentication mode (passkey or SAML).
+7. Open the settings, identity, secrets, and policy-definition stores, and the authentication mode (passkey, SAML or OIDC).
 8. Open the gateway, mediator, credential, model catalog, media, and governance stores.
 9. Open the Surface store, compile every Surface and appliance-wide policy, and start the enabled Surfaces.
 10. Compile Trust Fabric policies; a compile failure exits the process.
@@ -408,7 +408,7 @@ Cost, key sources, and metering live in `pipes/`; see
 
 | Module | Owns | Document |
 | --- | --- | --- |
-| [`auth/`](src/auth/) | Dashboard sign-in (passkey, SAML) and sessions | [`DASHBOARD_SIGN_IN.md`](docs/DASHBOARD_SIGN_IN.md) |
+| [`auth/`](src/auth/) | Dashboard sign-in (passkey, SAML, OIDC) and sessions | [`DASHBOARD_SIGN_IN.md`](docs/DASHBOARD_SIGN_IN.md) |
 | [`auth_manager/`](src/auth_manager/) | The management session and PAT middleware, permissions, resource scope | [`SOURCE_AUTH.md`](docs/SOURCE_AUTH.md), [`ACCESS_TOKENS.md`](docs/ACCESS_TOKENS.md), [`RBAC.md`](docs/RBAC.md) |
 | [`access_tokens/`](src/access_tokens/) | Management PATs | [`ACCESS_TOKENS.md`](docs/ACCESS_TOKENS.md) |
 | [`tenancy/`](src/tenancy/) | Tenant context and record ownership | [`ACCESS_TOKENS.md`](docs/ACCESS_TOKENS.md) |

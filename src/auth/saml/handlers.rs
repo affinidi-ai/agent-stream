@@ -17,44 +17,11 @@ use crate::auth::session_cookie::{
 use crate::auth::session_finalizer::{
     AuthenticatedPrincipal, SessionFinalizationError, SessionFinalizer, SessionManagerFinalizer,
 };
+use crate::auth::sign_in_pages::{login_success_page, sign_in_error_page};
 use crate::auth::storage::PasskeyStorage;
 
 /// Lifetime of the SAML correlation cookie, matching the AuthnRequest TTL.
 const SAML_CORRELATION_TTL_SECS: u64 = 5 * 60;
-
-/// Encode a string as a JavaScript string literal safe to embed inside an
-/// inline `<script>` element: serde_json covers the JS string context
-/// (quotes/escapes `"` and `\`), and escaping `<`, `>`, `&` to `\uXXXX` stops a
-/// value containing `</script>` from closing the element (HTML-context XSS).
-fn js_string_literal(s: &str) -> String {
-    serde_json::to_string(s)
-        .unwrap_or_else(|_| "\"\"".to_string())
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-        .replace('&', "\\u0026")
-}
-
-/// Extract the SAML correlation-cookie value (the outstanding AuthnRequest id)
-/// from the request's `Cookie` header, if present. The value is read verbatim;
-/// this is sound because the request id is `_<uuid-v4>` (URL-safe, so cookie
-/// percent-encoding is a no-op) and is compared against the same raw id echoed
-/// back in `Response@InResponseTo`.
-fn extract_saml_correlation(headers: &HeaderMap) -> Option<String> {
-    let cookie_header = headers
-        .get(axum::http::header::COOKIE)?
-        .to_str()
-        .ok()?;
-    cookie_header
-        .split(';')
-        .find_map(|pair| {
-            let (name, value) = pair.split_once('=')?;
-            if name.trim() == SAML_CORRELATION_COOKIE_NAME {
-                Some(value.trim().to_string())
-            } else {
-                None
-            }
-        })
-}
 
 /// SAML state for authentication
 #[derive(Clone)]
@@ -146,7 +113,9 @@ pub async fn saml_acs(
     info!("Processing SAML response at ACS endpoint");
 
     // The AuthnRequest id this browser started with (correlation cookie).
-    let expected_request_id = extract_saml_correlation(&headers);
+    // The id is `_<uuid-v4>` (URL-safe), compared against the raw id echoed
+    // back in `Response@InResponseTo`.
+    let expected_request_id = crate::auth::session_cookie::request_cookie(&headers, SAML_CORRELATION_COOKIE_NAME);
 
     // Validate SAML response and extract assertion
     let assertion = saml_state
@@ -183,9 +152,7 @@ pub async fn saml_acs(
             // Surface an appliance user-limit breach as a readable page (403) rather
             // than a blank 500, since the browser lands here straight from the IdP.
             if let Some(limit) = e.downcast_ref::<crate::config::LimitExceeded>() {
-                return Ok(
-                    (StatusCode::FORBIDDEN, Html(saml_provisioning_error_page(&limit.message()))).into_response()
-                );
+                return Ok((StatusCode::FORBIDDEN, Html(sign_in_error_page(&limit.message()))).into_response());
             }
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         }
@@ -230,57 +197,6 @@ pub async fn saml_acs(
     headers.insert(axum::http::header::CONTENT_SECURITY_POLICY, csp);
 
     Ok((headers, Html(html)).into_response())
-}
-
-/// The page that hands a new SAML session to the dashboard and redirects to
-/// it, with the policy that lets only its own script run. The token is emitted
-/// as a JS string literal safe for an inline `<script>` (see
-/// [`js_string_literal`]).
-fn login_success_page(session_token: &str) -> (axum::http::HeaderValue, String) {
-    let nonce = crate::proxy::security_headers::script_nonce();
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <title>Login Successful</title>
-    <meta http-equiv="refresh" content="0;url=/">
-    <script nonce="{}">
-        sessionStorage.setItem('session_token', {});
-        window.location.href = '/';
-    </script>
-</head>
-<body>
-    <p>Login successful. Redirecting...</p>
-</body>
-</html>"#,
-        nonce,
-        js_string_literal(session_token)
-    );
-    (crate::proxy::security_headers::inline_script_page_csp(&nonce), html)
-}
-
-/// Render a minimal, self-contained HTML page shown when SSO provisioning is refused
-/// (e.g. the appliance user limit is reached). The message is HTML-escaped.
-fn saml_provisioning_error_page(message: &str) -> String {
-    let escaped = message
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;");
-    format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <title>Sign-in unavailable</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body style="font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: #1f2937;">
-    <h1 style="font-size: 1.25rem;">Sign-in unavailable</h1>
-    <p>{escaped}</p>
-    <p style="color: #6b7280;">Please contact your administrator, then <a href="/">try again</a>.</p>
-</body>
-</html>"#
-    )
 }
 
 /// Serve SAML metadata
@@ -416,44 +332,4 @@ pub async fn saml_logout_generic(
     response_headers.insert(axum::http::header::SET_COOKIE, session_cookie);
 
     (response_headers, StatusCode::OK).into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{js_string_literal, login_success_page};
-
-    #[test]
-    fn the_login_page_script_carries_the_nonce_its_policy_allows() {
-        let (csp, html) = login_success_page("tok\"</script><script>alert(1)</script>");
-        let csp = csp.to_str().unwrap();
-        let nonce = csp
-            .split("'nonce-")
-            .nth(1)
-            .and_then(|rest| rest.split('\'').next())
-            .unwrap();
-
-        assert!(html.contains(&format!("<script nonce=\"{nonce}\">")), "{html}");
-        assert_eq!(
-            html.matches("<script")
-                .count(),
-            1,
-            "only the page's own script: {html}"
-        );
-        assert!(csp.contains(&format!("script-src 'nonce-{nonce}';")), "only the nonce may run script: {csp}");
-        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
-        assert_ne!(login_success_page("tok").0, login_success_page("tok").0, "a fresh nonce per page");
-    }
-
-    #[test]
-    fn js_string_literal_escapes_script_close_and_quotes() {
-        // A benign id round-trips as a quoted literal.
-        assert_eq!(js_string_literal("abc-123"), "\"abc-123\"");
-        // A value trying to break out of the <script> element is neutralised:
-        // no literal "</script>" and no unescaped quote survive.
-        let out = js_string_literal("a\"</script><script>alert(1)</script>");
-        assert!(!out.contains("</script>"), "must not contain a literal </script>: {out}");
-        assert!(!out.contains('<'), "all < escaped: {out}");
-        assert!(out.contains("\\u003c"));
-        assert!(out.contains("\\\""), "inner quote escaped: {out}");
-    }
 }

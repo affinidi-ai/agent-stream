@@ -1698,14 +1698,13 @@ pub async fn run_axum_proxy(
 
         // Initialize authentication based on mode
         let mut auth_state_for_notif: Option<Arc<crate::auth::AuthState>> = None;
-        let mut _saml_state_for_notif: Option<Arc<crate::auth::saml::SamlState>> = None;
 
         // Use the auth_mode from config
         let auth_mode = bootstrap_config
             .auth_mode
             .clone();
 
-        let (auth_state, saml_state) = match auth_mode {
+        let (auth_state, saml_state, oidc_state) = match auth_mode {
             crate::auth::AuthMode::Passkey => {
                 // Initialize passkey authentication
                 match initialize_auth_state(
@@ -1720,7 +1719,7 @@ pub async fn run_axum_proxy(
                         info!("Passkey authentication enabled");
                         let state_arc = Arc::new(state);
                         auth_state_for_notif = Some(state_arc.clone());
-                        (Some(state_arc), None)
+                        (Some(state_arc), None, None)
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!("Failed to initialize passkey authentication: {}", e));
@@ -1747,14 +1746,29 @@ pub async fn run_axum_proxy(
                 match initialize_saml_state(&bootstrap_config, &saml_config, terms_manager.clone()).await {
                     Ok(state) => {
                         info!("SAML authentication enabled with IdP: {}", saml_config.idp_entity_id);
-                        let state_arc = Arc::new(state);
-                        _saml_state_for_notif = Some(state_arc.clone());
-                        (None, Some(state_arc))
+                        (None, Some(Arc::new(state)), None)
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!("Failed to initialize SAML authentication: {}", e));
                     }
                 }
+            }
+            crate::auth::AuthMode::Oidc => {
+                let oidc_config_path = &bootstrap_config
+                    .config_files
+                    .oidc;
+                let oidc_config = crate::auth::oidc::OidcConfig::load_from_file(std::path::Path::new(oidc_config_path))
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to load OIDC configuration from {}: {}", oidc_config_path, e)
+                    })?;
+                let (storage, session_manager) = initialize_sso_user_stores(&bootstrap_config).await?;
+                let state =
+                    crate::auth::oidc::OidcState::new(oidc_config, storage, session_manager, terms_manager.clone())
+                        .context("Failed to initialize OIDC authentication")?;
+                state.check_provider().await;
+                info!("OIDC authentication enabled with issuer: {}", state.config.issuer);
+                (None, None, Some(Arc::new(state)))
             }
         };
 
@@ -2207,6 +2221,18 @@ pub async fn run_axum_proxy(
                             .await;
                         *notif_store = store_arc.clone();
                         info!("Notification store set in auth state");
+                    }
+                    if let Some(saml) = &saml_state {
+                        *saml
+                            .notification_store
+                            .write()
+                            .await = store_arc.clone();
+                    }
+                    if let Some(oidc) = &oidc_state {
+                        *oidc
+                            .notification_store
+                            .write()
+                            .await = store_arc.clone();
                     }
 
                     store_arc
@@ -3280,6 +3306,11 @@ pub async fn run_axum_proxy(
                     .as_ref()
                     .map(|saml| saml.storage.clone())
             })
+            .or_else(|| {
+                oidc_state
+                    .as_ref()
+                    .map(|oidc| oidc.storage.clone())
+            })
             .map(|storage| crate::auth_manager::middleware::RbacGuard::new(storage, rbac_config.clone()))
             .ok_or_else(|| anyhow::anyhow!("RBAC guard unavailable after authentication initialization"))?;
         let agent_surface_store: Option<Arc<dyn crate::surfaces::AgentSurfaceStore>> =
@@ -3407,6 +3438,11 @@ pub async fn run_axum_proxy(
                     .as_ref()
                     .map(|s| s.storage.clone())
             })
+            .or_else(|| {
+                oidc_state
+                    .as_ref()
+                    .map(|s| s.storage.clone())
+            })
         {
             crate::config::register_counter("users", move || {
                 let s = user_storage.clone();
@@ -3495,6 +3531,7 @@ pub async fn run_axum_proxy(
             dashboard_state,
             auth_state,
             saml_state.clone(),
+            oidc_state.clone(),
             vault_rbac_guard.clone(),
             gateway_store,
             mediator_store,
@@ -3599,6 +3636,11 @@ pub async fn run_axum_proxy(
                 saml_state
                     .as_ref()
                     .map(|saml| saml.session_manager.clone())
+            })
+            .or_else(|| {
+                oidc_state
+                    .as_ref()
+                    .map(|oidc| oidc.session_manager.clone())
             });
         let user_storage_for_vault: Option<Arc<crate::auth::storage::PasskeyStorage>> = auth_state_for_notif
             .as_ref()
@@ -3607,6 +3649,11 @@ pub async fn run_axum_proxy(
                 saml_state
                     .as_ref()
                     .map(|saml| saml.storage.clone())
+            })
+            .or_else(|| {
+                oidc_state
+                    .as_ref()
+                    .map(|oidc| oidc.storage.clone())
             });
 
         let vault_router = {
@@ -4029,11 +4076,16 @@ pub async fn run_axum_proxy(
 
         // Start periodic session cleanup task to remove expired sessions
         // This ensures sessions don't accumulate on disk even if the server runs for extended periods
-        let saml_sessions_for_cleanup = saml_state
+        let sso_sessions_for_cleanup = saml_state
             .as_ref()
-            .map(|s| s.session_manager.clone());
+            .map(|s| s.session_manager.clone())
+            .or_else(|| {
+                oidc_state
+                    .as_ref()
+                    .map(|s| s.session_manager.clone())
+            });
         let session_cleanup_task = tokio::spawn(async move {
-            periodic_session_cleanup(saml_sessions_for_cleanup).await;
+            periodic_session_cleanup(sso_sessions_for_cleanup).await;
         });
 
         tasks.push(session_cleanup_task);
@@ -4104,6 +4156,40 @@ async fn initialize_auth_state(
     Ok(auth_state)
 }
 
+/// The user store and the persisted session manager an SSO sign-in mode
+/// (SAML or OIDC) uses: the same user store as passkeys, so users are managed
+/// the same way in every mode.
+async fn initialize_sso_user_stores(
+    bootstrap_config: &crate::config::BootstrapConfig
+) -> anyhow::Result<(Arc<crate::auth::storage::PasskeyStorage>, Arc<crate::auth::SessionManager>)> {
+    let storage = Arc::new(
+        crate::auth::storage::PasskeyStorage::new(
+            bootstrap_config
+                .storage_paths
+                .passkeys
+                .clone(),
+            bootstrap_config
+                .storage_paths
+                .avatars
+                .clone(),
+        )
+        .await?,
+    );
+    let session_manager = Arc::new(
+        crate::auth::SessionManager::with_storage(
+            bootstrap_config.session_timeout_minutes,
+            std::path::PathBuf::from(
+                &bootstrap_config
+                    .storage_paths
+                    .sessions,
+            ),
+        )
+        .await
+        .context("Failed to create the session manager")?,
+    );
+    Ok((storage, session_manager))
+}
+
 /// Initialize SAML authentication state
 async fn initialize_saml_state(
     bootstrap_config: &crate::config::BootstrapConfig,
@@ -4114,29 +4200,11 @@ async fn initialize_saml_state(
 
     // Create SAML service
     let saml_service = Arc::new(crate::auth::saml::SamlService::new(saml_config.clone())?);
-
-    // Create user storage (use same storage as passkeys for unified user management)
-    let storage_path = bootstrap_config
-        .storage_paths
-        .passkeys
-        .clone();
+    let (storage, session_manager) = initialize_sso_user_stores(bootstrap_config).await?;
     let avatars_path = bootstrap_config
         .storage_paths
         .avatars
         .clone();
-    let storage = Arc::new(crate::auth::storage::PasskeyStorage::new(storage_path, avatars_path.clone()).await?);
-
-    // Create session manager with filesystem persistence
-    let session_timeout_minutes = bootstrap_config.session_timeout_minutes;
-    let sessions_path = bootstrap_config
-        .storage_paths
-        .sessions
-        .clone();
-    let session_manager = Arc::new(
-        crate::auth::SessionManager::with_storage(session_timeout_minutes, std::path::PathBuf::from(sessions_path))
-            .await
-            .context("Failed to create SAML session manager")?,
-    );
 
     // Notification store will be set later (similar to passkey auth)
     let notification_store = Arc::new(tokio::sync::RwLock::new(None));
@@ -4383,6 +4451,7 @@ mod tests {
                     updated_at: now,
                     last_logged_in: None,
                     saml_id: None,
+                    oidc: None,
                 })
                 .await
                 .unwrap();

@@ -1,7 +1,7 @@
 # Dashboard Sign-In
 
-How a person signs into the Agent Stream dashboard with a passkey or through SAML single
-sign-on, how the resulting session is carried and expires, and the routes a signed-in user
+How a person signs into the Agent Stream dashboard with a passkey, or through SAML or OpenID
+Connect (OIDC) single sign-on, how the resulting session is carried and expires, and the routes a signed-in user
 calls for their own profile, avatar and dashboard preferences. Services that call the
 management API without signing in use access tokens instead (see
 [`ACCESS_TOKENS.md`](ACCESS_TOKENS.md)).
@@ -22,12 +22,13 @@ is called as `/api/auth/login/start`. See
 ## Sign-in mode
 
 An appliance uses one sign-in mode, set by `auth_mode` in `config.toml` at startup:
-`passkey` (the default) or `saml`. Only the routes of the active mode are mounted.
-`saml` reads `saml.json` and fails startup if it cannot be read.
+`passkey` (the default), `saml` or `oidc`. Only the routes of the active mode are mounted.
+`saml` reads `saml.json` and fails startup if it cannot be read; `oidc` reads `oidc.json` and
+fails startup if it cannot be read or any of its settings is refused.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
-| `GET /v1/auth/mode` | None (public) | `{"mode": "passkey"}` or `{"mode": "saml"}`, so the dashboard shows the matching sign-in page |
+| `GET /v1/auth/mode` | None (public) | `{"mode": "passkey", "label": null}`, `"saml"` or `"oidc"`, so the dashboard shows the matching sign-in page; in OIDC mode `label` is the provider name for the sign-in button |
 
 ## Passkey sign-in
 
@@ -98,22 +99,124 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
 - Signing out ends the appliance session only; it does not sign out of the identity
   provider.
 
+## OIDC sign-in
+
+OIDC mode signs people in with one OpenID provider, configured in `oidc.json`
+([`src/auth/oidc/`](../src/auth/oidc/)), using the authorization code flow with PKCE. Its
+fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson).
+
+| Route | Permission | Purpose |
+| --- | --- | --- |
+| `GET /oidc/login` | None (public) | Redirect the browser to the provider to sign in |
+| `GET /oidc/callback` | None (public) | Where the provider sends the browser back (`redirect_uri`): verify the sign-in and open a session |
+
+The provider:
+
+- Its discovery document, `{issuer}/.well-known/openid-configuration` (one trailing `/` of
+  the issuer dropped), is fetched when sign-in first needs it and kept for 24 hours. Startup
+  tries once and logs the result, but a provider that cannot be reached does not stop
+  startup: only sign-in waits, and `oidc/login` answers `503` with a readable page.
+- Once a document has been fetched, a refresh that fails logs a warning and sign-in keeps
+  using the cached document, trying again after a minute. One sign-in refreshes at a time;
+  the others use the cached document meanwhile. A token endpoint that cannot be reached,
+  answers `404` or fails with a `5xx` has the document fetched again at the next sign-in; an
+  OAuth error such as `invalid_grant` does not.
+- The document must name the configured `issuer` exactly, and every endpoint in it must be
+  `https`. When it lists `code_challenge_methods_supported` that list must include `S256`,
+  and when it lists `token_endpoint_auth_methods_supported` that list must include the
+  configured `token_endpoint_auth_method`.
+
+The flow:
+
+- `oidc/login` sends a fresh `state`, `nonce` and PKCE `S256` challenge, and sets a
+  `__Host-oidc_state` cookie (`Secure`, `HttpOnly`, `SameSite=Lax`, 10 minutes) holding the
+  `state`. The callback is refused unless the browser presents that cookie for the same
+  `state`, so a callback URL cannot be completed in a different browser. A callback without
+  that cookie is refused before its `state` is used, so the browser that started the sign-in
+  can still finish it. A browser has one such cookie, so when several sign-ins are started in
+  it only the most recently started one can finish. Each `state` works once, within 10 minutes; at most 10,000 sign-ins wait at once, and past that the oldest is
+  dropped.
+- The callback exchanges the code at the provider's token endpoint, authenticating with
+  `client_secret_basic` or `client_secret_post`, and verifies the ID token:
+  - its signature, against the provider's published keys (JWKS), with an algorithm listed in
+    `id_token_signing_algs`. A key id the cached keys lack makes one fresh fetch, so key
+    rotation works.
+  - `iss` equals the configured issuer, and `aud` includes `client_id`. A token for several
+    audiences needs `azp` equal to `client_id`.
+  - `exp` has not passed and `iat` is not more than 60 seconds ahead (60 seconds of leeway each).
+  - `nonce` is the one this sign-in sent, and `sub` is 1 to 255 characters.
+- Each `required_claims` entry must be met: the claim, or an element of it when it is an
+  array, equals one of the listed strings or booleans, with the type matching too, or matches
+  one of its `regex:` patterns. Then `role_mapping` gives the role: each value of
+  the role claim (a string, or each string in an array) takes the role of its exact entry, or
+  else the highest role among the `regex:` patterns it matches, and the highest role across
+  the values wins. When no value maps, the account gets `role_mapping.unmapped`, which by
+  default refuses it.
+
+Users:
+
+- A user is identified by their provider account, the issuer and `sub` together, never by
+  email. The first sign-in creates the user, approved at once and never the primary
+  administrator: in OIDC mode the first user is not made `administrator`, and every role comes
+  from the mapping.
+- The username is the `claims.username` claim, else the email, else `sub`. When another user
+  has it, the username is `sub`; when another user has that too, the sign-in is refused.
+- Every sign-in sets the username, email, first and last name, and role again from the ID
+  token, so an administrator's role change for an OIDC user lasts until that user next signs
+  in.
+- When a sign-in changes the user's role, their other sessions end, so other tabs and devices
+  sign in again with the new role. When `required_claims` or `role_mapping` refuses an
+  existing user, all their sessions end; the user record is kept.
+- A user who is not approved (an administrator disabled them) is refused even with a valid ID
+  token, and all their sessions end. When creating a user would pass the appliance user limit, the callback answers `403`
+  with a readable page.
+
+Outcomes:
+
+- A refused sign-in shows a readable page that does not say why; the log records a reason
+  code: `state_unknown`, `binding_mismatch`, `code_missing`, `access_denied`,
+  `exchange_failed`, `id_token_invalid`, `claim_not_allowed`, `role_unmapped`, `user_disabled`, `user_limit`,
+  `op_unavailable` or `server_error`. No token, code, secret or claim value is logged.
+- Only a code the provider refuses (`invalid_grant`) answers `401`, because the code is the
+  only thing a caller sends that could be a guess. The ID token comes from the token endpoint,
+  never from the caller.
+- A callback with an unknown or expired `state`, without this browser's binding cookie, or
+  with neither a code nor an error answers `400`. An ID token that does not verify answers
+  `502`. A token endpoint or key set that cannot be reached, answers `404` or fails with a
+  `5xx` answers `503`; any other token endpoint error, such as `invalid_client`, answers
+  `500`. An account the settings refuse, a disabled user, or a sign-in the provider declined
+  answers `403`.
+- On success the callback sets the session cookie and returns the same page as SAML sign-in,
+  also sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+- Signing out ends the appliance session only; it does not sign out of the provider.
+
+To register Agent Stream at the provider:
+
+| Provider setting | Value |
+| --- | --- |
+| Client type | Confidential (a web application with a client secret) |
+| Redirect URI | The `redirect_uri` in `oidc.json`, for example `https://stream.example.com/api/oidc/callback` |
+| Grant | Authorization code, with PKCE `S256` |
+| Client authentication | `client_secret_basic` (the default) or `client_secret_post`, as `token_endpoint_auth_method` says |
+| ID token signing | An algorithm in `id_token_signing_algs` (`ES256` by default) |
+| Claims in the ID token | The role claim, every claim in `required_claims`, and the profile claims |
+
 ## Sign-in throttling
 
-The registration, passkey sign-in, SAML login and ACS routes, and `/auth/check`, are
-throttled per client ([`src/auth/throttle.rs`](../src/auth/throttle.rs)). A client is its
+The registration, passkey sign-in, SAML login and ACS, and OIDC login and callback routes,
+and `/auth/check`, are throttled per client ([`src/auth/throttle.rs`](../src/auth/throttle.rs)). A client is its
 connecting address, with an IPv6 address grouped by its /64 prefix. Behind a reverse proxy
 listed in `tls.client_auth.trusted_proxies`, the client is the rightmost `X-Forwarded-For`
 hop that is not a listed proxy; from any other peer the header is ignored.
 
 | Limit | Value | Over the limit |
 | --- | --- | --- |
-| Sign-in requests (registration, passkey sign-in, SAML login and ACS) | 10 per client per minute | `429` with `Retry-After` |
+| Sign-in requests (registration, passkey sign-in, SAML login and ACS, OIDC login and callback) | 10 per client per minute | `429` with `Retry-After` |
 | `/auth/check` requests | 120 per client per minute | `429` with `Retry-After`, unless the request carries a valid session, which is always answered |
 | Failed sign-ins | 10 per client | The client is locked out of the sign-in routes for 15 minutes after its last failure |
 
-Only a `login/finish` or ACS response of `401` (a passkey or SAML response that did not
-verify) counts as a failed sign-in. Any successful finish step, registration included, clears
+Only a `login/finish`, ACS or OIDC callback response of `401` (a passkey or SAML response that
+did not verify, or an OIDC code the provider refused) counts as a failed sign-in. Any successful finish step, registration included, clears
 the count. A registration whose passkey does not verify answers `400` and does not count, and
 neither does a malformed request, an unknown or expired challenge, or a refusal for another
 reason.
@@ -132,7 +235,7 @@ Sessions last `session_timeout_minutes` (default 20) from their last use. Each r
 passes the session gate, and each `/auth/check`, pushes the expiry out again, and the gate
 re-sends the cookie with a matching `Max-Age`. Sessions are written to
 `[storage_paths] sessions` (default `../_storage/sessions`), so they survive a restart;
-expired sessions are removed at startup and, in SAML mode, every 5 minutes.
+expired sessions are removed at startup and, in SAML and OIDC modes, every 5 minutes.
 
 A session whose user is no longer approved (status `New` or `Disabled`, or removed) is
 refused with `401` on every protected route.
@@ -143,7 +246,8 @@ refused with `401` on every protected route.
 | `POST /auth/logout` | None (public) | Delete the presented session and clear the cookie |
 
 In passkey mode `/auth/check` answers `200` with `authenticated: false` when there is no
-valid session; in SAML mode it answers `401`, and a valid response also carries `user_id`.
+valid session; in SAML and OIDC modes it answers `401`, and a valid response also carries
+`user_id`.
 
 When Terms are on and the user has outstanding versions at sign-in, the session is
 consent-pending: it reaches only the Terms routes, `/auth/check` and the logout routes until
@@ -165,7 +269,8 @@ token, its bound user). They need no permission beyond an approved user.
 | `POST /v1/profile/avatar` | Any signed-in user | Upload an avatar as multipart field `avatar`; returns the updated profile |
 | `GET /v1/permissions` | Any signed-in user | The caller's permissions (see [`RBAC.md`](RBAC.md#permissions-response)) |
 
-In SAML mode the identity provider overwrites the profile fields at each sign-in.
+In SAML mode the identity provider overwrites the profile fields at each sign-in; in OIDC
+mode it overwrites the username, email, and first and last name.
 
 The avatar is stored as `<user_id>.<ext>` under `[storage_paths] avatars` (default
 `../_storage/avatars`), and the profile points to the new file (an earlier avatar with a
@@ -236,5 +341,5 @@ Every system-settings and user-settings response sends `prometheus_auth_password
 - [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md): Terms acceptance at registration and
   sign-in.
 - [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md): `auth_mode`,
-  `session_timeout_minutes`, `webauthn`, `saml.json`, and `[storage_paths]`.
+  `session_timeout_minutes`, `webauthn`, `saml.json`, `oidc.json`, and `[storage_paths]`.
 - [`../CONTEXT.md`](../CONTEXT.md): the glossary.

@@ -31,32 +31,6 @@ pub struct LlmCatalogState {
 /// hundred kilobytes; anything near this size is not a catalog.
 const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
 
-/// Read at most `limit` bytes of the response body, refusing a longer one
-/// (declared or streamed) rather than buffering it.
-async fn read_capped(
-    mut response: reqwest::Response,
-    limit: usize,
-) -> Result<Vec<u8>, String> {
-    if response
-        .content_length()
-        .is_some_and(|declared| declared > limit as u64)
-    {
-        return Err(format!("catalog exceeds the {limit} byte limit"));
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("failed to read catalog body: {e}"))?
-    {
-        if body.len() + chunk.len() > limit {
-            return Err(format!("catalog exceeds the {limit} byte limit"));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
 fn catalog_error_response(err: CatalogError) -> axum::response::Response {
     let status = match err {
         CatalogError::Duplicate(_) => StatusCode::CONFLICT,
@@ -265,7 +239,7 @@ pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoR
         )
             .into_response();
     }
-    let body = match read_capped(resp, MAX_CATALOG_BYTES).await {
+    let body = match crate::http_client::read_capped(resp, MAX_CATALOG_BYTES).await {
         Ok(b) => b,
         Err(e) => {
             return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response();
@@ -311,30 +285,5 @@ pub async fn rollback_builtin(State(state): State<LlmCatalogState>) -> impl Into
             (StatusCode::OK, Json(serde_json::json!({ "providers": count, "restored": true }))).into_response()
         }
         Err(e) => catalog_error_response(e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn response(body: &'static str) -> reqwest::Response {
-        reqwest::Response::from(axum::http::Response::new(body))
-    }
-
-    #[tokio::test]
-    async fn read_capped_keeps_a_catalog_within_the_limit() {
-        let body = read_capped(response(r#"{"providers":[]}"#), 64)
-            .await
-            .unwrap();
-        assert_eq!(body, br#"{"providers":[]}"#);
-    }
-
-    #[tokio::test]
-    async fn read_capped_refuses_a_body_past_the_limit() {
-        let error = read_capped(response("0123456789"), 4)
-            .await
-            .unwrap_err();
-        assert!(error.contains("4 byte limit"), "{error}");
     }
 }
