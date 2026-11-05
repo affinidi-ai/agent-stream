@@ -17,7 +17,7 @@ use crate::auth::oidc::config::TokenEndpointAuthMethod;
 use crate::auth::oidc::test_support::{
     CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, StubProvider, config_for, id_token_claims,
 };
-use crate::auth::oidc::{OidcConfig, OidcState, oidc_callback, oidc_initiate_get, oidc_initiate_post, oidc_login};
+use crate::auth::oidc::{OidcConfig, OidcState, oidc_callback, oidc_initiate, oidc_login};
 use crate::auth::session::SessionManager;
 use crate::auth::storage::{OidcIdentity, PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
@@ -78,7 +78,7 @@ impl Flow {
         let app = Router::new()
             .route("/oidc/login", get(oidc_login))
             .route("/oidc/callback", get(oidc_callback))
-            .route("/oidc/initiate", get(oidc_initiate_get).post(oidc_initiate_post))
+            .route("/oidc/initiate", get(oidc_initiate).post(oidc_initiate))
             .with_state(oidc.clone());
         Self {
             app,

@@ -318,8 +318,8 @@ fn oidc_auth_routes(
         )
         .route(
             "/oidc/initiate",
-            get(crate::auth::oidc::oidc_initiate_get)
-                .post(crate::auth::oidc::oidc_initiate_post)
+            get(crate::auth::oidc::oidc_initiate)
+                .post(crate::auth::oidc::oidc_initiate)
                 .layer(axum::middleware::from_fn(crate::auth::throttle::sign_in_start)),
         )
         .with_state(oidc_state)

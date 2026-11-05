@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use axum::{
     Form,
-    extract::{Query, State},
+    extract::State,
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
-use url::Url;
+use url::{Position, Url};
 
 use super::handlers::{OidcState, Refusal, refused, start_sign_in};
 
@@ -30,26 +30,12 @@ pub struct InitiateParams {
     target_link_uri: Option<String>,
 }
 
-/// GET /oidc/initiate
-pub async fn oidc_initiate_get(
-    State(oidc): State<Arc<OidcState>>,
-    Query(params): Query<InitiateParams>,
-) -> Response {
-    initiate(&oidc, params).await
-}
-
-/// POST /oidc/initiate, a form the provider's page submits cross-site, so it
-/// is never behind a same-origin or CSRF check.
-pub async fn oidc_initiate_post(
+/// GET or POST /oidc/initiate. `Form` reads the query string of a `GET` and
+/// the body of a `POST`, a form the provider's page submits cross-site, so the
+/// route is never behind a same-origin or CSRF check.
+pub async fn oidc_initiate(
     State(oidc): State<Arc<OidcState>>,
     Form(params): Form<InitiateParams>,
-) -> Response {
-    initiate(&oidc, params).await
-}
-
-async fn initiate(
-    oidc: &OidcState,
-    params: InitiateParams,
 ) -> Response {
     if params.iss.as_deref() != Some(oidc.config.issuer.as_str()) {
         return refused(Refusal::IssuerMismatch, None, "iss is missing or names another provider").into_response();
@@ -63,7 +49,7 @@ async fn initiate(
         .as_deref()
         .and_then(|target| return_path(target, &oidc.config.redirect_uri))
         .unwrap_or_else(|| "/".to_string());
-    start_sign_in(oidc, login_hint, return_path).await
+    start_sign_in(&oidc, login_hint, return_path).await
 }
 
 /// A `login_hint` is passed on only when it is short and plain text.
@@ -77,38 +63,30 @@ fn usable_login_hint(hint: &str) -> bool {
 
 /// The path and query of `target` when it is a safe place to open the
 /// dashboard: an absolute URL on the dashboard's own origin (that of
-/// `redirect_uri`) whose path and query pass [`is_safe_return_path`]. Anything
-/// else gives `None`, and the dashboard opens at `/`, so the endpoint can never
-/// send the browser somewhere else.
+/// `redirect_uri`), without user info, whose path and query still resolve on
+/// that origin, with no encoded slash or backslash in the path, and at most
+/// 1,024 characters long. Parsing has already turned backslashes in the path
+/// into slashes, collapsed dot segments and encoded control characters.
+/// Anything else gives `None`, and the dashboard opens at `/`.
 fn return_path(
     target: &str,
     redirect_uri: &Url,
 ) -> Option<String> {
     let url = Url::parse(target).ok()?;
-    if url.origin() != redirect_uri.origin() || !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    let path = match url.query() {
-        Some(query) => format!("{}?{query}", url.path()),
-        None => url.path().to_string(),
+    let path = &url[Position::BeforePath..Position::AfterQuery];
+    let encoded_separator = {
+        let lower = url
+            .path()
+            .to_ascii_lowercase();
+        lower.contains("%2f") || lower.contains("%5c")
     };
-    is_safe_return_path(&path).then_some(path)
-}
-
-/// A path the browser can only resolve on this origin: one leading `/` and
-/// never two, no backslash, no encoded slash or backslash, no control
-/// character, and at most 1,024 characters.
-fn is_safe_return_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    path.starts_with('/')
-        && !path.starts_with("//")
-        && !path.contains('\\')
-        && !lower.contains("%2f")
-        && !lower.contains("%5c")
-        && !path
-            .chars()
-            .any(char::is_control)
-        && path.len() <= MAX_RETURN_PATH_LEN
+    let stays_on_origin = url.origin() == redirect_uri.origin()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && redirect_uri
+            .join(path)
+            .is_ok_and(|resolved| resolved.origin() == redirect_uri.origin());
+    (stays_on_origin && !encoded_separator && path.len() <= MAX_RETURN_PATH_LEN).then(|| path.to_owned())
 }
 
 #[cfg(test)]
@@ -131,6 +109,12 @@ mod tests {
             return_path("https://STREAM.example.com:443/", &dashboard()).as_deref(),
             Some("/"),
             "the same origin written differently"
+        );
+        assert_eq!(
+            return_path("https://stream.example.com/access-tokens/new?resource_pattern=surfaces%2F*", &dashboard())
+                .as_deref(),
+            Some("/access-tokens/new?resource_pattern=surfaces%2F*"),
+            "an encoded slash in the query cannot change the host"
         );
     }
 
@@ -157,6 +141,8 @@ mod tests {
         for target in [
             "https://stream.example.com//evil.example/",
             "https://stream.example.com/\\evil.example/",
+            "https://stream.example.com/.//evil.example/",
+            "https://stream.example.com/%2e//evil.example/",
             "https://stream.example.com/%2fevil.example/",
             "https://stream.example.com/%5Cevil.example/",
             "https://stream.example.com/a%2Fb",

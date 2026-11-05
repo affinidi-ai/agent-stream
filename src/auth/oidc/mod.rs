@@ -18,4 +18,4 @@ pub mod user_provisioning;
 
 pub use config::OidcConfig;
 pub use handlers::{OidcState, oidc_callback, oidc_login};
-pub use initiate::{oidc_initiate_get, oidc_initiate_post};
+pub use initiate::oidc_initiate;
