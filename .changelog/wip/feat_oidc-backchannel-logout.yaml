@@ -1,0 +1,28 @@
+branch: feat/oidc-backchannel-logout
+changes:
+  added:
+    - timestamp: '2026-11-05T10:30:00.000Z'
+      title: End dashboard sessions when someone signs out at the OpenID provider
+      description: >-
+        In OIDC mode, the provider can post a signed logout token to
+        /oidc/backchannel-logout (OpenID Connect Back-Channel Logout 1.0). Agent Stream
+        verifies it, requires exp, refuses a replayed jti, an ID token posted in its place and
+        anything not signed by the provider, and ends the sessions it names: one provider
+        session by sid, or every session of the account by sub. A Standby answers 503 so the
+        provider retries against the Active. Each OIDC session now records the provider
+        sign-in it came from. logout.backchannel in oidc.json turns the route off. Until the
+        provider's discovery document has been fetched once, a failed fetch is not tried
+        again for a minute, so requests while the provider is unreachable do not each reach it.
+  changed:
+    - timestamp: '2026-11-05T10:31:00.000Z'
+      title: Refetch JWKS keys for an unknown kid at most once a minute
+      description: >-
+        A JWT naming a kid that the cached keys lack made Agent Stream fetch the JWKS again
+        every time, so tokens with made-up kid values could make each request reach the key
+        server. A missing kid now refetches at most once a minute for each JWT verification
+        strategy and for OIDC sign-in, including when such tokens arrive together or the fetch
+        fails; a rotated key is picked up within a minute of its first use.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

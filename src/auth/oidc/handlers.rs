@@ -18,9 +18,9 @@ use super::config::{OidcConfig, TokenEndpointAuthMethod};
 use super::discovery::{Discovery, ProviderMetadata};
 use super::pending::{PENDING_SIGN_IN_TTL, PendingSignIns};
 use super::roles::{mapped_role, unmet_required_claim};
-use super::tokens::{IdTokenFailure, verify_id_token};
+use super::tokens::{SeenLogoutTokens, TokenFailure, verify_id_token};
 use super::user_provisioning::{ProvisionRefusal, provision_user_from_oidc};
-use crate::auth::session::SessionManager;
+use crate::auth::session::{OidcSessionBinding, SessionManager};
 use crate::auth::session_cookie::{
     OIDC_STATE_COOKIE_NAME, build_oidc_state_cookie, clear_oidc_state_cookie, request_cookie,
 };
@@ -36,10 +36,11 @@ const MAX_TOKEN_RESPONSE_BYTES: usize = 256 * 1024;
 /// Everything OIDC sign-in needs.
 pub struct OidcState {
     pub config: Arc<OidcConfig>,
-    discovery: Discovery,
-    jwks: JwksClient,
+    pub(super) discovery: Discovery,
+    pub(super) jwks: JwksClient,
     token_client: reqwest::Client,
     pending: PendingSignIns,
+    pub(super) seen_logout_tokens: SeenLogoutTokens,
     pub storage: Arc<PasskeyStorage>,
     pub session_manager: Arc<SessionManager>,
     pub notification_store: Arc<tokio::sync::RwLock<Option<Arc<crate::integrations::FileSystemNotificationStore>>>>,
@@ -62,6 +63,7 @@ impl OidcState {
                 crate::http_client::EXTERNAL_TIMEOUT_SECS,
             ))?,
             pending: PendingSignIns::default(),
+            seen_logout_tokens: SeenLogoutTokens::default(),
             storage,
             session_manager,
             notification_store: Arc::new(tokio::sync::RwLock::new(None)),
@@ -322,10 +324,15 @@ async fn complete_sign_in(
     let verified = verify_id_token(&id_token, &oidc.config, &oidc.jwks, &metadata.jwks_uri, &pending.nonce)
         .await
         .map_err(|failure| match failure {
-            IdTokenFailure::KeysUnavailable(detail) => refused(Refusal::OpUnavailable, None, detail),
-            IdTokenFailure::Invalid(detail) => refused(Refusal::IdTokenInvalid, None, detail),
+            TokenFailure::KeysUnavailable(detail) => refused(Refusal::OpUnavailable, None, detail),
+            TokenFailure::Invalid(detail) => refused(Refusal::IdTokenInvalid, None, detail),
         })?;
 
+    let binding = OidcSessionBinding {
+        issuer: oidc.config.issuer.clone(),
+        subject: verified.subject.clone(),
+        sid: verified.sid,
+    };
     let identity = OidcIdentity {
         issuer: oidc.config.issuer.clone(),
         subject: verified.subject,
@@ -375,7 +382,7 @@ async fn complete_sign_in(
     }
 
     let finalized = SessionManagerFinalizer::new(oidc.session_manager.clone(), oidc.terms_manager.clone())
-        .finalize_session(AuthenticatedPrincipal::new(user.username.clone(), user.user_id.clone()))
+        .finalize_session(AuthenticatedPrincipal::new(user.username.clone(), user.user_id.clone()).with_oidc(binding))
         .await
         .map_err(|e| refused(Refusal::ServerError, Some(&user.user_id), format!("{e:?}")))?;
 

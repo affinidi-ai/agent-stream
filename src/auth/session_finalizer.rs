@@ -9,12 +9,13 @@ use axum::{
 use std::sync::Arc;
 use tracing::error;
 
-use super::{SessionManager, session_cookie};
+use super::{SessionManager, session::OidcSessionBinding, session_cookie};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthenticatedPrincipal {
     pub(crate) username: String,
     pub(crate) user_id: String,
+    pub(crate) oidc: Option<OidcSessionBinding>,
 }
 
 impl AuthenticatedPrincipal {
@@ -22,7 +23,16 @@ impl AuthenticatedPrincipal {
         username: String,
         user_id: String,
     ) -> Self {
-        Self { username, user_id }
+        Self { username, user_id, oidc: None }
+    }
+
+    /// The same principal, signed in through the OpenID provider sign-in
+    /// `binding` names.
+    pub(crate) fn with_oidc(
+        self,
+        binding: OidcSessionBinding,
+    ) -> Self {
+        Self { oidc: Some(binding), ..self }
     }
 }
 
@@ -106,7 +116,7 @@ impl SessionFinalizer for SessionManagerFinalizer {
         };
         let session_token = self
             .session_manager
-            .create_session_with_terms_gate(principal.username, principal.user_id, terms_gate)
+            .create_session_with_terms_gate(principal.username, principal.user_id, terms_gate, principal.oidc)
             .await;
 
         let mut headers = HeaderMap::new();

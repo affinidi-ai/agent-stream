@@ -39,6 +39,20 @@ static MODE_CHANGE_TX: OnceLock<broadcast::Sender<ModeChange>> = OnceLock::new()
 #[cfg(test)]
 pub(crate) static MODE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Hold [`MODE_TEST_LOCK`] with the instance Active and ready, for tests of
+/// handlers that answer only on a ready instance.
+#[cfg(test)]
+pub(crate) fn ready_for_test() -> std::sync::MutexGuard<'static, ()> {
+    let guard = MODE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !is_ready_to_serve() {
+        set_server_mode(ServerMode::Active);
+        assert!(mark_activation_ready(current_activation_generation()));
+    }
+    guard
+}
+
 #[cfg(unix)]
 static PENDING_SIGNAL_HANDLES: std::sync::Mutex<Option<(tokio::signal::unix::Signal, tokio::signal::unix::Signal)>> =
     std::sync::Mutex::new(None);

@@ -30,6 +30,8 @@ pub struct ProviderMetadata {
     pub id_token_signing_alg_values_supported: Option<Vec<String>>,
     #[serde(default)]
     pub code_challenge_methods_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub backchannel_logout_supported: Option<bool>,
 }
 
 /// How long a document whose refresh failed is used before the next attempt.
@@ -51,6 +53,8 @@ pub struct Discovery {
     http: reqwest::Client,
     cached: RwLock<Option<Cached>>,
     refreshing: Mutex<()>,
+    /// When the first fetch last failed, and why.
+    first_fetch_failed: Mutex<Option<(Instant, String)>>,
 }
 
 impl Discovery {
@@ -59,14 +63,18 @@ impl Discovery {
             http,
             cached: RwLock::new(None),
             refreshing: Mutex::new(()),
+            first_fetch_failed: Mutex::new(None),
         }
     }
 
     /// The provider's metadata, from the cache while it is fresh, otherwise
-    /// fetched and checked against `config`. Once a document has been
-    /// fetched, sign-in keeps using it while the provider cannot be reached:
-    /// one call refreshes it, calls meanwhile use the cached document, and a
-    /// failed refresh is retried after `RETRY_AFTER_FAILED_REFRESH`.
+    /// fetched and checked against `config`. Until a document has been
+    /// fetched, one call fetches it while the others wait, and a failed fetch
+    /// is not tried again for `RETRY_AFTER_FAILED_REFRESH`. Once a document
+    /// has been fetched, sign-in keeps using it while the provider cannot be
+    /// reached: one call refreshes it, calls meanwhile use the cached
+    /// document, and a failed refresh is retried after
+    /// `RETRY_AFTER_FAILED_REFRESH`.
     pub async fn metadata(
         &self,
         config: &OidcConfig,
@@ -74,12 +82,7 @@ impl Discovery {
         let stale = match self.lookup().await {
             Lookup::Fresh(metadata) => return Ok(metadata),
             Lookup::Stale(metadata) => metadata,
-            Lookup::Empty => {
-                let metadata = Arc::new(self.fetch(config).await?);
-                self.store(metadata.clone(), DISCOVERY_TTL)
-                    .await;
-                return Ok(metadata);
-            }
+            Lookup::Empty => return self.first_fetch(config).await,
         };
         let Ok(_refreshing) = self.refreshing.try_lock() else {
             return Ok(stale);
@@ -103,6 +106,38 @@ impl Discovery {
                 self.store(stale.clone(), RETRY_AFTER_FAILED_REFRESH)
                     .await;
                 Ok(stale)
+            }
+        }
+    }
+
+    async fn first_fetch(
+        &self,
+        config: &OidcConfig,
+    ) -> Result<Arc<ProviderMetadata>, String> {
+        let _refreshing = self.refreshing.lock().await;
+        if let Lookup::Fresh(metadata) | Lookup::Stale(metadata) = self.lookup().await {
+            return Ok(metadata);
+        }
+        let mut failed = self
+            .first_fetch_failed
+            .lock()
+            .await;
+        if let Some((at, detail)) = failed.as_ref()
+            && at.elapsed() < RETRY_AFTER_FAILED_REFRESH
+        {
+            return Err(detail.clone());
+        }
+        match self.fetch(config).await {
+            Ok(metadata) => {
+                *failed = None;
+                let metadata = Arc::new(metadata);
+                self.store(metadata.clone(), DISCOVERY_TTL)
+                    .await;
+                Ok(metadata)
+            }
+            Err(detail) => {
+                *failed = Some((Instant::now(), detail.clone()));
+                Err(detail)
             }
         }
     }
@@ -232,6 +267,11 @@ fn check(
             "The provider signs ID tokens with none of the algorithms in id_token_signing_algs; sign-in will fail"
         );
     }
+    if config.logout.backchannel && metadata.backchannel_logout_supported != Some(true) {
+        warn!(
+            "The provider does not say it supports back-channel logout; signing out there may not end dashboard sessions"
+        );
+    }
     Ok(())
 }
 
@@ -299,6 +339,60 @@ mod tests {
             .unwrap_err();
 
         assert!(refused.contains("HTTP 503"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn without_a_cached_document_a_failed_fetch_is_not_tried_again_at_once() {
+        let provider = StubProvider::start().await;
+        let _allowed = allow_endpoints(&provider);
+        provider.set_discovery_down(true);
+        let discovery = Discovery::new(reqwest::Client::new());
+        let config = config_for(&provider.issuer);
+
+        for _ in 0..3 {
+            let refused = discovery
+                .metadata(&config)
+                .await
+                .unwrap_err();
+            assert!(refused.contains("HTTP 503"), "{refused}");
+        }
+        assert_eq!(provider.discovery_fetches(), 1);
+
+        provider.set_discovery_down(false);
+        discovery
+            .first_fetch_failed
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .0 -= RETRY_AFTER_FAILED_REFRESH;
+        discovery
+            .metadata(&config)
+            .await
+            .unwrap();
+        assert_eq!(provider.discovery_fetches(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_fetches_reach_the_provider_once() {
+        let provider = StubProvider::start().await;
+        let _allowed = allow_endpoints(&provider);
+        let discovery = Arc::new(Discovery::new(reqwest::Client::new()));
+        let config = Arc::new(config_for(&provider.issuer));
+
+        let fetches = (0..10).map(|_| {
+            let discovery = discovery.clone();
+            let config = config.clone();
+            tokio::spawn(async move {
+                discovery
+                    .metadata(&config)
+                    .await
+            })
+        });
+        for fetched in futures::future::join_all(fetches).await {
+            fetched.unwrap().unwrap();
+        }
+        assert_eq!(provider.discovery_fetches(), 1);
     }
 
     #[tokio::test]

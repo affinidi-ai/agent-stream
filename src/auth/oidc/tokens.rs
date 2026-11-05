@@ -1,11 +1,16 @@
-//! The ID token check (OpenID Connect Core 1.0 section 3.1.3.7): the signature
-//! against the provider's published keys, then the issuer, audience,
-//! authorized party, expiry, issue time, nonce and subject.
+//! The provider's signed tokens. The ID token check (OpenID Connect Core 1.0
+//! section 3.1.3.7): the signature against the provider's published keys, then
+//! the issuer, audience, authorized party, expiry, issue time, nonce and
+//! subject. The logout token check (Back-Channel Logout 1.0 section 2.6): the
+//! same signature, issuer and audience, then its type, issue time, event,
+//! subject or session, and a `jti` never seen before.
 
-use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
+use dashmap::DashMap;
+use jsonwebtoken::{Algorithm, Header, Validation, decode, decode_header};
 use serde_json::{Map, Value};
 
 use super::config::OidcConfig;
+use crate::auth::session::OidcSessionBinding;
 use crate::jwt_bearer::JwksClient;
 use crate::jwt_bearer::errors::JwtBearerError;
 
@@ -13,27 +18,34 @@ use crate::jwt_bearer::errors::JwtBearerError;
 const JWKS_CACHE_KEY: &str = "oidc-login";
 /// Clock skew allowed on `exp` and `iat`.
 const LEEWAY_SECS: u64 = 60;
-/// The longest `sub` accepted.
-const MAX_SUBJECT_LEN: usize = 255;
+/// The longest `sub`, `sid` or `jti` accepted.
+const MAX_IDENTIFIER_CLAIM_LEN: usize = 255;
+/// The event a logout token must carry.
+const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
+/// Most logout token ids remembered at once; at the cap the one that would be
+/// forgotten soonest is dropped.
+const MAX_SEEN_LOGOUT_TOKENS: usize = 10_000;
 
-/// A verified ID token: the account it names and all its claims.
+/// A verified ID token: the account it names, the provider's session id when
+/// it gives one, and all its claims.
 #[derive(Debug)]
 pub struct VerifiedIdToken {
     pub subject: String,
+    pub sid: Option<String>,
     pub claims: Map<String, Value>,
 }
 
-/// Why an ID token was not accepted. The detail names the check that failed,
+/// Why an ID token or a logout token was not accepted. The detail names the check that failed,
 /// for the log; it never contains the token.
 #[derive(Debug)]
-pub enum IdTokenFailure {
+pub enum TokenFailure {
     /// The provider's published keys could not be fetched.
     KeysUnavailable(String),
     /// The token did not pass a check.
     Invalid(String),
 }
 
-impl std::fmt::Display for IdTokenFailure {
+impl std::fmt::Display for TokenFailure {
     fn fmt(
         &self,
         f: &mut std::fmt::Formatter<'_>,
@@ -41,6 +53,99 @@ impl std::fmt::Display for IdTokenFailure {
         match self {
             Self::KeysUnavailable(detail) | Self::Invalid(detail) => f.write_str(detail),
         }
+    }
+}
+
+/// A verified logout token: what it signs out, and its `jti`.
+#[derive(Debug)]
+pub struct VerifiedLogoutToken {
+    pub target: LogoutTarget,
+    pub jti: String,
+}
+
+/// What a verified logout token signs out: one provider session (`sid`), or
+/// every session of one account (`sub`).
+#[derive(Debug, PartialEq, Eq)]
+pub struct LogoutTarget {
+    pub subject: Option<String>,
+    pub sid: Option<String>,
+}
+
+impl LogoutTarget {
+    /// Whether a session bound to `binding` is one this logout ends: the same
+    /// issuer, and the same `sid` (and `sub`, when the token gives both), or,
+    /// for a token with only `sub`, the same account. A session whose ID token
+    /// had no `sid` cannot be told apart from the account's other provider
+    /// sessions, so a token with `sid` ends it when its `sub` names the account.
+    pub fn matches(
+        &self,
+        issuer: &str,
+        binding: &OidcSessionBinding,
+    ) -> bool {
+        let same_account = self
+            .subject
+            .as_ref()
+            .is_some_and(|subject| subject == &binding.subject);
+        binding.issuer == issuer
+            && match (&self.sid, &binding.sid) {
+                (Some(sid), Some(bound)) => {
+                    sid == bound
+                        && self
+                            .subject
+                            .as_ref()
+                            .is_none_or(|subject| subject == &binding.subject)
+                }
+                (Some(_), None) | (None, _) => same_account,
+            }
+    }
+}
+
+/// Logout token ids already used, each kept until its token would have
+/// expired, so a captured logout token cannot be replayed.
+#[derive(Default)]
+pub struct SeenLogoutTokens {
+    ids: DashMap<String, i64>,
+}
+
+impl SeenLogoutTokens {
+    /// Record `jti` until `until` (a Unix time). False when it is already recorded.
+    fn remember(
+        &self,
+        jti: &str,
+        until: i64,
+        now: i64,
+    ) -> bool {
+        self.ids
+            .retain(|_, kept_until| *kept_until > now);
+        if self.ids.len() >= MAX_SEEN_LOGOUT_TOKENS {
+            // Collect the key first so no shard lock is held across the remove.
+            let soonest = self
+                .ids
+                .iter()
+                .min_by_key(|entry| *entry.value())
+                .map(|entry| entry.key().clone());
+            if let Some(key) = soonest {
+                self.ids.remove(&key);
+            }
+        }
+        match self
+            .ids
+            .entry(jti.to_string())
+        {
+            dashmap::Entry::Occupied(_) => false,
+            dashmap::Entry::Vacant(slot) => {
+                slot.insert(until);
+                true
+            }
+        }
+    }
+
+    /// Forget `jti`, so the provider can send its logout token again.
+    pub fn forget(
+        &self,
+        jti: &str,
+    ) {
+        self.ids.remove(jti);
     }
 }
 
@@ -52,13 +157,57 @@ pub async fn verify_id_token(
     jwks: &JwksClient,
     jwks_uri: &str,
     expected_nonce: &str,
-) -> Result<VerifiedIdToken, IdTokenFailure> {
-    let header = decode_header(token).map_err(|e| IdTokenFailure::Invalid(format!("unreadable header: {e}")))?;
+) -> Result<VerifiedIdToken, TokenFailure> {
+    let (_, claims) = signed_claims(token, config, jwks, jwks_uri, &["exp", "iss", "aud", "sub"]).await?;
+    check_claims(&claims, config, expected_nonce, chrono::Utc::now().timestamp()).map_err(TokenFailure::Invalid)?;
+    Ok(VerifiedIdToken {
+        subject: string_claim(&claims, "sub").unwrap_or_default(),
+        sid: string_claim(&claims, "sid"),
+        claims,
+    })
+}
+
+/// Verify a logout token the provider posted, and record its `jti` so it
+/// works once.
+pub async fn verify_logout_token(
+    token: &str,
+    config: &OidcConfig,
+    jwks: &JwksClient,
+    jwks_uri: &str,
+    seen: &SeenLogoutTokens,
+) -> Result<VerifiedLogoutToken, TokenFailure> {
+    let (header, claims) = signed_claims(token, config, jwks, jwks_uri, &["exp", "iss", "aud"]).await?;
+    if let Some(typ) = &header.typ {
+        let typ = typ.to_ascii_lowercase();
+        if typ != "logout+jwt" && typ != "application/logout+jwt" {
+            return Err(TokenFailure::Invalid(format!("typ is {typ}, not logout+jwt")));
+        }
+    }
+    let now = chrono::Utc::now().timestamp();
+    let (target, jti, remember_until) =
+        check_logout_claims(&claims, &config.client_id, now).map_err(TokenFailure::Invalid)?;
+    if !seen.remember(&jti, remember_until, now) {
+        return Err(TokenFailure::Invalid("jti was already used".to_string()));
+    }
+    Ok(VerifiedLogoutToken { target, jti })
+}
+
+/// Check the header's algorithm against `id_token_signing_algs`, the signature
+/// against the provider's keys, `iss`, `aud`, `exp` when present, and that the
+/// registered claims in `required` are present. Returns the header and claims.
+async fn signed_claims(
+    token: &str,
+    config: &OidcConfig,
+    jwks: &JwksClient,
+    jwks_uri: &str,
+    required: &[&str],
+) -> Result<(Header, Map<String, Value>), TokenFailure> {
+    let header = decode_header(token).map_err(|e| TokenFailure::Invalid(format!("unreadable header: {e}")))?;
     if !config
         .id_token_signing_algs
         .contains(&header.alg)
     {
-        return Err(IdTokenFailure::Invalid(format!("algorithm {:?} is not in id_token_signing_algs", header.alg)));
+        return Err(TokenFailure::Invalid(format!("algorithm {:?} is not in id_token_signing_algs", header.alg)));
     }
     let jwk = jwks
         .get_key(
@@ -71,8 +220,8 @@ pub async fn verify_id_token(
         )
         .await
         .map_err(|e| match e {
-            JwtBearerError::KeyNotFound(_) => IdTokenFailure::Invalid(format!("no published key matches: {e}")),
-            _ => IdTokenFailure::KeysUnavailable(format!("signing key unavailable: {e}")),
+            JwtBearerError::KeyNotFound(_) => TokenFailure::Invalid(format!("no published key matches: {e}")),
+            _ => TokenFailure::KeysUnavailable(format!("signing key unavailable: {e}")),
         })?;
     if let Some(key_alg) = &jwk.alg
         && key_alg
@@ -80,34 +229,121 @@ pub async fn verify_id_token(
             .ok()
             != Some(header.alg)
     {
-        return Err(IdTokenFailure::Invalid(format!("the signing key is for {key_alg}, not {:?}", header.alg)));
+        return Err(TokenFailure::Invalid(format!("the signing key is for {key_alg}, not {:?}", header.alg)));
     }
     if jwk
         .key_use
         .as_deref()
         .is_some_and(|key_use| key_use != "sig")
     {
-        return Err(IdTokenFailure::Invalid("the signing key is not published for signatures".to_string()));
+        return Err(TokenFailure::Invalid("the signing key is not published for signatures".to_string()));
     }
     let key = crate::jwt_bearer::validator::decoding_key_from_jwk(&jwk)
-        .map_err(|e| IdTokenFailure::Invalid(format!("signing key unusable: {e}")))?;
+        .map_err(|e| TokenFailure::Invalid(format!("signing key unusable: {e}")))?;
 
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&config.issuer]);
     validation.set_audience(&[&config.client_id]);
-    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    validation.set_required_spec_claims(required);
     validation.leeway = LEEWAY_SECS;
     let claims = decode::<Map<String, Value>>(token, &key, &validation)
-        .map_err(|e| IdTokenFailure::Invalid(format!("{e}")))?
+        .map_err(|e| TokenFailure::Invalid(format!("{e}")))?
         .claims;
+    Ok((header, claims))
+}
 
-    check_claims(&claims, config, expected_nonce, chrono::Utc::now().timestamp()).map_err(IdTokenFailure::Invalid)?;
-    let subject = claims
-        .get("sub")
+fn string_claim(
+    claims: &Map<String, Value>,
+    name: &str,
+) -> Option<String> {
+    claims
+        .get(name)
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    Ok(VerifiedIdToken { subject, claims })
+        .map(str::to_string)
+}
+
+/// An optional claim that, when present, must be a string of 1 to 255
+/// characters.
+fn short_string_claim(
+    claims: &Map<String, Value>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match claims.get(name) {
+        None => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= MAX_IDENTIFIER_CLAIM_LEN => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(format!("{name} must be a string of 1 to {MAX_IDENTIFIER_CLAIM_LEN} characters")),
+    }
+}
+
+/// The logout token checks `jsonwebtoken` does not make. Returns what to sign
+/// out, the `jti`, and until when to remember it.
+fn check_logout_claims(
+    claims: &Map<String, Value>,
+    client_id: &str,
+    now: i64,
+) -> Result<(LogoutTarget, String, i64), String> {
+    check_issued_at(claims, now)?;
+    let expires_at = claims
+        .get("exp")
+        .and_then(Value::as_i64)
+        .ok_or("exp is missing")?;
+    check_authorized_party(claims, client_id)?;
+    if claims.contains_key("nonce") {
+        return Err("a logout token must not carry a nonce".to_string());
+    }
+    if !claims
+        .get("events")
+        .and_then(Value::as_object)
+        .and_then(|events| events.get(BACKCHANNEL_LOGOUT_EVENT))
+        .is_some_and(Value::is_object)
+    {
+        return Err("events does not hold the back-channel logout event".to_string());
+    }
+    let target = LogoutTarget {
+        subject: short_string_claim(claims, "sub")?,
+        sid: short_string_claim(claims, "sid")?,
+    };
+    if target.subject.is_none() && target.sid.is_none() {
+        return Err("neither sub nor sid is present".to_string());
+    }
+    let jti = short_string_claim(claims, "jti")?.ok_or("jti is missing")?;
+    let remember_until = expires_at + LEEWAY_SECS as i64;
+    Ok((target, jti, remember_until))
+}
+
+/// `iat` must be present and not ahead of `now` by more than the leeway.
+fn check_issued_at(
+    claims: &Map<String, Value>,
+    now: i64,
+) -> Result<(), String> {
+    let issued_at = claims
+        .get("iat")
+        .and_then(Value::as_i64)
+        .ok_or("iat is missing")?;
+    if issued_at > now + LEEWAY_SECS as i64 {
+        return Err("iat is in the future".to_string());
+    }
+    Ok(())
+}
+
+/// `azp`, when present, must be this client, and a token with several
+/// audiences must have it.
+fn check_authorized_party(
+    claims: &Map<String, Value>,
+    client_id: &str,
+) -> Result<(), String> {
+    let several_audiences = claims
+        .get("aud")
+        .and_then(Value::as_array)
+        .is_some_and(|audiences| audiences.len() > 1);
+    match claims.get("azp") {
+        Some(Value::String(azp)) if azp == client_id => Ok(()),
+        Some(_) => Err("azp is not this client".to_string()),
+        None if several_audiences => Err("azp is missing for a token with several audiences".to_string()),
+        None => Ok(()),
+    }
 }
 
 /// The checks `jsonwebtoken` does not make: `iat`, `azp`, `nonce` and the
@@ -118,24 +354,8 @@ fn check_claims(
     expected_nonce: &str,
     now: i64,
 ) -> Result<(), String> {
-    let issued_at = claims
-        .get("iat")
-        .and_then(Value::as_i64)
-        .ok_or("iat is missing")?;
-    if issued_at > now + LEEWAY_SECS as i64 {
-        return Err("iat is in the future".to_string());
-    }
-
-    let several_audiences = claims
-        .get("aud")
-        .and_then(Value::as_array)
-        .is_some_and(|audiences| audiences.len() > 1);
-    match claims.get("azp") {
-        Some(Value::String(azp)) if azp == &config.client_id => {}
-        Some(_) => return Err("azp is not this client".to_string()),
-        None if several_audiences => return Err("azp is missing for a token with several audiences".to_string()),
-        None => {}
-    }
+    check_issued_at(claims, now)?;
+    check_authorized_party(claims, &config.client_id)?;
 
     if claims
         .get("nonce")
@@ -145,13 +365,10 @@ fn check_claims(
         return Err("nonce does not match this sign-in".to_string());
     }
 
-    match claims
-        .get("sub")
-        .and_then(Value::as_str)
-    {
-        Some(subject) if !subject.is_empty() && subject.len() <= MAX_SUBJECT_LEN => Ok(()),
-        _ => Err(format!("sub must be a string of 1 to {MAX_SUBJECT_LEN} characters")),
+    if short_string_claim(claims, "sub")?.is_none() {
+        return Err(format!("sub must be a string of 1 to {MAX_IDENTIFIER_CLAIM_LEN} characters"));
     }
+    short_string_claim(claims, "sid").map(|_| ())
 }
 
 #[cfg(test)]
@@ -272,13 +489,13 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(unavailable, IdTokenFailure::KeysUnavailable(_)), "{unavailable:?}");
+        assert!(matches!(unavailable, TokenFailure::KeysUnavailable(_)), "{unavailable:?}");
 
         let unknown_key = sign(KEY_B_PEM, Some(KEY_B_KID), &id_token_claims(&provider.issuer, "nonce-1"));
         let invalid = verify_id_token(&unknown_key, &config, &provider.jwks_client(), &provider.jwks_uri(), "nonce-1")
             .await
             .unwrap_err();
-        assert!(matches!(invalid, IdTokenFailure::Invalid(_)), "{invalid:?}");
+        assert!(matches!(invalid, TokenFailure::Invalid(_)), "{invalid:?}");
     }
 
     #[tokio::test]
@@ -399,5 +616,332 @@ mod tests {
         assert!(checked(json!({ "sub": "x".repeat(256) })).is_err());
         assert!(checked(json!({ "sub": 42 })).is_err());
         assert!(checked(json!({ "sub": "x".repeat(255) })).is_ok());
+    }
+
+    fn binding(sid: Option<&str>) -> OidcSessionBinding {
+        OidcSessionBinding {
+            issuer: "https://idp.example.com".to_string(),
+            subject: "user-1".to_string(),
+            sid: sid.map(str::to_string),
+        }
+    }
+
+    fn target(
+        subject: Option<&str>,
+        sid: Option<&str>,
+    ) -> LogoutTarget {
+        LogoutTarget {
+            subject: subject.map(str::to_string),
+            sid: sid.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_logout_by_sid_ends_that_provider_session_and_by_sub_every_session_of_the_account() {
+        let issuer = "https://idp.example.com";
+        let by_sid = target(None, Some("s1"));
+        assert!(by_sid.matches(issuer, &binding(Some("s1"))));
+        assert!(!by_sid.matches(issuer, &binding(Some("s2"))));
+        assert!(!by_sid.matches(issuer, &binding(None)), "a session without a sid is not this one");
+
+        let both = target(Some("user-1"), Some("s1"));
+        assert!(both.matches(issuer, &binding(Some("s1"))));
+        assert!(!both.matches(issuer, &binding(Some("s2"))));
+        assert!(both.matches(issuer, &binding(None)), "a session without a sid, of that account");
+        assert!(!target(Some("user-2"), Some("s1")).matches(issuer, &binding(None)));
+        assert!(!target(Some("user-2"), Some("s1")).matches(issuer, &binding(Some("s1"))), "sub must agree too");
+
+        let by_sub = target(Some("user-1"), None);
+        assert!(by_sub.matches(issuer, &binding(Some("s1"))));
+        assert!(by_sub.matches(issuer, &binding(None)));
+        assert!(!target(Some("user-2"), None).matches(issuer, &binding(None)));
+
+        assert!(!by_sub.matches("https://other.example", &binding(None)), "another provider's session");
+        assert!(!target(None, None).matches(issuer, &binding(Some("s1"))));
+    }
+
+    #[test]
+    fn a_logout_token_id_works_once_until_it_would_have_expired() {
+        let seen = SeenLogoutTokens::default();
+        assert!(seen.remember("jti-1", 1_000, 900));
+        assert!(!seen.remember("jti-1", 1_000, 950), "replayed");
+        assert!(seen.remember("jti-1", 2_000, 1_000), "forgotten once its token expired");
+        assert!(seen.remember("jti-2", 2_000, 1_000));
+    }
+
+    #[test]
+    fn at_the_cap_the_token_id_forgotten_soonest_makes_room() {
+        let seen = SeenLogoutTokens::default();
+        for index in 0..MAX_SEEN_LOGOUT_TOKENS {
+            assert!(seen.remember(&format!("jti-{index}"), 10_000 + index as i64, 0));
+        }
+        assert!(seen.remember("newest", 50_000, 0));
+        assert_eq!(seen.ids.len(), MAX_SEEN_LOGOUT_TOKENS);
+        assert!(seen.remember("jti-0", 50_000, 0), "the soonest to expire was dropped");
+        assert!(!seen.remember("jti-9999", 50_000, 0));
+    }
+
+    fn logout_checked(change: Value) -> Result<(LogoutTarget, String, i64), String> {
+        let mut claims = crate::auth::oidc::test_support::logout_claims("https://idp.example.com", "s1");
+        for (name, value) in change.as_object().unwrap() {
+            if value.is_null() {
+                claims
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(name);
+            } else {
+                claims[name] = value.clone();
+            }
+        }
+        check_logout_claims(claims.as_object().unwrap(), CLIENT_ID, chrono::Utc::now().timestamp())
+    }
+
+    #[test]
+    fn a_logout_token_must_carry_the_event_a_subject_or_session_and_an_id() {
+        let (target, jti, _) = logout_checked(json!({})).unwrap();
+        assert_eq!(
+            target,
+            LogoutTarget {
+                subject: Some("user-1".into()),
+                sid: Some("s1".into())
+            }
+        );
+        assert!(!jti.is_empty());
+
+        for (change, expected) in [
+            (json!({ "events": null }), "events"),
+            (json!({ "events": { "http://schemas.openid.net/event/other": {} } }), "events"),
+            (json!({ "events": { BACKCHANNEL_LOGOUT_EVENT: true } }), "events"),
+            (json!({ "nonce": "n" }), "nonce"),
+            (json!({ "sub": null, "sid": null }), "neither sub nor sid"),
+            (json!({ "sid": "" }), "sid"),
+            (json!({ "jti": null }), "jti is missing"),
+            (json!({ "iat": null }), "iat is missing"),
+            (json!({ "iat": chrono::Utc::now().timestamp() + 600 }), "future"),
+            (json!({ "exp": null }), "exp is missing"),
+            (json!({ "azp": "other" }), "azp is not this client"),
+            (json!({ "aud": [CLIENT_ID, "other"] }), "azp is missing"),
+        ] {
+            let refused = logout_checked(change.clone()).unwrap_err();
+            assert!(refused.contains(expected), "{change}: {refused}");
+        }
+        assert!(logout_checked(json!({ "sub": null })).is_ok(), "sid alone");
+        assert!(logout_checked(json!({ "sid": null })).is_ok(), "sub alone");
+    }
+
+    #[test]
+    fn a_logout_token_for_this_client_among_several_audiences_names_it_as_azp() {
+        assert!(logout_checked(json!({ "aud": [CLIENT_ID, "other"], "azp": CLIENT_ID })).is_ok());
+    }
+
+    #[test]
+    fn a_logout_token_id_is_remembered_for_as_long_as_the_leeway_still_accepts_the_token() {
+        let now = chrono::Utc::now().timestamp();
+        let (_, _, remember_until) = logout_checked(json!({ "exp": now - 30 })).unwrap();
+        assert_eq!(remember_until, now - 30 + LEEWAY_SECS as i64);
+    }
+
+    async fn verify_logout(
+        provider: &StubProvider,
+        token: &str,
+        seen: &SeenLogoutTokens,
+    ) -> Result<LogoutTarget, String> {
+        verify_logout_failure(provider, token, seen)
+            .await
+            .map(|verified| verified.target)
+            .map_err(|failure| failure.to_string())
+    }
+
+    async fn verify_logout_failure(
+        provider: &StubProvider,
+        token: &str,
+        seen: &SeenLogoutTokens,
+    ) -> Result<VerifiedLogoutToken, TokenFailure> {
+        let config = config_for(&provider.issuer);
+        verify_logout_token(token, &config, &provider.jwks_client(), &provider.jwks_uri(), seen).await
+    }
+
+    #[tokio::test]
+    async fn a_signed_logout_token_is_accepted_once() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let token = crate::auth::oidc::test_support::sign_logout(&crate::auth::oidc::test_support::logout_claims(
+            &provider.issuer,
+            "s1",
+        ));
+
+        assert_eq!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap()
+                .sid
+                .as_deref(),
+            Some("s1")
+        );
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap_err()
+                .contains("jti was already used")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_id_token_or_a_forged_or_misaddressed_token_is_not_a_logout_token() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let claims = crate::auth::oidc::test_support::logout_claims(&provider.issuer, "s1");
+
+        let id_token = provider.id_token(id_token_claims(&provider.issuer, "nonce-1"));
+        assert!(
+            verify_logout(&provider, &id_token, &seen)
+                .await
+                .unwrap_err()
+                .contains("typ is jwt")
+        );
+
+        let mut untyped_with_nonce = claims.clone();
+        untyped_with_nonce["nonce"] = json!("nonce-1");
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = None;
+        header.kid = Some(KEY_A_KID.to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &untyped_with_nonce,
+            &EncodingKey::from_ec_pem(crate::auth::oidc::test_support::KEY_A_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap_err()
+                .contains("nonce")
+        );
+
+        let forged = sign(KEY_B_PEM, Some(KEY_A_KID), &claims);
+        assert!(
+            verify_logout(&provider, &forged, &seen)
+                .await
+                .unwrap_err()
+                .contains("InvalidSignature")
+        );
+
+        let mut without_exp = claims.clone();
+        without_exp
+            .as_object_mut()
+            .unwrap()
+            .remove("exp");
+        let token = crate::auth::oidc::test_support::sign_logout(&without_exp);
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap_err()
+                .contains("exp")
+        );
+
+        let mut misaddressed = claims.clone();
+        misaddressed["aud"] = json!("another-client");
+        let token = crate::auth::oidc::test_support::sign_logout(&misaddressed);
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap_err()
+                .contains("InvalidAudience")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signed_logout_token_inside_the_exp_leeway_is_accepted_once() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let mut claims = crate::auth::oidc::test_support::logout_claims(&provider.issuer, "s1");
+        claims["exp"] = json!(chrono::Utc::now().timestamp() - 30);
+        let token = crate::auth::oidc::test_support::sign_logout(&claims);
+
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .is_ok()
+        );
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap_err()
+                .contains("jti was already used")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_logout_token_id_can_be_sent_again() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let token = crate::auth::oidc::test_support::sign_logout(&crate::auth::oidc::test_support::logout_claims(
+            &provider.issuer,
+            "s1",
+        ));
+
+        let verified = verify_logout_failure(&provider, &token, &seen)
+            .await
+            .unwrap();
+        seen.forget(&verified.jti);
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_logout_token_type_is_logout_jwt_with_or_without_its_media_type_prefix() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let claims = crate::auth::oidc::test_support::logout_claims(&provider.issuer, "s1");
+        let typed = |typ: &str| {
+            let mut header = Header::new(Algorithm::ES256);
+            header.typ = Some(typ.to_string());
+            header.kid = Some(KEY_A_KID.to_string());
+            let mut claims = claims.clone();
+            claims["jti"] = json!(uuid::Uuid::new_v4().to_string());
+            jsonwebtoken::encode(
+                &header,
+                &claims,
+                &EncodingKey::from_ec_pem(crate::auth::oidc::test_support::KEY_A_PEM.as_bytes()).unwrap(),
+            )
+            .unwrap()
+        };
+
+        assert!(
+            verify_logout(&provider, &typed("application/logout+jwt"), &seen)
+                .await
+                .is_ok()
+        );
+        assert!(
+            verify_logout(&provider, &typed("secevent+jwt"), &seen)
+                .await
+                .unwrap_err()
+                .contains("not logout+jwt")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_logout_token_whose_keys_cannot_be_fetched_is_unchecked_rather_than_invalid() {
+        let provider = StubProvider::start().await;
+        provider.set_jwks(json!("not a key set"));
+        let token = crate::auth::oidc::test_support::sign_logout(&crate::auth::oidc::test_support::logout_claims(
+            &provider.issuer,
+            "s1",
+        ));
+
+        let failure = verify_logout_failure(&provider, &token, &SeenLogoutTokens::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(failure, TokenFailure::KeysUnavailable(_)), "{failure:?}");
+    }
+
+    #[test]
+    fn an_id_token_sid_must_be_short_when_present() {
+        assert!(checked(json!({ "sid": "s1" })).is_ok());
+        assert!(checked(json!({ "sid": "" })).is_err());
+        assert!(checked(json!({ "sid": 7 })).is_err());
     }
 }

@@ -300,12 +300,27 @@ fn saml_auth_routes(
 }
 
 /// The OIDC sign-in routes, with the same per-client throttle as
-/// [`passkey_auth_routes`]. `/auth/check` and `/auth/logout` behave as in SAML
-/// mode.
+/// [`passkey_auth_routes`], and the unthrottled back-channel logout route.
+/// `/auth/check` and `/auth/logout` behave as in SAML mode.
 fn oidc_auth_routes(
     oidc_state: std::sync::Arc<crate::auth::oidc::OidcState>,
     sessions: std::sync::Arc<crate::auth::SessionManager>,
 ) -> Router {
+    // The provider posts logout tokens server to server: no sign-in throttle,
+    // which would refuse a burst of legitimate logouts, but a small body limit.
+    let backchannel_logout = if oidc_state
+        .config
+        .logout
+        .backchannel
+    {
+        Router::new().route(
+            "/oidc/backchannel-logout",
+            post(crate::auth::oidc::oidc_backchannel_logout)
+                .layer(axum::extract::DefaultBodyLimit::max(crate::auth::oidc::MAX_BACKCHANNEL_LOGOUT_BYTES)),
+        )
+    } else {
+        Router::new()
+    };
     Router::new()
         .route(
             "/oidc/login",
@@ -322,6 +337,7 @@ fn oidc_auth_routes(
                 .post(crate::auth::oidc::oidc_initiate)
                 .layer(axum::middleware::from_fn(crate::auth::throttle::sign_in_start)),
         )
+        .merge(backchannel_logout)
         .with_state(oidc_state)
         .merge(
             Router::new()
@@ -3950,5 +3966,115 @@ mod auth_throttle_route_tests {
             .unwrap();
         assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(retry_after(&locked) > 60, "locked out after refused codes");
+    }
+
+    fn oidc_state(
+        dir: &tempfile::TempDir,
+        sessions: Arc<crate::auth::SessionManager>,
+        backchannel: bool,
+    ) -> impl std::future::Future<Output = Arc<crate::auth::oidc::OidcState>> {
+        let users = dir
+            .path()
+            .join("users")
+            .to_string_lossy()
+            .into_owned();
+        let avatars = dir
+            .path()
+            .join("avatars")
+            .to_string_lossy()
+            .into_owned();
+        async move {
+            let mut config = crate::auth::oidc::test_support::config_for("https://idp.example.test");
+            config.logout.backchannel = backchannel;
+            Arc::new(
+                crate::auth::oidc::OidcState::new(
+                    config,
+                    Arc::new(
+                        crate::auth::storage::PasskeyStorage::new(users, avatars)
+                            .await
+                            .unwrap(),
+                    ),
+                    sessions,
+                    Arc::new(crate::terms::TermsManager::disabled()),
+                )
+                .unwrap(),
+            )
+        }
+    }
+
+    fn form_request(
+        path: &str,
+        peer: &str,
+        form: &str,
+    ) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(form.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ));
+        request
+    }
+
+    #[tokio::test]
+    async fn oidc_sign_in_routes_are_throttled_per_client_and_back_channel_logout_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(crate::auth::SessionManager::new());
+        let app = oidc_auth_routes(oidc_state(&dir, sessions.clone(), true).await, sessions)
+            .layer(Extension(Arc::new(crate::terms::TermsManager::disabled())));
+
+        let peer = "192.0.2.71:5000";
+        for _ in 0..SIGN_IN_REQUESTS_PER_WINDOW {
+            let login = status(&app, request("GET", "/oidc/login", peer, None)).await;
+            assert_ne!(login, StatusCode::TOO_MANY_REQUESTS);
+        }
+        for path in ["/oidc/login", "/oidc/initiate"] {
+            assert_eq!(
+                status(&app, request("GET", path, peer, None)).await,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{path} spends the client's sign-in budget"
+            );
+        }
+        for _ in 0..=SIGN_IN_REQUESTS_PER_WINDOW {
+            assert_eq!(
+                status(&app, form_request("/oidc/backchannel-logout", peer, "")).await,
+                StatusCode::BAD_REQUEST,
+                "the provider's logouts are never throttled"
+            );
+        }
+        assert_auth_check_throttled(&app, "192.0.2.73:5000").await;
+    }
+
+    #[tokio::test]
+    async fn a_back_channel_logout_body_over_the_limit_is_refused_as_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(crate::auth::SessionManager::new());
+        let app = oidc_auth_routes(oidc_state(&dir, sessions.clone(), true).await, sessions)
+            .layer(Extension(Arc::new(crate::terms::TermsManager::disabled())));
+        let oversized = format!("logout_token={}", "a".repeat(crate::auth::oidc::MAX_BACKCHANNEL_LOGOUT_BYTES));
+
+        assert_eq!(
+            status(&app, form_request("/oidc/backchannel-logout", "192.0.2.65:5000", &oversized)).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn back_channel_logout_is_not_served_when_oidc_json_turns_it_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(crate::auth::SessionManager::new());
+        let app = oidc_auth_routes(oidc_state(&dir, sessions.clone(), false).await, sessions)
+            .layer(Extension(Arc::new(crate::terms::TermsManager::disabled())));
+
+        assert_eq!(
+            status(&app, form_request("/oidc/backchannel-logout", "192.0.2.74:5000", "logout_token=x")).await,
+            StatusCode::NOT_FOUND
+        );
     }
 }

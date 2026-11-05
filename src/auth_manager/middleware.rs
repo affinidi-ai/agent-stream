@@ -46,6 +46,8 @@ const PUBLIC_EXACT_PATHS: &[&str] = &[
     "/api/oidc/callback",
     "/oidc/initiate",
     "/api/oidc/initiate",
+    "/oidc/backchannel-logout",
+    "/api/oidc/backchannel-logout",
     "/v1/auth/mode",
     "/api/v1/auth/mode",
 ];
@@ -839,6 +841,7 @@ mod tests {
             .route("/oidc/login", get(ok_handler))
             .route("/oidc/callback", get(ok_handler))
             .route("/oidc/initiate", get(ok_handler))
+            .route("/oidc/backchannel-logout", get(ok_handler))
             .route("/saml/admin", get(ok_handler))
             .route("/v1/auth/mode", get(ok_handler))
             .route("/v1/terms/provider-health", get(ok_handler))
@@ -1065,6 +1068,7 @@ mod tests {
             "/oidc/login",
             "/oidc/callback",
             "/oidc/initiate",
+            "/oidc/backchannel-logout",
             "/v1/auth/mode",
             "/v1/terms/provider-health",
             "/v1/alive",
@@ -1201,7 +1205,7 @@ mod tests {
             (TermsSessionGate::ConsentPending, 503),
         ] {
             let token = sessions
-                .create_session_with_terms_gate("alice".into(), "user-1".into(), gate)
+                .create_session_with_terms_gate("alice".into(), "user-1".into(), gate, None)
                 .await;
             assert_eq!(get_status_with_bearer(&app, "/v1/settings", &token).await, expected);
             for path in ["/auth/login/start", "/saml/acs", "/v1/terms/status"] {
@@ -1309,7 +1313,12 @@ mod tests {
         );
         let sessions = Arc::new(crate::auth::session::SessionManager::new());
         let token = sessions
-            .create_session_with_terms_gate("alice".to_string(), "user-1".to_string(), TermsSessionGate::ConsentPending)
+            .create_session_with_terms_gate(
+                "alice".to_string(),
+                "user-1".to_string(),
+                TermsSessionGate::ConsentPending,
+                None,
+            )
             .await;
         let app = Router::new()
             .route("/v1/terms/status", get(ok_handler))

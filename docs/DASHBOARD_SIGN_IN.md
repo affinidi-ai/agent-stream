@@ -110,13 +110,16 @@ fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson
 | `GET /oidc/login` | None (public) | Redirect the browser to the provider to sign in |
 | `GET /oidc/callback` | None (public) | Where the provider sends the browser back (`redirect_uri`): verify the sign-in and open a session |
 | `GET`, `POST /oidc/initiate` | None (public) | Third-party-initiated login: start a sign-in at the provider's request (the provider's `initiate_login_uri`) |
+| `POST /oidc/backchannel-logout` | None (public; a signed logout token) | Back-channel logout: end the sessions of a sign-out at the provider (the provider's `backchannel_logout_uri`) |
 
 The provider:
 
 - Its discovery document, `{issuer}/.well-known/openid-configuration` (one trailing `/` of
   the issuer dropped), is fetched when sign-in first needs it and kept for 24 hours. Startup
   tries once and logs the result, but a provider that cannot be reached does not stop
-  startup: only sign-in waits, and `oidc/login` answers `503` with a readable page.
+  startup: only sign-in waits, and `oidc/login` answers `503` with a readable page. Until a
+  document has been fetched, one request fetches it while the others wait, and after a
+  failed fetch the next attempt is a minute later; requests meanwhile get the same failure.
 - Once a document has been fetched, a refresh that fails logs a warning and sign-in keeps
   using the cached document, trying again after a minute. One sign-in refreshes at a time;
   the others use the cached document meanwhile. A token endpoint that cannot be reached,
@@ -190,7 +193,49 @@ Outcomes:
   answers `403`.
 - On success the callback sets the session cookie and returns the same page as SAML sign-in,
   also sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
-- Signing out ends the appliance session only; it does not sign out of the provider.
+- Signing out of the dashboard ends the appliance session only; it does not sign out of the
+  provider.
+- Each OIDC session records the provider sign-in it came from: the issuer, `sub`, and the
+  provider's session id (`sid`) when the ID token carries one. The session is created with
+  it, so back-channel logout can always find the session.
+
+Back-channel logout ([OpenID Connect Back-Channel Logout
+1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html)) lets a sign-out at the
+provider end the matching dashboard sessions. The provider posts a form with a
+`logout_token` to `/oidc/backchannel-logout`, server to server and without cookies:
+
+- The token is checked like an ID token: its signature against the provider's keys with an
+  algorithm in `id_token_signing_algs`, `iss`, `aud`, `exp` (required, as Back-Channel
+  Logout 1.0 requires it), and `azp`, which when present must be the `client_id` and must be
+  present when `aud` names several audiences. Then a `typ` header, when present, must be
+  `logout+jwt`, and `iat` must not be more than 60 seconds ahead. It must have an `events`
+  claim holding the back-channel logout event, no `nonce` (so an ID token is never taken as
+  a logout token), `sub` or `sid`, and a `jti` not seen before.
+- Replay protection is best effort. Each `jti` is remembered until its token would expire
+  plus the 60 seconds of clock skew allowed, in this process's memory only: a restart or a
+  promotion of another instance forgets them, and at 10,000 the one closest to expiry is
+  dropped. A replay needs a logout token the provider signed, and only ends sessions again.
+- A token with `sid` ends the sessions signed in with that provider session (and that `sub`,
+  when it also has one). A token with only `sub` ends every session of that account. A
+  session whose ID token had no `sid` cannot be told apart from the account's other provider
+  sessions, so a token with `sid` and `sub` ends it when `sub` names its account. A session
+  created by OIDC sign-in before sessions recorded the provider sign-in is ended by any token
+  whose `sub` names its account. Personal access tokens are not touched.
+- Every answer has `Cache-Control: no-store`. It is `200` whether or not a session matched,
+  since the provider may retry. A request that is not a form with a token that verifies gets
+  `400` with `{"error":"invalid_request"}`. A logout that could not end every session it
+  names gets `400` with `{"error":"logout_failed"}`, and its `jti` is forgotten so the
+  provider can send it again. `503` asks the provider to retry: the provider or its keys
+  could not be reached; the token names a key not in the keys fetched within the last minute
+  (a key rotated in that minute is seen after it); or this instance is not the ready Active
+  instance, whose sessions are the live ones.
+- The provider's back-channel logout URI must reach the Active instance through readiness
+  routing, like dashboard traffic; see
+  [Server mode](CONFIGURATION_RELOAD.md#server-mode).
+- An open dashboard tab loses access within about 30 seconds, when its connection next
+  checks the session.
+- The route is not throttled, because a provider may send many logouts at once; a request
+  body is at most 16 KiB. `logout.backchannel: false` in `oidc.json` removes the route.
 
 Third-party-initiated login ([OpenID Connect Core 1.0 section
 4](https://openid.net/specs/openid-connect-core-1_0.html#ThirdPartyInitiatedLogin)) lets the
@@ -220,6 +265,7 @@ To register Agent Stream at the provider:
 | Client authentication | `client_secret_basic` (the default) or `client_secret_post`, as `token_endpoint_auth_method` says |
 | ID token signing | An algorithm in `id_token_signing_algs` (`ES256` by default) |
 | Claims in the ID token | The role claim, every claim in `required_claims`, and the profile claims |
+| Back-channel logout URI | `/oidc/backchannel-logout` on the same origin, for example `https://stream.example.com/api/oidc/backchannel-logout`; the provider must be able to reach it, through the same readiness routing as dashboard traffic. Either setting of "session required" works: a logout with `sid` ends that provider session, one with only `sub` ends all of the account's sessions |
 | Initiate login URI (optional) | `/oidc/initiate` on the same origin, for example `https://stream.example.com/api/oidc/initiate`, when the provider links people into the dashboard |
 
 ## Sign-in throttling

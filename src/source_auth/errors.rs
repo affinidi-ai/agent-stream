@@ -50,9 +50,11 @@ impl From<JwtBearerError> for SourceAuthError {
             JwtBearerError::InvalidToken(msg) => SourceAuthError::InvalidCredential {
                 reason: format!("Invalid token: {msg}"),
             },
-            JwtBearerError::KeyNotFound(kid) => SourceAuthError::InvalidCredential {
-                reason: format!("Key not found for kid: {kid}"),
-            },
+            JwtBearerError::KeyNotFound(kid) | JwtBearerError::KeyNotFoundDuringCooldown(kid) => {
+                SourceAuthError::InvalidCredential {
+                    reason: format!("Key not found for kid: {kid}"),
+                }
+            }
             JwtBearerError::JwksFetchFailed(msg) => SourceAuthError::Internal {
                 reason: format!("JWKS fetch failed: {msg}"),
             },

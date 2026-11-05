@@ -15,9 +15,9 @@ use tower::ServiceExt;
 
 use crate::auth::oidc::config::TokenEndpointAuthMethod;
 use crate::auth::oidc::test_support::{
-    CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, StubProvider, config_for, id_token_claims,
+    CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, StubProvider, config_for, id_token_claims, logout_claims, sign_logout,
 };
-use crate::auth::oidc::{OidcConfig, OidcState, oidc_callback, oidc_initiate, oidc_login};
+use crate::auth::oidc::{OidcConfig, OidcState, oidc_backchannel_logout, oidc_callback, oidc_initiate, oidc_login};
 use crate::auth::session::SessionManager;
 use crate::auth::storage::{OidcIdentity, PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
@@ -29,6 +29,7 @@ struct Flow {
     provider: StubProvider,
     _dir: tempfile::TempDir,
     _allowed: test_service_endpoints::Allowed,
+    _ready: std::sync::MutexGuard<'static, ()>,
 }
 
 /// The sign-in a test started: what the provider was sent, and the binding
@@ -46,6 +47,13 @@ impl Flow {
     }
 
     async fn with_config(adjust: impl FnOnce(&mut OidcConfig)) -> Self {
+        Self::with_parts(adjust, Arc::new(SessionManager::new())).await
+    }
+
+    async fn with_parts(
+        adjust: impl FnOnce(&mut OidcConfig),
+        sessions: Arc<SessionManager>,
+    ) -> Self {
         let provider = StubProvider::start().await;
         let allowed =
             test_service_endpoints::allow(&[provider.discovery_url(), provider.token_endpoint(), provider.jwks_uri()]);
@@ -67,18 +75,13 @@ impl Flow {
         let mut config = config_for(&provider.issuer);
         adjust(&mut config);
         let oidc = Arc::new(
-            OidcState::new(
-                config,
-                storage,
-                Arc::new(SessionManager::new()),
-                Arc::new(crate::terms::TermsManager::disabled()),
-            )
-            .unwrap(),
+            OidcState::new(config, storage, sessions, Arc::new(crate::terms::TermsManager::disabled())).unwrap(),
         );
         let app = Router::new()
             .route("/oidc/login", get(oidc_login))
             .route("/oidc/callback", get(oidc_callback))
             .route("/oidc/initiate", get(oidc_initiate).post(oidc_initiate))
+            .route("/oidc/backchannel-logout", axum::routing::post(oidc_backchannel_logout))
             .with_state(oidc.clone());
         Self {
             app,
@@ -86,6 +89,7 @@ impl Flow {
             provider,
             _dir: dir,
             _allowed: allowed,
+            _ready: crate::server::mode::ready_for_test(),
         }
     }
 
@@ -803,4 +807,402 @@ async fn a_sign_in_started_at_the_login_page_opens_the_dashboard_home() {
     let page = flow.sign_in(|_| {}).await;
 
     assert_eq!(handed_off_path(&body(page).await), "/");
+}
+
+impl Flow {
+    /// Sign in with the provider session `sid`, and return the dashboard's
+    /// session token.
+    async fn signed_in_with_sid(
+        &self,
+        sid: &str,
+    ) -> String {
+        let page = self
+            .sign_in(|claims| claims["sid"] = json!(sid))
+            .await;
+        assert_eq!(page.status(), StatusCode::OK);
+        handed_off_token(&body(page).await)
+    }
+
+    async fn backchannel_logout(
+        &self,
+        token: &str,
+    ) -> Response<Body> {
+        self.post_form("/oidc/backchannel-logout", &format!("logout_token={token}"))
+            .await
+    }
+
+    async fn logout_by(
+        &self,
+        change: impl FnOnce(&mut Value),
+    ) -> Response<Body> {
+        let mut claims = logout_claims(&self.provider.issuer, "unused");
+        change(&mut claims);
+        self.backchannel_logout(&sign_logout(&claims))
+            .await
+    }
+}
+
+#[tokio::test]
+async fn a_session_records_the_provider_sign_in_it_came_from() {
+    let flow = Flow::new().await;
+
+    let token = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+
+    let binding = flow
+        .oidc
+        .session_manager
+        .validate_session_record(&token)
+        .await
+        .unwrap()
+        .oidc
+        .unwrap();
+    assert_eq!(binding.issuer, flow.provider.issuer);
+    assert_eq!(binding.subject, "user-1");
+    assert_eq!(binding.sid.as_deref(), Some("op-session-1"));
+}
+
+#[tokio::test]
+async fn a_logout_naming_a_provider_session_ends_only_that_session() {
+    let flow = Flow::new().await;
+    let first = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    let second = flow
+        .signed_in_with_sid("op-session-2")
+        .await;
+
+    let response = flow
+        .logout_by(|claims| {
+            claims["sid"] = json!("op-session-1");
+            claims
+                .as_object_mut()
+                .unwrap()
+                .remove("sub");
+        })
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, header::CACHE_CONTROL), "no-store");
+    assert!(
+        !flow
+            .session_is_live(&first)
+            .await
+    );
+    assert!(
+        flow.session_is_live(&second)
+            .await,
+        "the other provider session continues"
+    );
+}
+
+#[tokio::test]
+async fn a_logout_naming_only_the_account_ends_all_its_sessions() {
+    let flow = Flow::new().await;
+    let first = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    let second = flow
+        .signed_in_with_sid("op-session-2")
+        .await;
+
+    let response = flow
+        .logout_by(|claims| {
+            claims
+                .as_object_mut()
+                .unwrap()
+                .remove("sid");
+        })
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !flow
+            .session_is_live(&first)
+            .await
+    );
+    assert!(
+        !flow
+            .session_is_live(&second)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_for_an_unknown_session_still_answers_ok() {
+    let flow = Flow::new().await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+
+    let response = flow
+        .logout_by(|claims| claims["sid"] = json!("never-seen"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK, "a logout is idempotent");
+    assert!(
+        flow.session_is_live(&session)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_token_that_does_not_verify_ends_nothing() {
+    let flow = Flow::new().await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+
+    let replayed = sign_logout(&logout_claims(&flow.provider.issuer, "never-seen"));
+    assert_eq!(
+        flow.backchannel_logout(&replayed)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let mut refused = vec![
+        flow.backchannel_logout(&replayed)
+            .await,
+    ];
+    refused.push(
+        flow.logout_by(|claims| {
+            claims["sid"] = json!("op-session-1");
+            claims["nonce"] = json!("n");
+        })
+        .await,
+    );
+    refused.push(
+        flow.logout_by(|claims| {
+            claims["sid"] = json!("op-session-1");
+            claims["iss"] = json!("https://other.example");
+        })
+        .await,
+    );
+    refused.push(
+        flow.backchannel_logout("not-a-token")
+            .await,
+    );
+    refused.push(
+        flow.post_form("/oidc/backchannel-logout", "other=1")
+            .await,
+    );
+
+    for response in refused {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(header_value(&response, header::CACHE_CONTROL), "no-store");
+        assert_eq!(body(response).await, r#"{"error":"invalid_request"}"#);
+    }
+    assert!(
+        flow.session_is_live(&session)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_that_cannot_end_a_session_fails_and_the_provider_can_send_it_again() {
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flow = Flow::with_parts(|_| {}, Arc::new(SessionManager::with_failing_deletes(failing.clone()))).await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    let token = sign_logout(&logout_claims(&flow.provider.issuer, "op-session-1"));
+
+    let failed = flow
+        .backchannel_logout(&token)
+        .await;
+    assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(header_value(&failed, header::CACHE_CONTROL), "no-store");
+    assert_eq!(body(failed).await, r#"{"error":"logout_failed"}"#);
+    assert!(
+        flow.session_is_live(&session)
+            .await
+    );
+
+    failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        flow.backchannel_logout(&token)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert!(
+        !flow
+            .session_is_live(&session)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_request_that_is_not_a_form_is_refused_like_any_invalid_request() {
+    let flow = Flow::new().await;
+
+    let response = flow
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/oidc/backchannel-logout")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"logout_token":"x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(header_value(&response, header::CACHE_CONTROL), "no-store");
+    assert_eq!(body(response).await, r#"{"error":"invalid_request"}"#);
+}
+
+#[tokio::test]
+async fn a_logout_whose_keys_cannot_be_fetched_answers_unavailable() {
+    let flow = Flow::new().await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    flow.provider
+        .set_jwks(json!("not a key set"));
+    let signed_with_a_new_key = crate::auth::oidc::test_support::sign(
+        crate::auth::oidc::test_support::KEY_B_PEM,
+        Some(crate::auth::oidc::test_support::KEY_B_KID),
+        &logout_claims(&flow.provider.issuer, "op-session-1"),
+    );
+
+    let response = flow
+        .backchannel_logout(&signed_with_a_new_key)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header_value(&response, header::CACHE_CONTROL), "no-store");
+    assert!(
+        flow.session_is_live(&session)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_with_sid_and_sub_ends_that_accounts_sessions_whose_id_token_had_no_sid() {
+    let flow = Flow::new().await;
+    let page = flow.sign_in(|_| {}).await;
+    let without_sid = handed_off_token(&body(page).await);
+
+    let response = flow
+        .logout_by(|claims| claims["sid"] = json!("op-session-1"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !flow
+            .session_is_live(&without_sid)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_naming_the_account_ends_its_sessions_from_before_sessions_recorded_the_provider_sign_in() {
+    let flow = Flow::new().await;
+    let bound = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    let user = flow.user().await.unwrap();
+    let unbound = flow
+        .other_session(&user)
+        .await;
+
+    let by_sid_only = flow
+        .logout_by(|claims| {
+            claims["sid"] = json!("op-session-2");
+            claims
+                .as_object_mut()
+                .unwrap()
+                .remove("sub");
+        })
+        .await;
+    assert_eq!(by_sid_only.status(), StatusCode::OK);
+    assert!(
+        flow.session_is_live(&unbound)
+            .await,
+        "a sid alone cannot name a session without a binding"
+    );
+
+    let by_sub = flow
+        .logout_by(|claims| {
+            claims
+                .as_object_mut()
+                .unwrap()
+                .remove("sid");
+        })
+        .await;
+    assert_eq!(by_sub.status(), StatusCode::OK);
+    assert!(
+        !flow
+            .session_is_live(&unbound)
+            .await
+    );
+    assert!(
+        !flow
+            .session_is_live(&bound)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_signed_with_a_key_published_during_the_unknown_key_cooldown_answers_unavailable() {
+    let flow = Flow::new().await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    let made_up_kid = crate::auth::oidc::test_support::sign(
+        crate::auth::oidc::test_support::KEY_A_PEM,
+        Some("made-up"),
+        &logout_claims(&flow.provider.issuer, "op-session-1"),
+    );
+    assert_eq!(
+        flow.backchannel_logout(&made_up_kid)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST,
+        "a key the provider does not publish, just fetched again"
+    );
+
+    flow.provider
+        .rotate_to_key_b();
+    let signed_with_the_new_key = crate::auth::oidc::test_support::sign(
+        crate::auth::oidc::test_support::KEY_B_PEM,
+        Some(crate::auth::oidc::test_support::KEY_B_KID),
+        &logout_claims(&flow.provider.issuer, "op-session-1"),
+    );
+    let response = flow
+        .backchannel_logout(&signed_with_the_new_key)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "the provider retries after the cooldown");
+    assert!(
+        flow.session_is_live(&session)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_posted_to_a_standby_answers_unavailable_and_ends_nothing() {
+    let flow = Flow::new().await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+
+    crate::server::mode::set_server_mode(crate::server::mode::ServerMode::Standby);
+    let response = flow
+        .logout_by(|claims| claims["sid"] = json!("op-session-1"))
+        .await;
+    crate::server::mode::set_server_mode(crate::server::mode::ServerMode::Active);
+    assert!(crate::server::mode::mark_activation_ready(crate::server::mode::current_activation_generation()));
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header_value(&response, header::CACHE_CONTROL), "no-store");
+    assert!(
+        flow.session_is_live(&session)
+            .await
+    );
 }

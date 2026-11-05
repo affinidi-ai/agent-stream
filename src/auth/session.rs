@@ -39,6 +39,28 @@ pub struct Session {
     pub expires_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     pub terms_gate: TermsSessionGate,
+    /// The OpenID provider sign-in this session came from (OIDC mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcSessionBinding>,
+}
+
+/// What [`SessionManager::remove_sessions_where`] did: the sessions it ended,
+/// and how many it selected but could not delete, which stay valid.
+#[derive(Debug, Default)]
+pub struct RemovedSessions {
+    pub ended: Vec<Session>,
+    pub failed: usize,
+}
+
+/// The OpenID provider sign-in a session came from, so a logout from that
+/// provider can find the session: the provider, the account (`sub`), and the
+/// provider's own session id (`sid`) when its ID token carried one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OidcSessionBinding {
+    pub issuer: String,
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 impl StorableEntity for Session {
@@ -146,7 +168,7 @@ impl SessionManager {
         username: String,
         user_id: String,
     ) -> String {
-        self.create_session_with_terms_gate(username, user_id, TermsSessionGate::AllowedAtLogin)
+        self.create_session_with_terms_gate(username, user_id, TermsSessionGate::AllowedAtLogin, None)
             .await
     }
 
@@ -155,6 +177,7 @@ impl SessionManager {
         username: String,
         user_id: String,
         terms_gate: TermsSessionGate,
+        oidc: Option<OidcSessionBinding>,
     ) -> String {
         let _guard = self
             .terms_gate_update_lock
@@ -170,6 +193,7 @@ impl SessionManager {
             created_at: now,
             expires_at: now + chrono::Duration::minutes(self.timeout_minutes as i64),
             terms_gate,
+            oidc,
         };
 
         if let Err(e) = self
@@ -317,37 +341,58 @@ impl SessionManager {
         &self,
         user_id: &str,
     ) -> usize {
-        let tokens: Vec<String> = {
+        let removed = self
+            .remove_sessions_where(|session| session.user_id == user_id)
+            .await
+            .ended
+            .len();
+        if removed > 0 {
+            tracing::info!("Revoked {} session(s) for user_id={}", removed, user_id);
+        }
+        removed
+    }
+
+    /// Remove every session `matches` selects. Holds the lock session
+    /// validation takes, so a request in flight cannot save a removed session
+    /// back.
+    pub async fn remove_sessions_where(
+        &self,
+        matches: impl Fn(&Session) -> bool,
+    ) -> RemovedSessions {
+        let _guard = self
+            .terms_gate_update_lock
+            .write()
+            .await;
+        let selected: Vec<Session> = {
             let cache = self.sessions();
             let sessions = cache.read().await;
             sessions
-                .iter()
-                .filter(|(_, session)| session.user_id == user_id)
-                .map(|(token, _)| token.clone())
+                .values()
+                .filter(|session| matches(session))
+                .cloned()
                 .collect()
         };
 
-        if tokens.is_empty() {
-            return 0;
-        }
-
-        for token in &tokens {
-            if let Err(e) = self
+        let mut removed = RemovedSessions::default();
+        for session in selected {
+            match self
                 .storage
-                .delete(token)
+                .delete(&session.token)
                 .await
             {
-                tracing::warn!(
-                    "Failed to delete session {} for user {}: {}",
-                    loggable_id::<Session>(token),
-                    user_id,
-                    e
-                );
+                Ok(()) => removed.ended.push(session),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to delete session {} for user {}: {}",
+                        loggable_id::<Session>(&session.token),
+                        session.user_id,
+                        e
+                    );
+                    removed.failed += 1;
+                }
             }
         }
-
-        tracing::info!("Revoked {} session(s) for user_id={}", tokens.len(), user_id);
-        tokens.len()
+        removed
     }
 
     /// Clean up expired sessions from memory and disk
@@ -403,6 +448,67 @@ impl Default for SessionManager {
     }
 }
 
+/// In-memory session storage whose deletes fail while `failing` is set.
+#[cfg(test)]
+struct FailingDeletes {
+    inner: Box<dyn StorageBackend<Session>>,
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl StorageBackend<Session> for FailingDeletes {
+    async fn save(
+        &self,
+        session: &Session,
+    ) -> Result<()> {
+        self.inner.save(session).await
+    }
+
+    async fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<Session>> {
+        self.inner.get(id).await
+    }
+
+    async fn list_all(&self) -> Result<Vec<Session>> {
+        self.inner.list_all().await
+    }
+
+    async fn delete(
+        &self,
+        id: &str,
+    ) -> Result<()> {
+        if self
+            .failing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("the disk refused the delete");
+        }
+        self.inner.delete(id).await
+    }
+
+    fn raw_cache(&self) -> Option<&crate::storage::filesystem::StorageCache<Session>> {
+        self.inner.raw_cache()
+    }
+}
+
+#[cfg(test)]
+impl SessionManager {
+    /// An in-memory session manager whose deletes fail while `failing` is set.
+    pub(crate) fn with_failing_deletes(failing: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            storage: Box::new(FailingDeletes {
+                inner: in_memory_storage_with_timeout(20),
+                failing,
+            }),
+            timeout_minutes: 20,
+            terms_gate_update_lock: RwLock::new(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +554,7 @@ mod tests {
                 created_at: now - chrono::Duration::hours(2),
                 expires_at: now - chrono::Duration::hours(1),
                 terms_gate: TermsSessionGate::AllowedAtLogin,
+                oidc: None,
             })
             .await
             .unwrap();
@@ -536,7 +643,7 @@ mod tests {
     async fn consent_pending_session_remains_authenticated() {
         let mgr = SessionManager::new();
         let token = mgr
-            .create_session_with_terms_gate("alice".into(), "user-a".into(), TermsSessionGate::ConsentPending)
+            .create_session_with_terms_gate("alice".into(), "user-a".into(), TermsSessionGate::ConsentPending, None)
             .await;
 
         assert!(
@@ -550,13 +657,13 @@ mod tests {
     async fn accepting_terms_allows_all_pending_sessions_for_user() {
         let mgr = SessionManager::new();
         let pending_one = mgr
-            .create_session_with_terms_gate("alice".into(), "user-a".into(), TermsSessionGate::ConsentPending)
+            .create_session_with_terms_gate("alice".into(), "user-a".into(), TermsSessionGate::ConsentPending, None)
             .await;
         let pending_two = mgr
-            .create_session_with_terms_gate("alice".into(), "user-a".into(), TermsSessionGate::ConsentPending)
+            .create_session_with_terms_gate("alice".into(), "user-a".into(), TermsSessionGate::ConsentPending, None)
             .await;
         let other = mgr
-            .create_session_with_terms_gate("bob".into(), "user-b".into(), TermsSessionGate::ConsentPending)
+            .create_session_with_terms_gate("bob".into(), "user-b".into(), TermsSessionGate::ConsentPending, None)
             .await;
 
         assert_eq!(
@@ -585,6 +692,38 @@ mod tests {
                 .unwrap()
                 .terms_gate,
             TermsSessionGate::ConsentPending
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cannot_be_deleted_is_reported_and_stays_valid() {
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mgr = SessionManager::with_failing_deletes(failing.clone());
+        let alice = mgr
+            .create_session("alice".into(), "user-a".into())
+            .await;
+
+        let removed = mgr
+            .remove_sessions_where(|session| session.user_id == "user-a")
+            .await;
+        assert!(removed.ended.is_empty());
+        assert_eq!(removed.failed, 1);
+        assert!(
+            mgr.validate_session(&alice)
+                .await
+                .is_some()
+        );
+
+        failing.store(false, std::sync::atomic::Ordering::SeqCst);
+        let removed = mgr
+            .remove_sessions_where(|session| session.user_id == "user-a")
+            .await;
+        assert_eq!(removed.ended.len(), 1);
+        assert_eq!(removed.failed, 0);
+        assert!(
+            mgr.validate_session(&alice)
+                .await
+                .is_none()
         );
     }
 
