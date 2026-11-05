@@ -127,7 +127,7 @@ impl SystemMetricsStore {
         self.remove_stale_temp_files()
             .await;
 
-        let content = match tokio::fs::read_to_string(&self.storage_path).await {
+        let content = match tokio::fs::read(&self.storage_path).await {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 info!("No previous system metrics file found, starting fresh");
@@ -137,7 +137,7 @@ impl SystemMetricsStore {
                 return Err(e).with_context(|| format!("Failed to read system metrics file {:?}", self.storage_path));
             }
         };
-        match serde_json::from_str::<Vec<SystemMetricsSample>>(&content) {
+        match serde_json::from_slice::<Vec<SystemMetricsSample>>(&content) {
             Ok(mut loaded) => {
                 if loaded.len() > MAX_SAMPLES {
                     loaded.drain(..loaded.len() - MAX_SAMPLES);
@@ -624,6 +624,38 @@ mod tests {
                 .is_err(),
             "a read error is retried, not read as no history"
         );
+
+        let kept: Vec<f32> = store
+            .get_response_since(None)
+            .await
+            .samples
+            .iter()
+            .map(|s| s.process_cpu_percent)
+            .collect();
+        assert_eq!(kept, vec![9.0]);
+    }
+
+    #[tokio::test]
+    async fn reload_treats_a_history_that_is_not_utf8_as_unparseable() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemMetricsStore::new(dir.path());
+        store
+            .append(sample(9.0))
+            .await;
+        tokio::fs::write(
+            dir.path()
+                .join("system_metrics.json"),
+            [0xff, 0xfe, 0xfd],
+        )
+        .await
+        .expect("write");
+
+        store
+            .reload_from_storage()
+            .await
+            .expect("an unparseable history does not hold readiness back");
 
         let kept: Vec<f32> = store
             .get_response_since(None)

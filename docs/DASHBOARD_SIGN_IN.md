@@ -132,7 +132,8 @@ Sessions last `session_timeout_minutes` (default 20) from their last use. Each r
 passes the session gate, and each `/auth/check`, pushes the expiry out again, and the gate
 re-sends the cookie with a matching `Max-Age`. Sessions are written to
 `[storage_paths] sessions` (default `../_storage/sessions`), so they survive a restart;
-expired sessions are removed at startup and, in SAML mode, every 5 minutes.
+expired sessions are removed at startup and, in SAML mode, every 5 minutes on the Active
+instance.
 
 A session whose user is no longer approved (status `New` or `Disabled`, or removed) is
 refused with `401` on every protected route.

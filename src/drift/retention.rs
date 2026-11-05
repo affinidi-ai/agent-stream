@@ -58,17 +58,14 @@ const SWEEP_INTERVAL_SECS: u64 = 6 * 3600;
 /// Periodically re-apply the count + age retention policy to every surface, so
 /// age-based expiry also reaches surfaces that have gone idle. Spawned by the
 /// orchestrator only when an age limit is configured (count is enforced on
-/// write, so a sweep adds nothing without an age limit). The first tick fires
-/// immediately, so it also prunes once at startup.
+/// write, so a sweep adds nothing without an age limit). It prunes as soon as
+/// the instance is Active and ready, at startup and after every promotion.
 pub async fn periodic_retention_sweep() {
     let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        interval.tick().await;
         // Pruning deletes shared files, which only the Active instance may do.
-        if !crate::server::mode::is_ready_to_serve() {
-            continue;
-        }
+        crate::server::mode::tick_when_ready(&mut interval).await;
         if let Some(runs) = global_drift_run_store() {
             runs.prune_all().await;
         }

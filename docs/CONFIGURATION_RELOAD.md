@@ -77,7 +77,7 @@ disables every loop.
 | --- | --- |
 | Refreshed on the interval | Surfaces, Surface templates, internal surface records, API keys, certificates, identities, dashboard users, gateways and pending gateway connections, mediators, Connection Points, credential providers, OAuth Identifiers, JWT verification strategies, integration mappings (Surface, user, gateway and identity), notifications, Terms |
 | Read from disk on every access | Secrets, delegation-vault tokens, integration definitions |
-| Loaded at startup and re-read on promotion | Members, Teams, dashboard sessions, Prompts, policy definitions, global policies, drift baselines, runs, recorded sessions and evaluation state, the revocation status list, dashboard settings, the member provisioning config |
+| Loaded at startup and re-read on promotion | Members, Teams, dashboard sessions, Prompts, policy definitions, global policies, drift baselines, runs, recorded sessions and evaluation state, the revocation status list, dashboard settings, the member provisioning config, management access tokens |
 
 A refresh updates the in-memory record. Only Surfaces and internal surface records also
 rebuild routing from the events; other kinds are read from the cache on their next use.
@@ -201,8 +201,11 @@ On `SIGUSR1` the instance reports `503` at once, then:
 3. recompiles every policy engine (Surfaces and their variants, internal surface records,
    gateways and the appliance-wide sets) from the stored definitions, so the instance
    enforces the policy the previous Active saved, not the one it compiled at startup.
-   Every enabled Surface and every gateway is visited, so an engine whose policy the
-   previous Active removed is dropped,
+   Every Surface, internal surface record and gateway is visited, so an engine whose policy
+   the previous Active removed is dropped. The internal surface records are re-read from
+   storage first; the engine of one stored as disabled, and of a gateway no longer stored,
+   is dropped. An internal surface record deleted on the previous Active keeps the engine
+   it had,
 4. re-reads the rest of the shared state, so what the previous Active wrote is kept and
    extended rather than overwritten:
    - Members (rebuilding the identifier index the team gate uses), Teams, dashboard users
@@ -218,13 +221,16 @@ On `SIGUSR1` the instance reports `503` at once, then:
      system metrics history.
    - Dashboard settings and the revocation status list, so revocations made on the previous
      Active stay in force.
+   - Management access tokens: a token the previous Active revoked is rejected, and one it
+     created or rotated authenticates.
    - The head of every governance chain, so the next record links to the last one on disk.
 
    A read in steps 1, 2 or 4 that fails with a storage error, or a Surface or gateway
    store that cannot be read for step 3, is logged and retried, with a
    backoff of up to 30 seconds, until it succeeds or the instance is demoted. A request log,
    time series file, system metrics history, settings file or member provisioning config
-   that cannot be parsed is logged and does not hold readiness back. A single stored
+   that cannot be parsed, including one that is not valid UTF-8, is logged and does not
+   hold readiness back. A single stored
    record, such as a policy definition, the appliance-wide assignments or a gateway, that
    cannot be read, decrypted or parsed is skipped: the instance goes ready without it,
    logs the file at `ERROR` and counts it in `agent_stream_storage_load_errors_total`.
@@ -320,10 +326,14 @@ with its presentation's identity, until that presentation expires (at most 6 min
 redelivery of it is; see [`FABRIC.md`](FABRIC.md#presentation-binding).
 
 Only the Active instance writes shared state in the background. On a Standby the governance
-and drift retention sweeps, the drift evaluator and scheduler, the request log save, system
-metrics persistence and the shutdown flush of the time-series stores do nothing; a Standby
-keeps its own system metrics samples in memory. The startup cleanup of pending gateway
-handshakes in shared storage still runs in every mode.
+and drift retention sweeps, the expired dashboard session cleanup, the drift evaluator and
+scheduler, the request log save, system metrics persistence and the shutdown flush of the
+time-series stores do nothing; a Standby keeps its own system metrics samples in memory. The
+retention sweeps and the session cleanup run as soon as an instance becomes ready, at startup
+and after every promotion, then on their interval. A management access token used on a
+Standby authenticates from the Standby's startup copy and does not update its last-used time
+in storage. The startup cleanup of pending gateway handshakes and the removal of sessions
+already expired on disk when the session store loads still run in every mode.
 
 A Standby still runs its HTTP server and management API, and a write made through it (a
 settings save, an agent revocation, a policy edit) goes to shared storage from the Standby's

@@ -152,37 +152,24 @@ async fn refresh_referencing_engines(
     state: &IdentityApiState,
     policy_id: &str,
 ) {
-    if let Err(e) = recompile_policy_engines(
-        &EngineStores {
-            pipe_store: state.pipe_store.clone(),
-            global_policy_store: state
-                .global_policy_store
-                .clone(),
-            agent_surfaces_path: state
-                .bootstrap_config
-                .storage_paths
-                .agent_surfaces
-                .clone(),
-            gateways_path: state
-                .bootstrap_config
-                .storage_paths
-                .gateways
-                .clone(),
-        },
-        EngineScope::Referencing(policy_id),
-    )
-    .await
-    {
+    let Some(stores) = &state.policy_engine_stores else {
+        warn!(policy_id = %policy_id, "Policy engine stores unavailable; engines referencing the changed definition not refreshed");
+        return;
+    };
+    if let Err(e) = recompile_policy_engines(stores, EngineScope::Referencing(policy_id)).await {
         error!(policy_id = %policy_id, error = %e, "Policy engines referencing the changed definition were not all refreshed");
     }
 }
 
-/// Where [`recompile_policy_engines`] reads the objects whose engines it compiles.
+/// Where [`recompile_policy_engines`] reads the objects whose engines it
+/// compiles. A full pass re-reads the surface store from disk first, so a
+/// promoted instance sees the records the previous Active stored; the gateway
+/// store is re-read by the promotion before it.
 pub(crate) struct EngineStores {
     pub pipe_store: Option<Arc<crate::pipes::FileSystemPipeStore>>,
     pub global_policy_store: Option<Arc<crate::policies::FileSystemGlobalPolicyStore>>,
-    pub agent_surfaces_path: String,
-    pub gateways_path: String,
+    pub agent_surface_store: Option<Arc<crate::surfaces::FileSystemAgentSurfaceStore>>,
+    pub gateway_store: Option<Arc<crate::gateways::FileSystemGatewayStore>>,
 }
 
 /// Which compiled policy engines [`recompile_policy_engines`] rebuilds.
@@ -204,17 +191,16 @@ impl<'a> EngineScope<'a> {
 }
 
 /// Whether `surface`'s engine is rebuilt for `scope`. A full pass takes every
-/// enabled surface, because the policy may come from the default variant or
-/// may have been removed, and the manager compiles or evicts accordingly.
+/// surface, because the policy may come from the default variant or may have
+/// been removed, and the manager compiles or evicts accordingly.
 fn surface_in_scope(
     surface: &crate::config::agent_surface::AgentSurface,
     scope: EngineScope<'_>,
 ) -> bool {
-    surface.status.is_enabled()
-        && match scope {
-            EngineScope::All => true,
-            EngineScope::Referencing(id) => surface_references_policy(surface, id),
-        }
+    match scope {
+        EngineScope::All => true,
+        EngineScope::Referencing(id) => surface_references_policy(surface, id),
+    }
 }
 
 /// Whether `gateway`'s engine is rebuilt for `scope`. A full pass takes every
@@ -237,17 +223,23 @@ fn gateway_in_scope(
     }
 }
 
-/// Recompile the inbound, response and variant engines of every surface in
-/// `scope` stored under `surfaces_path`. Returns how many recompiled and how
-/// many failed (and were evicted), or an error when the store cannot be read.
+/// Recompile the inbound, response and variant engines of every enabled
+/// surface in `scope` in `store`, and evict the engine of a disabled one. A
+/// full pass re-reads `store` from disk first. Returns how many recompiled and
+/// how many failed (and were evicted), or an error when the store cannot be
+/// read.
 async fn recompile_surface_engines(
     policy_manager: &crate::policies::SurfacePolicyManager,
-    surfaces_path: &str,
+    store: &crate::surfaces::FileSystemAgentSurfaceStore,
     scope: EngineScope<'_>,
 ) -> std::io::Result<(usize, usize)> {
-    let store = crate::surfaces::FileSystemAgentSurfaceStore::new(std::path::PathBuf::from(surfaces_path))
-        .await
-        .map_err(|e| std::io::Error::other(format!("cannot open surface store: {e}")))?;
+    use crate::surfaces::AgentSurfaceStore as _;
+    if matches!(scope, EngineScope::All) {
+        store
+            .refresh_from_disk()
+            .await
+            .map_err(|e| std::io::Error::other(format!("cannot read surface store: {e}")))?;
+    }
     let surfaces = store
         .list_all()
         .await
@@ -258,6 +250,14 @@ async fn recompile_surface_engines(
         .iter()
         .filter(|s| surface_in_scope(s, scope))
     {
+        if !surface.status.is_enabled() {
+            if let Some(config_id) = surface.config_id()
+                && policy_manager.remove_policy(config_id)
+            {
+                info!(policy_id = %policy_id, surface = %surface.name, "Evicted OPA engine of disabled surface");
+            }
+            continue;
+        }
         match policy_manager
             .update_channel_policy(surface)
             .await
@@ -275,20 +275,17 @@ async fn recompile_surface_engines(
     Ok((ok, failed))
 }
 
-/// Recompile the Trust Fabric engine of every gateway in `scope` stored under
-/// `gateways_path`. A gateway references a reusable policy by id, so a
-/// definition change recompiles every gateway that references it. Returns how
-/// many recompiled and how many failed (and were evicted), or an error when the
-/// store cannot be read.
+/// Recompile the Trust Fabric engine of every gateway in `scope` in `store`. A
+/// gateway references a reusable policy by id, so a definition change
+/// recompiles every gateway that references it. A full pass also drops the
+/// engine of a gateway no longer stored. Returns how many recompiled and how
+/// many failed (and were evicted), or an error when the store cannot be read.
 async fn recompile_gateway_engines(
     gw_manager: &crate::policies::GatewayPolicyManager,
-    gateways_path: &str,
+    store: &crate::gateways::FileSystemGatewayStore,
     scope: EngineScope<'_>,
 ) -> std::io::Result<(usize, usize)> {
     use crate::gateways::store::GatewayStore as _;
-    let store = crate::gateways::FileSystemGatewayStore::new(std::path::PathBuf::from(gateways_path), None)
-        .await
-        .map_err(|e| std::io::Error::other(format!("cannot open gateway store: {e}")))?;
     let gateways = store
         .list_all()
         .await
@@ -311,6 +308,16 @@ async fn recompile_gateway_engines(
                 failed += 1;
                 warn!(policy_id = %policy_id, gateway_id = %gateway.id, error = %e, "Failed to recompile gateway OPA engine");
             }
+        }
+    }
+    if matches!(scope, EngineScope::All) {
+        let stored: std::collections::HashSet<String> = gateways
+            .into_iter()
+            .map(|gateway| gateway.id)
+            .collect();
+        let dropped = gw_manager.retain_gateways(&stored);
+        if dropped > 0 {
+            info!(dropped, "Dropped OPA engines of gateways no longer stored");
         }
     }
     Ok((ok, failed))
@@ -361,30 +368,40 @@ pub(crate) async fn recompile_policy_engines(
 
     // ── Surfaces: inbound + response + variant overrides ─────────────────────
     let (mut surfaces_ok, mut surfaces_failed) = (0usize, 0usize);
-    match crate::gateways::get_policy_manager() {
-        Some(policy_manager) => {
-            match recompile_surface_engines(&policy_manager, &stores.agent_surfaces_path, scope).await {
-                Ok((ok, failed)) => (surfaces_ok, surfaces_failed) = (ok, failed),
-                Err(e) => {
-                    warn!(policy_id = %policy_id, error = %e, "Surface OPA engines not refreshed");
-                    store_error = Some(e);
-                }
+    match (crate::gateways::get_policy_manager(), &stores.agent_surface_store) {
+        (Some(policy_manager), Some(store)) => match recompile_surface_engines(&policy_manager, store, scope).await {
+            Ok((ok, failed)) => (surfaces_ok, surfaces_failed) = (ok, failed),
+            Err(e) => {
+                warn!(policy_id = %policy_id, error = %e, "Surface OPA engines not refreshed");
+                store_error = Some(e);
             }
+        },
+        (None, _) => {
+            warn!(policy_id = %policy_id, "Surface policy manager unavailable; surface OPA engines not refreshed")
         }
-        None => warn!(policy_id = %policy_id, "Surface policy manager unavailable; surface OPA engines not refreshed"),
+        (Some(_), None) => {
+            warn!(policy_id = %policy_id, "Surface store unavailable; surface OPA engines not refreshed");
+            store_error = Some(std::io::Error::other("surface store unavailable"));
+        }
     }
 
     // ── Gateways (Trust Fabric): appliance↔appliance policy engines ──────────
     let (mut gateways_ok, mut gateways_failed) = (0usize, 0usize);
-    match crate::gateways::get_gateway_policy_manager() {
-        Some(gw_manager) => match recompile_gateway_engines(&gw_manager, &stores.gateways_path, scope).await {
+    match (crate::gateways::get_gateway_policy_manager(), &stores.gateway_store) {
+        (Some(gw_manager), Some(store)) => match recompile_gateway_engines(&gw_manager, store, scope).await {
             Ok((ok, failed)) => (gateways_ok, gateways_failed) = (ok, failed),
             Err(e) => {
                 warn!(policy_id = %policy_id, error = %e, "Gateway OPA engines not refreshed");
                 store_error = Some(e);
             }
         },
-        None => warn!(policy_id = %policy_id, "Gateway policy manager unavailable; gateway OPA engines not refreshed"),
+        (None, _) => {
+            warn!(policy_id = %policy_id, "Gateway policy manager unavailable; gateway OPA engines not refreshed")
+        }
+        (Some(_), None) => {
+            warn!(policy_id = %policy_id, "Gateway store unavailable; gateway OPA engines not refreshed");
+            store_error = Some(std::io::Error::other("gateway store unavailable"));
+        }
     }
 
     // ── Appliance-wide (global) policy assignments ────────────────────────
@@ -1442,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn full_recompile_includes_every_enabled_surface() {
+    fn full_recompile_includes_every_surface() {
         let variant_only = variant_policy_surface("def");
         assert!(!variant_only.opa_enabled(), "the base target carries no policy");
         assert!(surface_in_scope(&variant_only, EngineScope::All));
@@ -1454,7 +1471,10 @@ mod tests {
             status: crate::entity_status::EntityStatus::Disabled,
             ..variant_policy_surface("def")
         };
-        assert!(!surface_in_scope(&disabled, EngineScope::All));
+        assert!(
+            surface_in_scope(&disabled, EngineScope::All),
+            "a disabled surface is visited so its engine is evicted"
+        );
     }
 
     #[test]
@@ -1485,57 +1505,184 @@ mod tests {
         assert!(!gateway_in_scope(&gateway(None), EngineScope::Referencing("def")));
     }
 
-    #[tokio::test]
-    async fn engine_recompile_reports_a_store_it_cannot_read() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let not_a_dir = temp_dir
-            .path()
-            .join("not-a-dir");
-        std::fs::write(&not_a_dir, "x").unwrap();
-        let not_a_dir = not_a_dir
-            .to_string_lossy()
-            .to_string();
-
-        let surfaces =
-            recompile_surface_engines(&crate::policies::SurfacePolicyManager::new(), &not_a_dir, EngineScope::All)
-                .await;
-        assert!(surfaces.is_err_and(|e| {
-            e.to_string()
-                .contains("surface store")
-        }));
-        let gateways =
-            recompile_gateway_engines(&crate::policies::GatewayPolicyManager::new(), &not_a_dir, EngineScope::All)
-                .await;
-        assert!(gateways.is_err_and(|e| {
-            e.to_string()
-                .contains("gateway store")
-        }));
+    async fn engine_stores_in(
+        dir: &std::path::Path
+    ) -> (crate::surfaces::FileSystemAgentSurfaceStore, crate::gateways::FileSystemGatewayStore) {
+        let surfaces = crate::surfaces::FileSystemAgentSurfaceStore::new(dir.join("surfaces"))
+            .await
+            .unwrap();
+        let gateways = crate::gateways::FileSystemGatewayStore::new(dir.join("gateways"), None)
+            .await
+            .unwrap();
+        (surfaces, gateways)
     }
 
     #[tokio::test]
-    async fn engine_recompile_of_empty_stores_succeeds() {
+    async fn full_engine_recompile_reports_a_surface_store_it_cannot_read() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let dir = |name: &str| {
+        let (surfaces, _) = engine_stores_in(temp_dir.path()).await;
+        let path = temp_dir
+            .path()
+            .join("surfaces");
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::write(&path, "x").unwrap();
+        let manager = crate::policies::SurfacePolicyManager::new();
+
+        let full = recompile_surface_engines(&manager, &surfaces, EngineScope::All).await;
+        assert!(full.is_err_and(|e| {
+            e.to_string()
+                .contains("surface store")
+        }));
+        let targeted = recompile_surface_engines(&manager, &surfaces, EngineScope::Referencing("def")).await;
+        assert_eq!(targeted.unwrap(), (0, 0), "a policy edit recompiles from the cached records");
+    }
+
+    #[tokio::test]
+    async fn full_engine_recompile_writes_nothing_to_the_stores() {
+        use crate::gateways::store::GatewayStore as _;
+        use crate::surfaces::AgentSurfaceStore as _;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (surfaces, gateways) = engine_stores_in(temp_dir.path()).await;
+        let self_gateway = gateways
+            .list_all()
+            .await
+            .unwrap();
+        for gateway in &self_gateway {
+            gateways
+                .delete(&gateway.id)
+                .await
+                .unwrap();
+        }
+
+        let surface_counts =
+            recompile_surface_engines(&crate::policies::SurfacePolicyManager::new(), &surfaces, EngineScope::All).await;
+        assert_eq!(surface_counts.unwrap(), (0, 0));
+        let gateway_counts =
+            recompile_gateway_engines(&crate::policies::GatewayPolicyManager::new(), &gateways, EngineScope::All).await;
+        assert_eq!(gateway_counts.unwrap(), (0, 0));
+
+        assert!(
+            surfaces
+                .list_all()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            gateways
+                .list_all()
+                .await
+                .unwrap()
+                .is_empty(),
+            "no self-gateway is created"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_engine_recompile_drops_gateways_no_longer_stored() {
+        use crate::gateways::store::GatewayStore as _;
+        use crate::gateways::types::GatewayOpaPolicyConfig;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_, gateways) = engine_stores_in(temp_dir.path()).await;
+        for stored in gateways
+            .list_all()
+            .await
+            .unwrap()
+        {
+            gateways
+                .delete(&stored.id)
+                .await
+                .unwrap();
+        }
+        let manager = crate::policies::GatewayPolicyManager::new();
+        let deleted = gateway(Some(GatewayOpaPolicyConfig {
+            enabled: true,
+            policy: String::new(),
+            policy_definition_id: Some("def".to_string()),
+            policy_definition_ids: Vec::new(),
+        }));
+        let _ = manager
+            .update_gateway_policy(&deleted)
+            .await;
+        assert!(manager.is_enforced(&deleted.id));
+
+        let targeted = recompile_gateway_engines(&manager, &gateways, EngineScope::Referencing("def")).await;
+        assert_eq!(targeted.unwrap(), (0, 0));
+        assert!(manager.is_enforced(&deleted.id), "a policy edit leaves other gateways alone");
+
+        let full = recompile_gateway_engines(&manager, &gateways, EngineScope::All).await;
+        assert_eq!(full.unwrap(), (0, 0));
+        assert!(!manager.is_enforced(&deleted.id), "a gateway deleted elsewhere loses its engine");
+    }
+
+    #[tokio::test]
+    async fn full_engine_recompile_reads_surfaces_another_instance_stored_and_evicts_disabled_ones() {
+        use crate::surfaces::AgentSurfaceStore as _;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let definitions = Arc::new(
+            crate::policies::FileSystemPolicyDefinitionStore::new(
+                temp_dir
+                    .path()
+                    .join("policies")
+                    .to_string_lossy()
+                    .to_string(),
+            )
+            .await
+            .unwrap(),
+        );
+        definitions
+            .save(crate::policies::policy_definitions::PolicyDefinition {
+                id: "def".to_string(),
+                name: "def".to_string(),
+                description: String::new(),
+                policy_type: crate::policies::policy_definitions::PolicyType::Appliance,
+                policy: "package surface.policy\nimport rego.v1\ndefault allow := true".to_string(),
+                enabled: true,
+                created_at: "2026-06-07T00:00:00Z".to_string(),
+                updated_at: None,
+                version: None,
+                content_hash: None,
+                sample_input: None,
+                tenant_id: None,
+            })
+            .await
+            .unwrap();
+        let manager = crate::policies::SurfacePolicyManager::new();
+        manager.set_policy_definition_store(definitions);
+        let (surfaces, _) = engine_stores_in(temp_dir.path()).await;
+        let other_instance = crate::surfaces::FileSystemAgentSurfaceStore::new(
             temp_dir
                 .path()
-                .join(name)
-                .to_string_lossy()
-                .to_string()
-        };
+                .join("surfaces"),
+        )
+        .await
+        .unwrap();
+        let surface = variant_policy_surface("def");
+        let config_id = surface
+            .config_id()
+            .unwrap()
+            .to_string();
+        other_instance
+            .save(&surface)
+            .await
+            .unwrap();
 
-        let surfaces = recompile_surface_engines(
-            &crate::policies::SurfacePolicyManager::new(),
-            &dir("surfaces"),
-            EngineScope::All,
-        )
-        .await;
-        assert_eq!(surfaces.unwrap(), (0, 0));
-        let gateways = recompile_gateway_engines(
-            &crate::policies::GatewayPolicyManager::new(),
-            &dir("gateways"),
-            EngineScope::Referencing("unused"),
-        )
-        .await;
-        assert_eq!(gateways.unwrap(), (0, 0));
+        let counts = recompile_surface_engines(&manager, &surfaces, EngineScope::All).await;
+        assert_eq!(counts.unwrap(), (1, 0));
+        assert!(manager.has_policy(&config_id));
+
+        other_instance
+            .save(&crate::config::agent_surface::AgentSurface {
+                status: crate::entity_status::EntityStatus::Disabled,
+                ..surface
+            })
+            .await
+            .unwrap();
+        let counts = recompile_surface_engines(&manager, &surfaces, EngineScope::All).await;
+        assert_eq!(counts.unwrap(), (0, 0));
+        assert!(!manager.has_policy(&config_id), "a surface disabled elsewhere loses its engine");
     }
 }

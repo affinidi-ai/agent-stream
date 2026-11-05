@@ -56,6 +56,19 @@ impl SurfacePolicyManager {
             .contains_key(channel_id)
     }
 
+    /// Drop the compiled engine of a surface that is no longer served. Returns
+    /// whether one was compiled.
+    pub fn remove_policy(
+        &self,
+        channel_id: &str,
+    ) -> bool {
+        self.opa_engines
+            .write()
+            .expect("opa_engines lock poisoned")
+            .remove(channel_id)
+            .is_some()
+    }
+
     /// Initialize or update policy for a surface
     pub async fn update_channel_policy(
         &self,

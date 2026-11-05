@@ -1,0 +1,51 @@
+branch: fix/promotion-reload-followups
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Run retention sweeps and session cleanup as soon as an instance is ready
+      description: >-
+        The governance and drift retention sweeps and the expired dashboard session cleanup
+        now run once when an instance becomes Active and ready, at startup and after every
+        promotion, then on their interval. Previously the retention sweeps skipped their first
+        run, so nothing was pruned for up to six hours after each start or failover.
+  fixed:
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Reject management access tokens revoked on the previous Active after failover
+      description: >-
+        A promoted Standby now re-reads management access tokens before it reports ready.
+        A token revoked on the previous Active is rejected instead of authenticating and
+        writing its un-revoked record back to disk, and a token created or rotated there
+        authenticates. A token used on a Standby no longer writes its last-used time, so it
+        cannot overwrite a revocation the Active made.
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Stop a Standby from deleting shared dashboard session files
+      description: >-
+        The periodic expired-session cleanup now runs only on the Active. A Standby used the
+        expiry times it loaded at startup and deleted sessions the Active was still keeping
+        alive, which signed those users out after a failover.
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Stop a non-UTF-8 settings or metrics file from holding a promotion at 503
+      description: >-
+        A settings file, request log or system metrics history that is not valid UTF-8 is now
+        treated like any other unparseable file: it is logged and does not hold readiness back.
+        Previously the promotion retried it forever and the instance stayed at 503.
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Recompile policy engines from the existing stores and drop stale engines
+      description: >-
+        Policy engine recompiles on promotion and on policy edits now use the existing
+        internal surface record and gateway stores instead of opening new ones. Each new store
+        started a refresh task that never stopped when cache_refresh_interval_secs is set, and
+        an empty gateway listing saved a localhost self-gateway to shared storage. A promotion
+        re-reads the internal surface records first, and drops the engine of a record stored
+        as disabled and of a gateway no longer stored. A missing surface or gateway store now
+        holds readiness at 503 instead of leaving the startup engines in place.
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Count skipped access token, API key and identity records on load
+      description: >-
+        Management access tokens, API keys and DID:webvh identities that cannot be loaded are
+        now logged at ERROR and counted in agent_stream_storage_load_errors_total, labelled by
+        entity and reason. A file that is not valid UTF-8 counts as parse_failed.
+  removed: []
+  security: []
+  breaking: []
