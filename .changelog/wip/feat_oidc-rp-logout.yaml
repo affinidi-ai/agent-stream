@@ -1,0 +1,17 @@
+branch: feat/oidc-rp-logout
+changes:
+  added:
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Sign out of the OpenID provider too when signing out of the dashboard
+      description: >-
+        In OIDC mode, signing out of the dashboard now also signs the person out of the
+        provider (OpenID Connect RP-Initiated Logout 1.0): /auth/logout answers with the
+        provider's end_session_endpoint, carrying the session's ID token as id_token_hint,
+        and the dashboard goes there. A session that expires does not. The provider returns
+        the browser to logout.post_logout_redirect_uri, where the login page says "You have
+        signed out." logout.rp_initiated in oidc.json keeps sign-out local instead.
+  changed: []
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

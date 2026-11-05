@@ -112,6 +112,24 @@ const LeftPanel: React.FC = () => {
   );
 };
 
+/**
+ * Whether the identity provider sent the browser back after signing out
+ * (`?signed_out=1`, the configured post-logout address). The marker is removed
+ * from the address so a reload or a later sign-in does not show it again.
+ */
+const takeSignedOutNotice = (): boolean => {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('signed_out') !== '1') return false;
+  params.delete('signed_out');
+  const query = params.toString();
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+  );
+  return true;
+};
+
 const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
@@ -126,6 +144,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const registrationTerms = useRegistrationTerms(mode === 'register', setError);
 
   useEffect(() => {
+    if (takeSignedOutNotice()) setSuccess('You have signed out.');
     rememberPostLoginPath();
     if (sessionManager.didSessionExpire()) {
       sessionManager.clearSessionExpiredError();
@@ -239,6 +258,11 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
       return (
         <>
           {error && <Alert variant="danger">{error}</Alert>}
+          {success && (
+            <Alert variant="success" role="status">
+              {success}
+            </Alert>
+          )}
           <Form onSubmit={handleLogin}>
             <div className="d-grid">
               <Button

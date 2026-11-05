@@ -98,19 +98,45 @@ class SessionManager {
     sessionStorage.setItem('session_token', sessionToken);
   }
 
-  async logout(logoutAction: () => void = () => {}): Promise<void> {
+  /**
+   * End the dashboard session. Resolves to the identity provider's sign-out
+   * address when the server gives one (OIDC sign-in), which only an explicit
+   * sign-out should open: see {@link signOut}.
+   */
+  async logout(logoutAction: () => void = () => {}): Promise<string | undefined> {
     logoutAction();
+    let endSessionUrl: string | undefined;
     try {
-      await fetch('/api/auth/logout', {
+      const response = await fetch('/api/auth/logout', {
         method: 'POST',
         headers: this.getAuthHeaders(),
       });
+      const answer = response.ok ? await response.json().catch(() => ({})) : {};
+      const url = answer?.end_session_url;
+      if (typeof url === 'string' && /^https?:\/\//.test(url)) {
+        endSessionUrl = url;
+      }
     } catch (error) {
       console.error('Logout failed:', error);
     }
 
     sessionStorage.removeItem('session_token');
     document.cookie = 'session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    return endSessionUrl;
+  }
+
+  /**
+   * Sign out at the person's request: end the session and, when the identity
+   * provider has a sign-out address, go there so they are signed out of the
+   * provider too. Resolves to true when the browser is leaving for it.
+   */
+  async signOut(logoutAction: () => void = () => {}): Promise<boolean> {
+    const endSessionUrl = await this.logout(logoutAction);
+    if (endSessionUrl) {
+      window.location.assign(endSessionUrl);
+      return true;
+    }
+    return false;
   }
 
   expireSession(): void {

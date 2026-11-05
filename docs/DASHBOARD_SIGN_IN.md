@@ -110,6 +110,7 @@ fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson
 | `GET /oidc/login` | None (public) | Redirect the browser to the provider to sign in |
 | `GET /oidc/callback` | None (public) | Where the provider sends the browser back (`redirect_uri`): verify the sign-in and open a session |
 | `GET`, `POST /oidc/initiate` | None (public) | Third-party-initiated login: start a sign-in at the provider's request (the provider's `initiate_login_uri`) |
+| `POST /oidc/logout` | None (public) | Sign out of the dashboard, and give the provider's sign-out address (the same as `POST /auth/logout` in OIDC mode) |
 | `POST /oidc/backchannel-logout` | None (public; a signed logout token) | Back-channel logout: end the sessions of a sign-out at the provider (the provider's `backchannel_logout_uri`) |
 
 The provider:
@@ -193,11 +194,22 @@ Outcomes:
   answers `403`.
 - On success the callback sets the session cookie and returns the same page as SAML sign-in,
   also sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
-- Signing out of the dashboard ends the appliance session only; it does not sign out of the
-  provider.
+- Signing out of the dashboard also signs the person out of the provider (RP-initiated logout,
+  [OpenID Connect RP-Initiated Logout
+  1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)). `POST /auth/logout`
+  ends the session and clears the cookie as in the other modes, and when the session came
+  from an OIDC sign-in, `logout.rp_initiated` is on and the provider publishes an
+  `end_session_endpoint`, it answers `{"end_session_url": "..."}`: that endpoint with
+  `id_token_hint` (the session's ID token, accepted even once expired), `client_id`,
+  `post_logout_redirect_uri` when configured, and a random `state`. Otherwise it answers
+  `{}`, and the sign-out stays local. The dashboard opens that address when the person signs
+  out; a session that expires never does, so a timed-out dashboard does not sign the person
+  out of the provider. The provider then sends the browser to `post_logout_redirect_uri`,
+  and the login page shows "You have signed out." when that address carries `signed_out=1`.
 - Each OIDC session records the provider sign-in it came from: the issuer, `sub`, and the
-  provider's session id (`sid`) when the ID token carries one. The session is created with
-  it, so back-channel logout can always find the session.
+  provider's session id (`sid`) when the ID token carries one, and the ID token itself, used
+  only as the `id_token_hint` above. The session is created with it, so back-channel logout
+  can always find the session.
 
 Back-channel logout ([OpenID Connect Back-Channel Logout
 1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html)) lets a sign-out at the
@@ -265,6 +277,7 @@ To register Agent Stream at the provider:
 | Client authentication | `client_secret_basic` (the default) or `client_secret_post`, as `token_endpoint_auth_method` says |
 | ID token signing | An algorithm in `id_token_signing_algs` (`ES256` by default) |
 | Claims in the ID token | The role claim, every claim in `required_claims`, and the profile claims |
+| Post-logout redirect URI | The `logout.post_logout_redirect_uri` in `oidc.json`, for example `https://stream.example.com/?signed_out=1` |
 | Back-channel logout URI | `/oidc/backchannel-logout` on the same origin, for example `https://stream.example.com/api/oidc/backchannel-logout`; the provider must be able to reach it, through the same readiness routing as dashboard traffic. Either setting of "session required" works: a logout with `sid` ends that provider session, one with only `sub` ends all of the account's sessions |
 | Initiate login URI (optional) | `/oidc/initiate` on the same origin, for example `https://stream.example.com/api/oidc/initiate`, when the provider links people into the dashboard |
 

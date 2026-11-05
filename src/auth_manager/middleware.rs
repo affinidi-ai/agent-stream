@@ -48,6 +48,8 @@ const PUBLIC_EXACT_PATHS: &[&str] = &[
     "/api/oidc/initiate",
     "/oidc/backchannel-logout",
     "/api/oidc/backchannel-logout",
+    "/oidc/logout",
+    "/api/oidc/logout",
     "/v1/auth/mode",
     "/api/v1/auth/mode",
 ];
@@ -64,6 +66,8 @@ const CONSENT_PENDING_PATHS: &[&str] = &[
     "/api/auth/logout",
     "/saml/logout",
     "/api/saml/logout",
+    "/oidc/logout",
+    "/api/oidc/logout",
 ];
 
 /// Public prefixes for endpoints that authenticate on their own terms and take
@@ -842,6 +846,7 @@ mod tests {
             .route("/oidc/callback", get(ok_handler))
             .route("/oidc/initiate", get(ok_handler))
             .route("/oidc/backchannel-logout", get(ok_handler))
+            .route("/oidc/logout", get(ok_handler))
             .route("/saml/admin", get(ok_handler))
             .route("/v1/auth/mode", get(ok_handler))
             .route("/v1/terms/provider-health", get(ok_handler))
@@ -1069,6 +1074,7 @@ mod tests {
             "/oidc/callback",
             "/oidc/initiate",
             "/oidc/backchannel-logout",
+            "/oidc/logout",
             "/v1/auth/mode",
             "/v1/terms/provider-health",
             "/v1/alive",

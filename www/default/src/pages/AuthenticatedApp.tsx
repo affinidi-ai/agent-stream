@@ -160,7 +160,11 @@ const AppContent: React.FC<AuthenticatedAppProps> = ({ onLogout, termsEnabled })
   }, []);
 
   const handleLogout = () =>
-    sessionManager.logout(() => actions.disconnectWebSocket()).then(() => onLogout());
+    sessionManager
+      .signOut(() => actions.disconnectWebSocket())
+      .then(leaving => {
+        if (!leaving) onLogout();
+      });
 
   // Add body class for sidebar state
   useEffect(() => {

@@ -54,13 +54,37 @@ pub struct RemovedSessions {
 
 /// The OpenID provider sign-in a session came from, so a logout from that
 /// provider can find the session: the provider, the account (`sub`), and the
-/// provider's own session id (`sid`) when its ID token carried one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// provider's own session id (`sid`) when its ID token carried one. The ID
+/// token is kept only to name the sign-in when the dashboard asks the
+/// provider to sign the person out (`id_token_hint`).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OidcSessionBinding {
     pub issuer: String,
     pub subject: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+}
+
+impl std::fmt::Debug for OidcSessionBinding {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        f.debug_struct("OidcSessionBinding")
+            .field("issuer", &self.issuer)
+            .field("subject", &self.subject)
+            .field("sid", &self.sid)
+            .field(
+                "id_token",
+                &self
+                    .id_token
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl StorableEntity for Session {
@@ -745,5 +769,19 @@ mod tests {
                 .is_some(),
             "unrelated session must not be affected"
         );
+    }
+
+    #[test]
+    fn a_session_binding_never_shows_its_id_token_in_debug_output() {
+        let binding = OidcSessionBinding {
+            issuer: "https://idp.example.com".to_string(),
+            subject: "user-1".to_string(),
+            sid: Some("s1".to_string()),
+            id_token: Some("eyJ.secret.token".to_string()),
+        };
+
+        let shown = format!("{binding:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("<redacted>") && shown.contains("user-1"), "{shown}");
     }
 }

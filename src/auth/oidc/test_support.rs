@@ -150,6 +150,7 @@ pub fn metadata_for(issuer: &str) -> ProviderMetadata {
         id_token_signing_alg_values_supported: None,
         code_challenge_methods_supported: Some(vec!["S256".to_string()]),
         backchannel_logout_supported: Some(true),
+        end_session_endpoint: Some(format!("{issuer}/logout")),
     }
 }
 
@@ -162,6 +163,7 @@ pub struct TokenRequest {
 
 struct StubState {
     issuer: String,
+    end_session: bool,
     jwks: Value,
     jwks_fetches: usize,
     discovery_fetches: usize,
@@ -185,6 +187,7 @@ impl StubProvider {
         let issuer = format!("http://{}", listener.local_addr().unwrap());
         let state = Arc::new(Mutex::new(StubState {
             issuer: issuer.clone(),
+            end_session: true,
             jwks: json!({ "keys": [jwk(KEY_A_KID, KEY_A_X, KEY_A_Y)] }),
             jwks_fetches: 0,
             discovery_fetches: 0,
@@ -295,6 +298,14 @@ impl StubProvider {
             .token_answer = (status, body);
     }
 
+    /// Publish no `end_session_endpoint` in discovery.
+    pub fn without_end_session(&self) {
+        self.state
+            .lock()
+            .unwrap()
+            .end_session = false;
+    }
+
     pub fn token_requests(&self) -> Vec<TokenRequest> {
         self.state
             .lock()
@@ -305,27 +316,28 @@ impl StubProvider {
 }
 
 async fn discovery(State(state): State<Arc<Mutex<StubState>>>) -> (StatusCode, Json<Value>) {
-    let issuer = {
+    let (issuer, end_session) = {
         let mut state = state.lock().unwrap();
         state.discovery_fetches += 1;
         if state.discovery_down {
             return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
         }
-        state.issuer.clone()
+        (state.issuer.clone(), state.end_session)
     };
-    (
-        StatusCode::OK,
-        Json(json!({
-            "issuer": issuer,
-            "authorization_endpoint": format!("{issuer}/authorize"),
-            "token_endpoint": format!("{issuer}/token"),
-            "jwks_uri": format!("{issuer}/jwks"),
-            "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
-            "id_token_signing_alg_values_supported": ["ES256"],
-            "backchannel_logout_supported": true,
-        })),
-    )
+    let mut document = json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/authorize"),
+        "token_endpoint": format!("{issuer}/token"),
+        "jwks_uri": format!("{issuer}/jwks"),
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+        "id_token_signing_alg_values_supported": ["ES256"],
+        "backchannel_logout_supported": true,
+    });
+    if end_session {
+        document["end_session_endpoint"] = json!(format!("{issuer}/logout"));
+    }
+    (StatusCode::OK, Json(document))
 }
 
 async fn jwks(State(state): State<Arc<Mutex<StubState>>>) -> Json<Value> {
