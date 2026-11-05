@@ -28,6 +28,13 @@ deleted or demoted. Later passkey registrations start as `user` with status `New
 need an administrator's approval (`users.approve`). A user who is not approved is refused
 on every protected route, with a session or with an access token.
 
+With single sign-on, the identity provider assigns roles. SAML sets each user's role from
+`saml.json` `role_mapping` at every sign-in, except the first user's, who is the primary
+`administrator`. OIDC sets every user's role from `oidc.json` `role_mapping` at every sign-in,
+raising or lowering it, and has no primary administrator: administrators come only from the
+mapping. In both, an administrator's role change for such a user lasts until that user next
+signs in. See [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md).
+
 ![The Edit User form: the user's role set to Power User, and the status choices New (awaiting approval), Approved (can sign in), and Disabled (cannot sign in)](assets/diagrams/screenshot-rbac-user-role-status.png)
 
 ## Configuration

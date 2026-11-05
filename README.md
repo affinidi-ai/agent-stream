@@ -230,7 +230,7 @@ and cloud boundaries, not only inside one deployment.
 | Identity | W3C Decentralized Identifiers, with `did:webvh`, `did:web`, `did:peer`, and `did:key` |
 | Credentials | W3C Verifiable Credentials and Verifiable Presentations |
 | Messaging | DIDComm v2, including Out Of Band invitations |
-| Authentication | OAuth 2.0 and OpenID Connect, JWT, mutual TLS, WebAuthn passkeys, SAML |
+| Authentication | OAuth 2.0 and OpenID Connect (also for dashboard sign-in), JWT, mutual TLS, WebAuthn passkeys, SAML |
 | Observability | OpenTelemetry, Prometheus |
 
 The Affinidi technology stack adheres to open standards from the W3C, the Decentralized

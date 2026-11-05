@@ -53,6 +53,18 @@ pub struct UserData {
     /// SAML user ID (for SAML-authenticated users)
     #[serde(default)]
     pub saml_id: Option<String>,
+
+    /// The OpenID provider account this user signs in with (OIDC mode)
+    #[serde(default)]
+    pub oidc: Option<OidcIdentity>,
+}
+
+/// An account at an OpenID provider: its issuer and the subject (`sub`) it
+/// gave the account. Together they identify the person; email never does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OidcIdentity {
+    pub issuer: String,
+    pub subject: String,
 }
 
 impl StorableEntity for UserData {
@@ -181,6 +193,7 @@ impl PasskeyStorage {
             avatar_path: Some("avatars/default.png".to_string()),
             last_logged_in: None,
             saml_id: None,
+            oidc: None,
         };
         Ok(user_data)
     }
@@ -316,6 +329,20 @@ impl PasskeyStorage {
         Ok(users
             .into_iter()
             .find(|u| u.saml_id.as_deref() == Some(saml_id)))
+    }
+
+    /// Load the user signed in with this OpenID provider account (scans in-memory cache)
+    pub async fn load_user_by_oidc_identity(
+        &self,
+        identity: &OidcIdentity,
+    ) -> Result<Option<UserData>> {
+        let users = self
+            .storage
+            .list_all()
+            .await?;
+        Ok(users
+            .into_iter()
+            .find(|u| u.oidc.as_ref() == Some(identity)))
     }
 }
 

@@ -475,12 +475,13 @@ Teams, and tenant, and refusal events carry the stage and rejection category. Se
 
 ## Management
 
-Everything is managed from a web dashboard, signed into with a passkey or SAML single
-sign-on, and from the same **Management API** the dashboard uses.
+Everything is managed from a web dashboard, signed into with a passkey, or with SAML or OpenID
+Connect single sign-on (OIDC roles come from a claim mapping, refreshed at every sign-in), and
+from the same **Management API** the dashboard uses.
 
 | Capability | Behaviour |
 | --- | --- |
-| Sign-in protection | Each client (one address, or one IPv6 /64) may send 10 sign-in requests a minute (registration, passkey sign-in, SAML sign-in and its response) and 120 sign-in status checks a minute; over that it gets `429` with `Retry-After`, except that a status check from a signed-in dashboard is always answered, so a busy shared address does not sign users out. 10 failed sign-ins (a passkey or SAML response that does not verify) lock that client out of signing in for 15 minutes after the last failure; a malformed request or an unknown or expired challenge does not count. The address is the connection's own, except behind a reverse proxy listed in `tls.client_auth.trusted_proxies`, where it is the rightmost `X-Forwarded-For` hop that is not a listed proxy; from any other peer the header is ignored. A passkey challenge must be completed within 5 minutes, and at most 10,000 are outstanding at once. |
+| Sign-in protection | Each client (one address, or one IPv6 /64) may send 10 sign-in requests a minute (registration, passkey sign-in, SAML or OIDC sign-in and its response) and 120 sign-in status checks a minute; over that it gets `429` with `Retry-After`, except that a status check from a signed-in dashboard is always answered, so a busy shared address does not sign users out. 10 failed sign-ins (a passkey, SAML response or OIDC callback that does not verify) lock that client out of signing in for 15 minutes after the last failure; a malformed request or an unknown or expired challenge does not count. The address is the connection's own, except behind a reverse proxy listed in `tls.client_auth.trusted_proxies`, where it is the rightmost `X-Forwarded-For` hop that is not a listed proxy; from any other peer the header is ignored. A passkey challenge must be completed within 5 minutes, and at most 10,000 are outstanding at once. |
 | Roles | Administrator, power user, and user, checked on every Management API call. Permissions such as viewing attributed metrics, reading Governance Records, and making a policy global are separate from the broader view and edit permissions. |
 | Management PATs | Long-lived bearer tokens for automation, bound to a user. A token never has more authority than the user's role. |
 | Resource scope and tenants | A PAT can be narrowed to a resource pattern and a validated tenant header, so it manages its own tenant's records and can reach only appliance-global ones besides. Tenants divide management, not traffic. |

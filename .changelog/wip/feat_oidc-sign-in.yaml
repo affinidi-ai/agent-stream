@@ -1,0 +1,28 @@
+branch: feat/oidc-sign-in
+changes:
+  added:
+    - timestamp: '2026-11-05T04:46:00.000Z'
+      title: ⭐ Sign in to the dashboard with any OpenID Connect provider
+      description: >-
+        A new sign-in mode, auth_mode = "oidc", signs dashboard users in with one OpenID
+        provider configured in oidc.json, using the authorization code flow with PKCE, a
+        nonce and a browser-binding cookie. The ID token is fully verified, its signature
+        included, against the provider's published keys. Users are created on first sign-in,
+        identified by the provider account (issuer and sub) and never by email. A claim
+        mapping (role_mapping, a string or array claim) sets each user's role at every
+        sign-in, raising or lowering it, and refuses unmapped accounts by default;
+        required_claims binds the deployment to one tenant at the provider, matching string
+        or boolean claims such as email_verified. Values in both may be regex: patterns, for
+        example every address at one email domain, and an exact entry overrides a pattern.
+        The client secret is a secret reference and is never written into the file.
+  changed: []
+  fixed:
+    - timestamp: '2026-11-05T04:47:00.000Z'
+      title: Raise the user login integration event for SAML sign-ins
+      description: >-
+        SAML sign-in never received the notification store, so a SAML sign-in did not
+        trigger the user.login integration event that a passkey sign-in triggers. Both now
+        do, and so does OIDC sign-in.
+  removed: []
+  security: []
+  breaking: []

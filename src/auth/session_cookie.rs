@@ -74,11 +74,65 @@ pub(crate) fn clear_saml_correlation_cookie() -> String {
     cookie.encoded().to_string()
 }
 
+/// Name of the OIDC binding cookie, holding the `state` of the sign-in this
+/// browser started. Like the SAML correlation cookie, the `__Host-` prefix
+/// stops a sibling subdomain from planting one.
+pub(crate) const OIDC_STATE_COOKIE_NAME: &str = "__Host-oidc_state";
+
+/// Cookie binding a browser to the OIDC sign-in it started, so a callback URL
+/// captured from one browser cannot complete a sign-in in another (login
+/// CSRF). The provider sends the browser back with a cross-site top-level
+/// `GET`, on which a `Lax` cookie is sent and a `Strict` one is not.
+pub(crate) fn build_oidc_state_cookie(
+    state: &str,
+    max_age: u64,
+) -> String {
+    Cookie::build((OIDC_STATE_COOKIE_NAME, state))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(Duration::seconds(max_age.min(i64::MAX as u64) as i64))
+        .build()
+        .encoded()
+        .to_string()
+}
+
+/// Expire the OIDC binding cookie, with the attributes it was set with.
+pub(crate) fn clear_oidc_state_cookie() -> String {
+    let mut cookie = Cookie::build((OIDC_STATE_COOKIE_NAME, ""))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .build();
+    cookie.make_removal();
+    cookie.encoded().to_string()
+}
+
+/// The value of the cookie `name` on a request, read verbatim (the values
+/// these helpers set are URL-safe, so cookie encoding leaves them unchanged).
+pub(crate) fn request_cookie(
+    headers: &axum::http::HeaderMap,
+    name: &str,
+) -> Option<String> {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|pair| {
+            let (cookie_name, value) = pair.split_once('=')?;
+            (cookie_name.trim() == name).then(|| value.trim().to_string())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SAML_CORRELATION_COOKIE_NAME, SESSION_COOKIE_NAME, build_saml_correlation_cookie, build_session_cookie,
-        clear_saml_correlation_cookie, clear_session_cookie,
+        OIDC_STATE_COOKIE_NAME, SAML_CORRELATION_COOKIE_NAME, SESSION_COOKIE_NAME, build_oidc_state_cookie,
+        build_saml_correlation_cookie, build_session_cookie, clear_oidc_state_cookie, clear_saml_correlation_cookie,
+        clear_session_cookie, request_cookie,
     };
     use cookie::time::{Duration, OffsetDateTime};
     use cookie::{Cookie, SameSite};
@@ -159,5 +213,49 @@ mod tests {
                 .expires_datetime()
                 .is_some_and(|expires| expires <= OffsetDateTime::now_utc())
         );
+    }
+
+    #[test]
+    fn the_oidc_state_cookie_satisfies_host_prefix_rules_and_survives_the_return_trip() {
+        let cookie = Cookie::parse(build_oidc_state_cookie("state-123", 600)).unwrap();
+
+        assert_eq!(cookie.name(), OIDC_STATE_COOKIE_NAME);
+        assert_eq!(cookie.value(), "state-123");
+        assert_eq!(cookie.path(), Some("/"));
+        assert_eq!(cookie.domain(), None);
+        assert_eq!(cookie.secure(), Some(true));
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax), "sent on the provider's cross-site redirect back");
+        assert_eq!(cookie.max_age(), Some(Duration::seconds(600)));
+
+        let cleared = Cookie::parse(clear_oidc_state_cookie()).unwrap();
+        assert_eq!(cleared.name(), OIDC_STATE_COOKIE_NAME);
+        assert_eq!(cleared.value(), "");
+        assert_eq!(cleared.path(), Some("/"));
+        assert_eq!(cleared.secure(), Some(true));
+        assert_eq!(cleared.same_site(), Some(SameSite::Lax));
+        assert_eq!(cleared.max_age(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn request_cookie_finds_one_cookie_among_several_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(
+            axum::http::header::COOKIE,
+            "a=1; session_token=s"
+                .parse()
+                .unwrap(),
+        );
+        headers.append(
+            axum::http::header::COOKIE,
+            "__Host-oidc_state=st ; b=2"
+                .parse()
+                .unwrap(),
+        );
+
+        assert_eq!(request_cookie(&headers, OIDC_STATE_COOKIE_NAME).as_deref(), Some("st"));
+        assert_eq!(request_cookie(&headers, "b").as_deref(), Some("2"));
+        assert_eq!(request_cookie(&headers, "oidc_state"), None, "names match exactly");
+        assert_eq!(request_cookie(&axum::http::HeaderMap::new(), "a"), None);
     }
 }
