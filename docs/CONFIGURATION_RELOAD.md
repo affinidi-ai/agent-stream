@@ -153,7 +153,7 @@ Read once and held for the life of the process:
 
 - All of `config.toml`, including `server_mode`, `cache_refresh_interval_secs`, `[encryption]`,
   `[tls]`, `[surface_defaults]`, `[tenancy]`, `[did_cache]` and every path.
-- `rbac.json`, `limits.json`, `saml.json`, `prompt-guard.json` and `audio_streams.json`.
+- `rbac.json`, `limits.json`, `saml.json`, `oidc.json`, `prompt-guard.json` and `audio_streams.json`.
 - `llm.json` in the configuration directory, which only seeds the stored catalog.
 - `surface_templates/` and `defaults/`, which are seeded at startup.
 - The `agent-stream.json` settings listed under [`POST /api/v1/config/reload`](#post-apiv1configreload).

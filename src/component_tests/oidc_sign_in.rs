@@ -483,7 +483,7 @@ async fn a_token_endpoint_that_is_gone_has_the_discovery_document_fetched_again(
 
         let response = flow.callback(&started).await;
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{status}");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{status}");
         flow.start().await;
         assert_eq!(
             flow.provider
@@ -502,8 +502,41 @@ async fn an_id_token_for_another_sign_in_is_refused() {
         .sign_in(|claims| claims["nonce"] = json!("another-sign-ins-nonce"))
         .await;
 
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_GATEWAY,
+        "the provider's token did not verify, which the caller cannot cause"
+    );
     assert!(flow.user().await.is_none());
+}
+
+#[tokio::test]
+async fn a_token_endpoint_refusing_this_client_is_a_server_fault() {
+    let flow = Flow::new().await;
+    let started = flow.start().await;
+    flow.provider
+        .answer_token_requests(StatusCode::UNAUTHORIZED, json!({ "error": "invalid_client" }));
+
+    let response = flow.callback(&started).await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn a_callback_without_a_code_is_a_bad_request() {
+    let flow = Flow::new().await;
+    let started = flow.start().await;
+
+    let response = flow
+        .get(&format!("/oidc/callback?state={}", started.state), Some(&started.cookie))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        flow.provider
+            .token_requests()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

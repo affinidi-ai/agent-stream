@@ -408,8 +408,8 @@ changed base URL. `connect-src` admits any `https` or `wss` origin, because the 
 sandboxes call operator-configured identity providers and Access Points on other hosts.
 
 Two server-rendered pages run an inline script and send their own policy, allowing only that
-script by a per-response nonce: the SAML sign-in page that hands the session to the dashboard
-([`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md#saml-sign-in)) and the page a delegated OAuth
+script by a per-response nonce: the SAML and OIDC sign-in page that hands the session to the
+dashboard ([`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md#saml-sign-in)) and the page a delegated OAuth
 grant ends on. An uploaded image keeps its stricter `default-src 'none'; sandbox`.
 
 ## Policy-decision audit

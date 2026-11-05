@@ -106,10 +106,11 @@ pub async fn provision_user_from_oidc(
             crate::config::global_limits()
                 .check_can_add("users", user_count)
                 .map_err(ProvisionRefusal::UserLimit)?;
-            info!(username = %username, role = %role, "Creating a user for a new OIDC account");
+            let user_id = uuid::Uuid::new_v4().to_string();
+            info!(user_id = %user_id, role = %role, "Creating a user for a new OIDC account");
             Provisioned {
                 user: UserData {
-                    user_id: uuid::Uuid::new_v4().to_string(),
+                    user_id,
                     username,
                     passkeys: Vec::new(),
                     role,

@@ -3847,4 +3847,102 @@ mod auth_throttle_route_tests {
 
         assert_auth_check_throttled(&app, "192.0.2.53:5000").await;
     }
+
+    fn retry_after(response: &axum::response::Response) -> u64 {
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_oidc_callbacks_whose_code_was_refused_count_toward_the_lockout() {
+        use crate::auth::oidc::test_support::{StubProvider, config_for};
+
+        let provider = StubProvider::start().await;
+        let _allowed = crate::url_validation::test_service_endpoints::allow(&[
+            provider.discovery_url(),
+            provider.token_endpoint(),
+            provider.jwks_uri(),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| {
+            dir.path()
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let sessions = Arc::new(crate::auth::SessionManager::new());
+        let oidc = Arc::new(
+            crate::auth::oidc::OidcState::new(
+                config_for(&provider.issuer),
+                Arc::new(
+                    crate::auth::storage::PasskeyStorage::new(path("users"), path("avatars"))
+                        .await
+                        .unwrap(),
+                ),
+                sessions.clone(),
+                Arc::new(crate::terms::TermsManager::disabled()),
+            )
+            .unwrap(),
+        );
+        let app = oidc_auth_routes(oidc, sessions);
+
+        let unbound = "192.0.2.61:5000";
+        for _ in 0..SIGN_IN_REQUESTS_PER_WINDOW {
+            assert_eq!(
+                status(&app, request("GET", "/oidc/callback?code=c&state=unknown", unbound, None)).await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let limited = app
+            .clone()
+            .oneshot(request("GET", "/oidc/callback?code=c&state=unknown", unbound, None))
+            .await
+            .unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry_after(&limited) <= 60, "rate limited, not locked out");
+
+        let starter = "192.0.2.62:5000";
+        let refused = "192.0.2.63:5000";
+        for _ in 0..SIGN_IN_REQUESTS_PER_WINDOW {
+            let started = app
+                .clone()
+                .oneshot(request("GET", "/oidc/login", starter, None))
+                .await
+                .unwrap();
+            let location = url::Url::parse(
+                started
+                    .headers()
+                    .get(axum::http::header::LOCATION)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let state = location
+                .query_pairs()
+                .find(|(name, _)| name == "state")
+                .unwrap()
+                .1
+                .into_owned();
+            let mut callback = request("GET", &format!("/oidc/callback?code=c&state={state}"), refused, None);
+            callback.headers_mut().insert(
+                axum::http::header::COOKIE,
+                format!("__Host-oidc_state={state}")
+                    .parse()
+                    .unwrap(),
+            );
+            assert_eq!(status(&app, callback).await, StatusCode::UNAUTHORIZED, "invalid_grant");
+        }
+        let locked = app
+            .clone()
+            .oneshot(request("GET", "/oidc/callback?code=c&state=unknown", refused, None))
+            .await
+            .unwrap();
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry_after(&locked) > 60, "locked out after refused codes");
+    }
 }

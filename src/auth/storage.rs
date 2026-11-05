@@ -447,6 +447,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_user_stored_before_oidc_sign_in_still_loads() {
+        let mut stored = serde_json::to_value(user("u1")).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("oidc");
+
+        let loaded: UserData = serde_json::from_value(stored).unwrap();
+
+        assert_eq!(loaded.user_id, "u1");
+        assert!(loaded.oidc.is_none());
+    }
+
     #[tokio::test]
     async fn missing_user_is_not_approved() {
         let temp_dir = tempdir().unwrap();

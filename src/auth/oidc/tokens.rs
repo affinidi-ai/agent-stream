@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 
 use super::config::OidcConfig;
 use crate::jwt_bearer::JwksClient;
+use crate::jwt_bearer::errors::JwtBearerError;
 
 /// The JWKS cache entry the provider's keys are kept under.
 const JWKS_CACHE_KEY: &str = "oidc-login";
@@ -22,22 +23,42 @@ pub struct VerifiedIdToken {
     pub claims: Map<String, Value>,
 }
 
+/// Why an ID token was not accepted. The detail names the check that failed,
+/// for the log; it never contains the token.
+#[derive(Debug)]
+pub enum IdTokenFailure {
+    /// The provider's published keys could not be fetched.
+    KeysUnavailable(String),
+    /// The token did not pass a check.
+    Invalid(String),
+}
+
+impl std::fmt::Display for IdTokenFailure {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Self::KeysUnavailable(detail) | Self::Invalid(detail) => f.write_str(detail),
+        }
+    }
+}
+
 /// Verify an ID token from the token endpoint, issued for the sign-in whose
-/// nonce is `expected_nonce`. The error names the check that failed, for the
-/// log; it never contains the token.
+/// nonce is `expected_nonce`.
 pub async fn verify_id_token(
     token: &str,
     config: &OidcConfig,
     jwks: &JwksClient,
     jwks_uri: &str,
     expected_nonce: &str,
-) -> Result<VerifiedIdToken, String> {
-    let header = decode_header(token).map_err(|e| format!("unreadable header: {e}"))?;
+) -> Result<VerifiedIdToken, IdTokenFailure> {
+    let header = decode_header(token).map_err(|e| IdTokenFailure::Invalid(format!("unreadable header: {e}")))?;
     if !config
         .id_token_signing_algs
         .contains(&header.alg)
     {
-        return Err(format!("algorithm {:?} is not in id_token_signing_algs", header.alg));
+        return Err(IdTokenFailure::Invalid(format!("algorithm {:?} is not in id_token_signing_algs", header.alg)));
     }
     let jwk = jwks
         .get_key(
@@ -49,17 +70,27 @@ pub async fn verify_id_token(
                 .unwrap_or_default(),
         )
         .await
-        .map_err(|e| format!("signing key unavailable: {e}"))?;
+        .map_err(|e| match e {
+            JwtBearerError::KeyNotFound(_) => IdTokenFailure::Invalid(format!("no published key matches: {e}")),
+            _ => IdTokenFailure::KeysUnavailable(format!("signing key unavailable: {e}")),
+        })?;
     if let Some(key_alg) = &jwk.alg
         && key_alg
             .parse::<Algorithm>()
             .ok()
             != Some(header.alg)
     {
-        return Err(format!("the signing key is for {key_alg}, not {:?}", header.alg));
+        return Err(IdTokenFailure::Invalid(format!("the signing key is for {key_alg}, not {:?}", header.alg)));
     }
-    let key =
-        crate::jwt_bearer::validator::decoding_key_from_jwk(&jwk).map_err(|e| format!("signing key unusable: {e}"))?;
+    if jwk
+        .key_use
+        .as_deref()
+        .is_some_and(|key_use| key_use != "sig")
+    {
+        return Err(IdTokenFailure::Invalid("the signing key is not published for signatures".to_string()));
+    }
+    let key = crate::jwt_bearer::validator::decoding_key_from_jwk(&jwk)
+        .map_err(|e| IdTokenFailure::Invalid(format!("signing key unusable: {e}")))?;
 
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&config.issuer]);
@@ -67,10 +98,10 @@ pub async fn verify_id_token(
     validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
     validation.leeway = LEEWAY_SECS;
     let claims = decode::<Map<String, Value>>(token, &key, &validation)
-        .map_err(|e| format!("{e}"))?
+        .map_err(|e| IdTokenFailure::Invalid(format!("{e}")))?
         .claims;
 
-    check_claims(&claims, config, expected_nonce, chrono::Utc::now().timestamp())?;
+    check_claims(&claims, config, expected_nonce, chrono::Utc::now().timestamp()).map_err(IdTokenFailure::Invalid)?;
     let subject = claims
         .get("sub")
         .and_then(Value::as_str)
@@ -137,7 +168,9 @@ mod tests {
         token: &str,
     ) -> Result<VerifiedIdToken, String> {
         let config = config_for(&provider.issuer);
-        verify_id_token(token, &config, &provider.jwks_client(), &provider.jwks_uri(), "nonce-1").await
+        verify_id_token(token, &config, &provider.jwks_client(), &provider.jwks_uri(), "nonce-1")
+            .await
+            .map_err(|failure| failure.to_string())
     }
 
     #[tokio::test]
@@ -207,6 +240,45 @@ mod tests {
             .unwrap_err();
 
         assert!(refused.contains("the signing key is for ES384"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_key_published_for_encryption_is_refused() {
+        let provider = StubProvider::start().await;
+        let mut key = provider.jwk_a_with_alg("ES256");
+        key["use"] = json!("enc");
+        provider.set_jwks(json!({ "keys": [key] }));
+        let token = provider.id_token(id_token_claims(&provider.issuer, "nonce-1"));
+
+        let refused = verify(&provider, &token)
+            .await
+            .unwrap_err();
+
+        assert!(refused.contains("not published for signatures"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn keys_that_cannot_be_fetched_are_told_apart_from_a_token_that_does_not_verify() {
+        let provider = StubProvider::start().await;
+        let config = config_for(&provider.issuer);
+        let token = provider.id_token(id_token_claims(&provider.issuer, "nonce-1"));
+
+        let unavailable = verify_id_token(
+            &token,
+            &config,
+            &provider.jwks_client(),
+            &format!("{}/no-such-jwks", provider.issuer),
+            "nonce-1",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(unavailable, IdTokenFailure::KeysUnavailable(_)), "{unavailable:?}");
+
+        let unknown_key = sign(KEY_B_PEM, Some(KEY_B_KID), &id_token_claims(&provider.issuer, "nonce-1"));
+        let invalid = verify_id_token(&unknown_key, &config, &provider.jwks_client(), &provider.jwks_uri(), "nonce-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(invalid, IdTokenFailure::Invalid(_)), "{invalid:?}");
     }
 
     #[tokio::test]

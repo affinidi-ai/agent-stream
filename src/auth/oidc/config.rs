@@ -174,11 +174,16 @@ impl ValueMatcher {
         let Some(pattern) = text.strip_prefix(REGEX_PREFIX) else {
             return Ok(Self::Exact(text.to_string()));
         };
-        regex::RegexBuilder::new(&format!("^(?:{pattern})$"))
-            .size_limit(MAX_PATTERN_SIZE)
-            .build()
-            .map(Self::Regex)
-            .map_err(|e| format!("{field}: {text} is not a usable regular expression: {e}"))
+        let build = |pattern: &str| {
+            regex::RegexBuilder::new(pattern)
+                .size_limit(MAX_PATTERN_SIZE)
+                .build()
+                .map_err(|e| format!("{field}: {text} is not a usable regular expression: {e}"))
+        };
+        // Compiled alone first: a pattern such as `a)|(b` would otherwise close
+        // the anchoring group and match part of a value.
+        build(pattern)?;
+        build(&format!("^(?:{pattern})$")).map(Self::Regex)
     }
 
     /// Whether a claim value from a token matches.
@@ -804,9 +809,16 @@ mod tests {
         assert!(config.required_claims["email"][0].matches_str("x@affinidi.com"));
         assert!(!config.required_claims["email"][0].matches_str("x@affinidi.com.evil.example"), "the whole value");
 
+        let config = load(with(valid_file(), &["required_claims"], json!({ "email": ["regex:a|b"] })))
+            .await
+            .unwrap();
+        assert!(config.required_claims["email"][0].matches_str("b"));
+        assert!(!config.required_claims["email"][0].matches_str("ab"), "an alternation stays anchored");
+
         for (path, value) in [
             (&["role_mapping", "values"][..], json!({ "regex:(unclosed": "user" })),
             (&["required_claims"][..], json!({ "email": ["regex:[a-"] })),
+            (&["required_claims"][..], json!({ "email": ["regex:x)|(.*"] })),
         ] {
             let refused = load(with(valid_file(), path, value))
                 .await
