@@ -20,11 +20,11 @@ channel_config_source = "local"
 # Secrets backend type: only "filesystem" is supported
 secrets_backend = "filesystem"
 
-# Authentication mode (passkey or saml)
-# Options: "passkey" or "saml"
+# Authentication mode (passkey, saml or oidc)
+# Options: "passkey", "saml" or "oidc"
 auth_mode = "passkey"
 
-# Session timeout in minutes (applies to both passkey and SAML)
+# Session timeout in minutes (applies to every authentication mode)
 session_timeout_minutes = 20
 
 # Require authentication for WebSocket connections (default: true)
@@ -132,6 +132,7 @@ rbac = "rbac.json"
 limits = "limits.json"
 llm = "llm.json"
 saml = "saml.json"
+oidc = "oidc.json"
 prompt_guard = "prompt-guard.json"
 marketplace_models = "marketplace-models.json"
 # Optional override of the built-in rejection taxonomy

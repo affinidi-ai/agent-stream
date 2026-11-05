@@ -31,6 +31,7 @@ directory holding `config.toml`.
 | [`limits.example.json`](limits.example.json) | `limits.json` | Ceilings on how many records of each kind may exist. Its values are small (for example 5 LLM Surfaces, 3 Teams, 1 gateway); without the file nothing is limited. | No |
 | [`llm.example.json`](llm.example.json) | `llm.json` | Seed for the Model catalog. Copied once into `storage_paths.llm_configuration` on first start; the stored copy is authoritative afterwards. | Yes |
 | [`saml.example.json`](saml.example.json) | `saml.json` | SAML identity provider. Read only when `auth_mode = "saml"`. | Yes |
+| [`oidc.example.json`](oidc.example.json) | `oidc.json` | OpenID provider, client and role mapping. Read only when `auth_mode = "oidc"`. | No |
 | [`prompt-guard.example.json`](prompt-guard.example.json) | `prompt-guard.json` | Built-in Prompt Guard pattern definitions. | Yes |
 | [`rejection_categories.example.json`](rejection_categories.example.json) | `rejection_categories.json` | Rejection-reason taxonomy. Optional: the same content is compiled in and used when the file is absent or invalid. | No |
 | [`audio_streams.example.json`](audio_streams.example.json) | `audio_streams.json` | Catalog of voice filler clips for the realtime relay. | No |
@@ -54,8 +55,8 @@ that `config.toml` names in `[storage_paths]`.
 ## Secrets and placeholders
 
 Agent Stream does not substitute placeholders. Tokens such as `YOUR_DOMAIN` in
-`agent-stream.example.json`, and `$AZURE_TENANT` and `XXXXXXXX` in `saml.example.json`, are
-literal text until you replace them. (`$VARIABLE` in the integration pattern description and
+`agent-stream.example.json`, `$AZURE_TENANT` and `XXXXXXXX` in `saml.example.json`, and
+`YOUR_PROVIDER`, `YOUR_CLIENT_ID` and `YOUR_ORG_ID` in `oidc.example.json`, are literal text until you replace them. (`$VARIABLE` in the integration pattern description and
 `$SURFACE_NAME`-style tokens in Surface templates are filled at run time by those features,
 not by configuration loading.)
 
@@ -63,10 +64,10 @@ Where a setting accepts a secret reference, these schemes resolve at startup:
 
 | Scheme | Resolves to | Accepted by |
 | --- | --- | --- |
-| `env://NAME` | An environment variable | `backup_encryption_key`, `legacy_backup_encryption_keys`, and the `AS_IDENTITY_HASH_PEPPER` and `AS_PRINCIPAL_KEY_SECRET` values |
+| `env://NAME` | An environment variable | `backup_encryption_key`, `legacy_backup_encryption_keys`, `oidc.json` `client_secret`, and the `AS_IDENTITY_HASH_PEPPER` and `AS_PRINCIPAL_KEY_SECRET` values |
 | `file://PATH` | A file's contents | The same settings |
-| `aws_secrets://NAME` | An AWS Secrets Manager secret | `AS_IDENTITY_HASH_PEPPER` and `AS_PRINCIPAL_KEY_SECRET` only |
-| `aws_parameter_store://NAME` | An AWS Systems Manager parameter | `AS_IDENTITY_HASH_PEPPER` and `AS_PRINCIPAL_KEY_SECRET` only |
+| `aws_secrets://NAME` | An AWS Secrets Manager secret | `oidc.json` `client_secret`, and `AS_IDENTITY_HASH_PEPPER` and `AS_PRINCIPAL_KEY_SECRET` |
+| `aws_parameter_store://NAME` | An AWS Systems Manager parameter | `oidc.json` `client_secret`, and `AS_IDENTITY_HASH_PEPPER` and `AS_PRINCIPAL_KEY_SECRET` |
 | `string://VALUE` | A literal value | `AS_IDENTITY_HASH_PEPPER` and `AS_PRINCIPAL_KEY_SECRET` only |
 
 A value with no scheme is taken literally. `config.example.toml` sets
@@ -78,6 +79,6 @@ variable holds a 64-character hex key. Other fields, such as `saml.json`
 The examples here are the only copies meant to be committed. `envs/` and `_storage` are
 ignored entirely, and [`.gitignore`](../../.gitignore) also ignores `config.toml`, `saml.json`,
 `llm.json`, `metrics.json` and `rbac.json` anywhere in the tree.
-`agent-stream.json`, `limits.json`, `prompt-guard.json`, `rejection_categories.json` and
-`audio_streams.json` are not ignored outside `envs/`, so keep a deployment's copies out of the
+`agent-stream.json`, `limits.json`, `oidc.json`, `prompt-guard.json`, `rejection_categories.json`
+and `audio_streams.json` are not ignored outside `envs/`, so keep a deployment's copies out of the
 repository.

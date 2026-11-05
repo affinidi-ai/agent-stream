@@ -144,6 +144,32 @@ pub fn proxy_with_timeout(timeout: Duration) -> Result<reqwest::Client> {
         .context("Failed to build proxy HTTP client")
 }
 
+/// Read at most `limit` bytes of a response body, refusing a longer one
+/// (declared or streamed) rather than buffering it.
+pub(crate) async fn read_capped(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > limit as u64)
+    {
+        return Err(format!("response exceeds the {limit} byte limit"));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("failed to read response body: {e}"))?
+    {
+        if body.len() + chunk.len() > limit {
+            return Err(format!("response exceeds the {limit} byte limit"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +247,25 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
         assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1, "the redirect must not be followed");
+    }
+
+    fn response(body: &'static str) -> reqwest::Response {
+        reqwest::Response::from(axum::http::Response::new(body))
+    }
+
+    #[tokio::test]
+    async fn read_capped_keeps_a_body_within_the_limit() {
+        let body = read_capped(response(r#"{"providers":[]}"#), 64)
+            .await
+            .unwrap();
+        assert_eq!(body, br#"{"providers":[]}"#);
+    }
+
+    #[tokio::test]
+    async fn read_capped_refuses_a_body_past_the_limit() {
+        let error = read_capped(response("0123456789"), 4)
+            .await
+            .unwrap_err();
+        assert!(error.contains("4 byte limit"), "{error}");
     }
 }

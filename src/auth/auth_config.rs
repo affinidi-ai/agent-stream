@@ -13,6 +13,19 @@ pub enum AuthMode {
     Passkey,
     /// SAML 2.0 authentication
     Saml,
+    /// OpenID Connect sign-in with one OpenID provider
+    Oidc,
+}
+
+impl AuthMode {
+    /// The mode's name in `config.toml` and on `/v1/auth/mode`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuthMode::Passkey => "passkey",
+            AuthMode::Saml => "saml",
+            AuthMode::Oidc => "oidc",
+        }
+    }
 }
 
 /// SAML authentication configuration
@@ -142,6 +155,10 @@ pub fn default_avatars_storage_path() -> String {
 
 pub fn default_saml_config_path() -> String {
     "saml.json".to_string()
+}
+
+pub fn default_oidc_config_path() -> String {
+    "oidc.json".to_string()
 }
 
 #[allow(dead_code)]

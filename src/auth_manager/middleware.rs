@@ -40,6 +40,10 @@ const PUBLIC_EXACT_PATHS: &[&str] = &[
     "/api/saml/metadata",
     "/saml/logout",
     "/api/saml/logout",
+    "/oidc/login",
+    "/api/oidc/login",
+    "/oidc/callback",
+    "/api/oidc/callback",
     "/v1/auth/mode",
     "/api/v1/auth/mode",
 ];
@@ -830,6 +834,8 @@ mod tests {
             .route("/saml/login", get(ok_handler))
             .route("/saml/acs", get(ok_handler))
             .route("/saml/metadata", get(ok_handler))
+            .route("/oidc/login", get(ok_handler))
+            .route("/oidc/callback", get(ok_handler))
             .route("/saml/admin", get(ok_handler))
             .route("/v1/auth/mode", get(ok_handler))
             .route("/v1/terms/provider-health", get(ok_handler))
@@ -1053,6 +1059,8 @@ mod tests {
             "/saml/login",
             "/saml/acs",
             "/saml/metadata",
+            "/oidc/login",
+            "/oidc/callback",
             "/v1/auth/mode",
             "/v1/terms/provider-health",
             "/v1/alive",
@@ -1418,6 +1426,7 @@ mod tests {
             updated_at: now,
             last_logged_in: None,
             saml_id: None,
+            oidc: None,
         }
     }
 

@@ -258,6 +258,7 @@ async fn make_storage_with_role(role: UserRole) -> (Arc<PasskeyStorage>, tempfil
             updated_at: now,
             last_logged_in: None,
             saml_id: None,
+            oidc: None,
         })
         .await
         .expect("save user");

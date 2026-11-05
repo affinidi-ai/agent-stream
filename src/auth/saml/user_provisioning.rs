@@ -146,6 +146,7 @@ pub async fn provision_user_from_saml(
             avatar_path: None,
             last_logged_in: Some(now),
             saml_id: Some(user_id_attr.clone()),
+            oidc: None,
         };
 
         info!("SAML user created successfully: {} (role: {:?})", username, final_role);
