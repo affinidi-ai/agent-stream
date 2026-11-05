@@ -8,6 +8,7 @@
 pub mod config;
 pub mod discovery;
 pub mod handlers;
+pub mod initiate;
 pub mod pending;
 pub mod roles;
 #[cfg(test)]
@@ -17,3 +18,4 @@ pub mod user_provisioning;
 
 pub use config::OidcConfig;
 pub use handlers::{OidcState, oidc_callback, oidc_login};
+pub use initiate::oidc_initiate;

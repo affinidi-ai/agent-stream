@@ -14,11 +14,34 @@ fn js_string_literal(s: &str) -> String {
         .replace('&', "\\u0026")
 }
 
+/// Escape text for HTML content or a double-quoted attribute value.
+pub(crate) fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 /// The page that hands a new session to the dashboard and redirects to it, with the policy that lets only its own script run. The token is emitted
 /// as a JS string literal safe for an inline `<script>` (see
 /// [`js_string_literal`]).
-pub(crate) fn login_success_page(session_token: &str) -> (axum::http::HeaderValue, String) {
+///
+/// The page always loads `/`. A `return_path` other than `/` (a path on this
+/// origin the caller has already checked, see `auth::oidc::initiate`) is left
+/// in `post_login_path`, where the dashboard restores a deep link after
+/// sign-in (`www/default/src/utils/postLoginPath.ts`), so only the dashboard's
+/// own router ever opens it.
+pub(crate) fn login_success_page(
+    session_token: &str,
+    return_path: &str,
+) -> (axum::http::HeaderValue, String) {
     let nonce = crate::proxy::security_headers::script_nonce();
+    let post_login_path = if return_path == "/" {
+        String::new()
+    } else {
+        format!("sessionStorage.setItem('post_login_path', {});", js_string_literal(return_path))
+    };
     let html = format!(
         r#"<!DOCTYPE html>
 <html>
@@ -27,6 +50,7 @@ pub(crate) fn login_success_page(session_token: &str) -> (axum::http::HeaderValu
     <meta http-equiv="refresh" content="0;url=/">
     <script nonce="{}">
         sessionStorage.setItem('session_token', {});
+        {post_login_path}
         window.location.href = '/';
     </script>
 </head>
@@ -43,11 +67,7 @@ pub(crate) fn login_success_page(session_token: &str) -> (axum::http::HeaderValu
 /// Render a minimal, self-contained HTML page shown when an SSO sign-in is
 /// refused (e.g. the appliance user limit is reached). The message is HTML-escaped.
 pub(crate) fn sign_in_error_page(message: &str) -> String {
-    let escaped = message
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;");
+    let escaped = html_escape(message);
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -66,11 +86,11 @@ pub(crate) fn sign_in_error_page(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{js_string_literal, login_success_page};
+    use super::{js_string_literal, login_success_page, sign_in_error_page};
 
     #[test]
     fn the_login_page_script_carries_the_nonce_its_policy_allows() {
-        let (csp, html) = login_success_page("tok\"</script><script>alert(1)</script>");
+        let (csp, html) = login_success_page("tok\"</script><script>alert(1)</script>", "/");
         let csp = csp.to_str().unwrap();
         let nonce = csp
             .split("'nonce-")
@@ -87,7 +107,7 @@ mod tests {
         );
         assert!(csp.contains(&format!("script-src 'nonce-{nonce}';")), "only the nonce may run script: {csp}");
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
-        assert_ne!(login_success_page("tok").0, login_success_page("tok").0, "a fresh nonce per page");
+        assert_ne!(login_success_page("tok", "/").0, login_success_page("tok", "/").0, "a fresh nonce per page");
     }
 
     #[test]
@@ -101,5 +121,39 @@ mod tests {
         assert!(!out.contains('<'), "all < escaped: {out}");
         assert!(out.contains("\\u003c"));
         assert!(out.contains("\\\""), "inner quote escaped: {out}");
+    }
+
+    #[test]
+    fn the_login_page_leaves_the_return_path_for_the_dashboard_without_letting_it_escape() {
+        let path = "/surfaces?tab=a&b=\"</script>'";
+        let (_, html) = login_success_page("tok", path);
+
+        assert!(
+            html.contains(&format!("sessionStorage.setItem('post_login_path', {});", js_string_literal(path))),
+            "{html}"
+        );
+        assert!(html.contains(r#"content="0;url=/""#), "the page itself loads only /: {html}");
+        assert!(html.contains("window.location.href = '/';"), "{html}");
+        assert_eq!(
+            html.matches("</script>")
+                .count(),
+            1,
+            "only the page's own script closes: {html}"
+        );
+    }
+
+    #[test]
+    fn the_login_page_leaves_no_return_path_for_the_dashboard_home() {
+        let (_, html) = login_success_page("tok", "/");
+
+        assert!(!html.contains("post_login_path"), "a path the dashboard remembered is kept: {html}");
+        assert!(html.contains("window.location.href = '/';"), "{html}");
+    }
+
+    #[test]
+    fn the_error_page_escapes_its_message() {
+        let html = sign_in_error_page("a <b> & \"c\"");
+
+        assert!(html.contains("<p>a &lt;b&gt; &amp; &quot;c&quot;</p>"), "{html}");
     }
 }

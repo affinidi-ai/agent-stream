@@ -187,7 +187,7 @@ pub async fn saml_acs(
 
     tracing::info!("Setting SAML session cookie");
 
-    let (csp, html) = login_success_page(&finalized_session.session_token);
+    let (csp, html) = login_success_page(&finalized_session.session_token, "/");
 
     // Clear the single-use correlation cookie now that login has completed.
     let mut headers = finalized_session.headers;

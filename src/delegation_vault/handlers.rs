@@ -4,6 +4,7 @@ use super::{
     DelegationToken, DelegationTokenListItem, notifier::SharedVaultPopulationNotifier, oauth,
     storage::DelegationVaultStorage,
 };
+use crate::auth::sign_in_pages::html_escape;
 use crate::credential_providers::storage::CredentialProviderStorage;
 use crate::identity::VCIssuer;
 use crate::identity::ssi::vc_issuer::VcSigner;
@@ -601,15 +602,6 @@ setTimeout(function() {{ window.close(); }}, 3000);
         )),
     )
         .into_response()
-}
-
-/// Simple HTML escaping for dynamic content in callback pages
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 /// Query parameters for the audit log endpoint

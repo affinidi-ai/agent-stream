@@ -91,7 +91,8 @@ impl OidcState {
 /// Why a sign-in was refused. The reason code goes to the log; the browser
 /// gets a generic page.
 #[derive(Debug)]
-enum Refusal {
+pub(super) enum Refusal {
+    IssuerMismatch,
     StateUnknown,
     BindingMismatch,
     CodeMissing,
@@ -109,6 +110,7 @@ enum Refusal {
 impl Refusal {
     fn code(&self) -> &'static str {
         match self {
+            Self::IssuerMismatch => "issuer_mismatch",
             Self::StateUnknown => "state_unknown",
             Self::BindingMismatch => "binding_mismatch",
             Self::CodeMissing => "code_missing",
@@ -140,6 +142,7 @@ impl Refusal {
             | Self::RoleUnmapped
             | Self::UserDisabled
             | Self::UserLimit(_) => StatusCode::FORBIDDEN,
+            Self::IssuerMismatch => StatusCode::BAD_REQUEST,
             Self::OpUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -147,6 +150,7 @@ impl Refusal {
 
     fn message(&self) -> String {
         match self {
+            Self::IssuerMismatch => "This sign-in link is not for this dashboard.".to_string(),
             Self::StateUnknown | Self::BindingMismatch => {
                 "This sign-in has expired or was started in another browser. Start again from the sign-in page."
                     .to_string()
@@ -181,7 +185,7 @@ impl IntoResponse for Refusal {
 }
 
 /// Log a refusal with its reason code and what caused it, and return it.
-fn refused(
+pub(super) fn refused(
     refusal: Refusal,
     user_id: Option<&str>,
     detail: impl std::fmt::Display,
@@ -190,10 +194,20 @@ fn refused(
     refusal
 }
 
-/// Start an OIDC sign-in: send the browser to the provider with PKCE, a
-/// `state` and a `nonce`, bound to this browser by a cookie.
+/// Start an OIDC sign-in that lands on the dashboard home.
 /// GET /oidc/login
 pub async fn oidc_login(State(oidc): State<Arc<OidcState>>) -> Response {
+    start_sign_in(&oidc, None, "/".to_string()).await
+}
+
+/// Send the browser to the provider with PKCE, a `state` and a `nonce`, bound
+/// to this browser by a cookie, remembering where the dashboard opens after
+/// the callback. `login_hint` is passed on to the provider.
+pub(super) async fn start_sign_in(
+    oidc: &OidcState,
+    login_hint: Option<&str>,
+    return_path: String,
+) -> Response {
     let metadata = match oidc
         .discovery
         .metadata(&oidc.config)
@@ -223,13 +237,14 @@ pub async fn oidc_login(State(oidc): State<Arc<OidcState>>) -> Response {
         .append_pair("state", &state)
         .append_pair("nonce", &nonce)
         .append_pair("code_challenge", &generate_pkce_challenge(&code_verifier))
-        .append_pair("code_challenge_method", "S256");
+        .append_pair("code_challenge_method", "S256")
+        .extend_pairs(login_hint.map(|hint| ("login_hint", hint)));
 
     let Ok(cookie) = HeaderValue::from_str(&build_oidc_state_cookie(&state, PENDING_SIGN_IN_TTL.as_secs())) else {
         return refused(Refusal::ServerError, None, "the state cookie could not be built").into_response();
     };
     oidc.pending
-        .insert(state, nonce, code_verifier);
+        .insert(state, nonce, code_verifier, return_path);
 
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, cookie);
@@ -377,7 +392,7 @@ async fn complete_sign_in(
     }
     info!(user_id = %user.user_id, role = %role, "OIDC sign-in succeeded");
 
-    let (csp, html) = login_success_page(&finalized.session_token);
+    let (csp, html) = login_success_page(&finalized.session_token, &pending.return_path);
     let mut response_headers = finalized.headers;
     if let Ok(clear) = HeaderValue::from_str(&clear_oidc_state_cookie()) {
         response_headers.append(SET_COOKIE, clear);

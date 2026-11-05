@@ -109,6 +109,7 @@ fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson
 | --- | --- | --- |
 | `GET /oidc/login` | None (public) | Redirect the browser to the provider to sign in |
 | `GET /oidc/callback` | None (public) | Where the provider sends the browser back (`redirect_uri`): verify the sign-in and open a session |
+| `GET`, `POST /oidc/initiate` | None (public) | Third-party-initiated login: start a sign-in at the provider's request (the provider's `initiate_login_uri`) |
 
 The provider:
 
@@ -174,9 +175,10 @@ Users:
 Outcomes:
 
 - A refused sign-in shows a readable page that does not say why; the log records a reason
-  code: `state_unknown`, `binding_mismatch`, `code_missing`, `access_denied`,
-  `exchange_failed`, `id_token_invalid`, `claim_not_allowed`, `role_unmapped`, `user_disabled`, `user_limit`,
-  `op_unavailable` or `server_error`. No token, code, secret or claim value is logged.
+  code: `issuer_mismatch`, `state_unknown`, `binding_mismatch`, `code_missing`,
+  `access_denied`, `exchange_failed`, `id_token_invalid`, `claim_not_allowed`, `role_unmapped`,
+  `user_disabled`, `user_limit`, `op_unavailable` or `server_error`. No token, code, secret or
+  claim value is logged.
 - Only a code the provider refuses (`invalid_grant`) answers `401`, because the code is the
   only thing a caller sends that could be a guess. The ID token comes from the token endpoint,
   never from the caller.
@@ -190,6 +192,24 @@ Outcomes:
   also sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 - Signing out ends the appliance session only; it does not sign out of the provider.
 
+Third-party-initiated login ([OpenID Connect Core 1.0 section
+4](https://openid.net/specs/openid-connect-core-1_0.html#ThirdPartyInitiatedLogin)) lets the
+provider, or a portal it controls, link people straight into the dashboard.
+`/oidc/initiate` takes its parameters from the query (`GET`) or a form body (`POST`, which
+arrives cross-site by design, so it is not behind any same-origin check):
+
+| Parameter | Handling |
+| --- | --- |
+| `iss` | Required, and must equal the configured `issuer` exactly; otherwise the answer is `400` with a readable page (`issuer_mismatch`). It is never used to choose or fetch anything. |
+| `login_hint` | Optional. Passed on to the provider when it is at most 256 characters with no control characters; otherwise dropped. |
+| `target_link_uri` | Optional. Where the dashboard opens after signing in, when it is an absolute URL on the dashboard's own origin (the origin of `redirect_uri`), without user info, whose path and query still resolve on that origin, with no encoded slash or backslash in the path, within 1,024 characters. Its path and query are kept; anything else opens `/`, so the endpoint never sends the browser to another site. The sign-in page itself always loads `/` and leaves the path for the dashboard, which opens it as it restores any deep link after sign-in, so it only ever opens a dashboard page, never an `/api/` address. |
+
+Every request starts a fresh sign-in, as `oidc/login` does, even when the browser already has a
+session: the provider's own session usually makes the round trip silent, and it guarantees the
+new session belongs to the person the provider just sent. A sign-in started at `oidc/login`
+leaves no path, so the dashboard opens `/`, or the page it remembered before sending the person
+to sign in.
+
 To register Agent Stream at the provider:
 
 | Provider setting | Value |
@@ -200,18 +220,19 @@ To register Agent Stream at the provider:
 | Client authentication | `client_secret_basic` (the default) or `client_secret_post`, as `token_endpoint_auth_method` says |
 | ID token signing | An algorithm in `id_token_signing_algs` (`ES256` by default) |
 | Claims in the ID token | The role claim, every claim in `required_claims`, and the profile claims |
+| Initiate login URI (optional) | `/oidc/initiate` on the same origin, for example `https://stream.example.com/api/oidc/initiate`, when the provider links people into the dashboard |
 
 ## Sign-in throttling
 
-The registration, passkey sign-in, SAML login and ACS, and OIDC login and callback routes,
-and `/auth/check`, are throttled per client ([`src/auth/throttle.rs`](../src/auth/throttle.rs)). A client is its
+The registration, passkey sign-in, SAML login and ACS, and OIDC login, initiate and callback
+routes, and `/auth/check`, are throttled per client ([`src/auth/throttle.rs`](../src/auth/throttle.rs)). A client is its
 connecting address, with an IPv6 address grouped by its /64 prefix. Behind a reverse proxy
 listed in `tls.client_auth.trusted_proxies`, the client is the rightmost `X-Forwarded-For`
 hop that is not a listed proxy; from any other peer the header is ignored.
 
 | Limit | Value | Over the limit |
 | --- | --- | --- |
-| Sign-in requests (registration, passkey sign-in, SAML login and ACS, OIDC login and callback) | 10 per client per minute | `429` with `Retry-After` |
+| Sign-in requests (registration, passkey sign-in, SAML login and ACS, OIDC login, initiate and callback) | 10 per client per minute | `429` with `Retry-After` |
 | `/auth/check` requests | 120 per client per minute | `429` with `Retry-After`, unless the request carries a valid session, which is always answered |
 | Failed sign-ins | 10 per client | The client is locked out of the sign-in routes for 15 minutes after its last failure |
 

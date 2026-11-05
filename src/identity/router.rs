@@ -316,6 +316,12 @@ fn oidc_auth_routes(
             get(crate::auth::oidc::oidc_callback)
                 .layer(axum::middleware::from_fn(crate::auth::throttle::sign_in_finish)),
         )
+        .route(
+            "/oidc/initiate",
+            get(crate::auth::oidc::oidc_initiate)
+                .post(crate::auth::oidc::oidc_initiate)
+                .layer(axum::middleware::from_fn(crate::auth::throttle::sign_in_start)),
+        )
         .with_state(oidc_state)
         .merge(
             Router::new()
@@ -708,7 +714,7 @@ pub fn create_identity_api_router(
                     .layer(Extension(label))
                     .merge(oidc_auth_routes(oidc_state_arc, session_mgr.clone()))
                     .merge(test_support_router(storage.clone(), session_mgr.clone(), terms_manager.clone()));
-                info!("OIDC routes registered (login, callback, logout, check)");
+                info!("OIDC routes registered (login, callback, initiate, logout, check)");
                 (router, Some(storage), Some(session_mgr))
             }
             None => {
