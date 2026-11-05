@@ -8,8 +8,9 @@ changes:
         provider, as OpenID Connect Core section 4 describes, so a provider's portal can link
         people straight into the dashboard. The iss parameter must name the configured
         issuer, a short plain login_hint is passed on to the provider, and target_link_uri
-        chooses where the dashboard opens, but only a path on the dashboard's own origin;
-        anything else opens the home page.
+        chooses where the dashboard opens, but only a dashboard page on its own origin, which
+        the dashboard opens as it restores any deep link after sign-in; anything else opens
+        the home page.
   changed: []
   fixed: []
   removed: []

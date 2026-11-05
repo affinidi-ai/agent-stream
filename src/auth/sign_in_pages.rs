@@ -14,11 +14,8 @@ fn js_string_literal(s: &str) -> String {
         .replace('&', "\\u0026")
 }
 
-/// The page that hands a new session to the dashboard and redirects to it, with the policy that lets only its own script run. The token is emitted
-/// as a JS string literal safe for an inline `<script>` (see
-/// [`js_string_literal`]).
 /// Escape text for HTML content or a double-quoted attribute value.
-fn html_escape(text: &str) -> String {
+pub(crate) fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -26,32 +23,43 @@ fn html_escape(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// `return_path` is where the dashboard opens: `/`, or a path on this origin
-/// that the caller has already checked (see `auth::oidc::initiate`).
+/// The page that hands a new session to the dashboard and redirects to it, with the policy that lets only its own script run. The token is emitted
+/// as a JS string literal safe for an inline `<script>` (see
+/// [`js_string_literal`]).
+///
+/// The page always loads `/`. A `return_path` other than `/` (a path on this
+/// origin the caller has already checked, see `auth::oidc::initiate`) is left
+/// in `post_login_path`, where the dashboard restores a deep link after
+/// sign-in (`www/default/src/utils/postLoginPath.ts`), so only the dashboard's
+/// own router ever opens it.
 pub(crate) fn login_success_page(
     session_token: &str,
     return_path: &str,
 ) -> (axum::http::HeaderValue, String) {
     let nonce = crate::proxy::security_headers::script_nonce();
+    let post_login_path = if return_path == "/" {
+        String::new()
+    } else {
+        format!("sessionStorage.setItem('post_login_path', {});", js_string_literal(return_path))
+    };
     let html = format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
     <title>Login Successful</title>
-    <meta http-equiv="refresh" content="0;url={}">
+    <meta http-equiv="refresh" content="0;url=/">
     <script nonce="{}">
         sessionStorage.setItem('session_token', {});
-        window.location.href = {};
+        {post_login_path}
+        window.location.href = '/';
     </script>
 </head>
 <body>
     <p>Login successful. Redirecting...</p>
 </body>
 </html>"#,
-        html_escape(return_path),
         nonce,
-        js_string_literal(session_token),
-        js_string_literal(return_path)
+        js_string_literal(session_token)
     );
     (crate::proxy::security_headers::inline_script_page_csp(&nonce), html)
 }
@@ -116,17 +124,30 @@ mod tests {
     }
 
     #[test]
-    fn the_login_page_opens_the_return_path_without_letting_it_escape() {
-        let (_, html) = login_success_page("tok", "/surfaces?tab=a&b=\"</script>'");
+    fn the_login_page_leaves_the_return_path_for_the_dashboard_without_letting_it_escape() {
+        let path = "/surfaces?tab=a&b=\"</script>'";
+        let (_, html) = login_success_page("tok", path);
 
-        assert!(html.contains(r#"content="0;url=/surfaces?tab=a&amp;b=&quot;&lt;/script&gt;&#39;""#), "{html}");
-        assert!(html.contains(r#"window.location.href = "/surfaces?tab=a\u0026b=\"\u003c/script\u003e'";"#), "{html}");
+        assert!(
+            html.contains(&format!("sessionStorage.setItem('post_login_path', {});", js_string_literal(path))),
+            "{html}"
+        );
+        assert!(html.contains(r#"content="0;url=/""#), "the page itself loads only /: {html}");
+        assert!(html.contains("window.location.href = '/';"), "{html}");
         assert_eq!(
             html.matches("</script>")
                 .count(),
             1,
             "only the page's own script closes: {html}"
         );
+    }
+
+    #[test]
+    fn the_login_page_leaves_no_return_path_for_the_dashboard_home() {
+        let (_, html) = login_success_page("tok", "/");
+
+        assert!(!html.contains("post_login_path"), "a path the dashboard remembered is kept: {html}");
+        assert!(html.contains("window.location.href = '/';"), "{html}");
     }
 
     #[test]

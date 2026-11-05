@@ -196,12 +196,13 @@ arrives cross-site by design, so it is not behind any same-origin check):
 | --- | --- |
 | `iss` | Required, and must equal the configured `issuer` exactly; otherwise the answer is `400` with a readable page (`issuer_mismatch`). It is never used to choose or fetch anything. |
 | `login_hint` | Optional. Passed on to the provider when it is at most 256 characters with no control characters; otherwise dropped. |
-| `target_link_uri` | Optional. Where the dashboard opens after signing in, when it is an absolute URL on the dashboard's own origin (the origin of `redirect_uri`) whose path starts with a single `/` and has no backslash, encoded slash or backslash, or control character, within 1,024 characters. Its path and query are used; anything else opens `/`, so the endpoint never sends the browser to another site. |
+| `target_link_uri` | Optional. Where the dashboard opens after signing in, when it is an absolute URL on the dashboard's own origin (the origin of `redirect_uri`), without user info, whose path and query still resolve on that origin, with no encoded slash or backslash in the path, within 1,024 characters. Its path and query are kept; anything else opens `/`, so the endpoint never sends the browser to another site. The sign-in page itself always loads `/` and leaves the path for the dashboard, which opens it as it restores any deep link after sign-in, so it only ever opens a dashboard page, never an `/api/` address. |
 
 Every request starts a fresh sign-in, as `oidc/login` does, even when the browser already has a
 session: the provider's own session usually makes the round trip silent, and it guarantees the
 new session belongs to the person the provider just sent. A sign-in started at `oidc/login`
-opens `/`.
+leaves no path, so the dashboard opens `/`, or the page it remembered before sending the person
+to sign in.
 
 To register Agent Stream at the provider:
 

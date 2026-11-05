@@ -678,13 +678,14 @@ async fn an_unreachable_provider_shows_a_readable_page() {
     );
 }
 
-/// Where the hand-off page sends the browser.
+/// Where the dashboard opens after the hand-off page: the path the page leaves
+/// for the dashboard to restore, or `/`. The page itself only ever loads `/`.
 fn handed_off_path(page: &str) -> String {
-    page.split("window.location.href = \"")
+    assert!(page.contains("window.location.href = '/';"), "{page}");
+    page.split("sessionStorage.setItem('post_login_path', \"")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
-        .unwrap()
-        .replace("\\u0026", "&")
+        .map_or_else(|| "/".to_string(), |path| path.replace("\\u0026", "&"))
 }
 
 #[tokio::test]
