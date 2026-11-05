@@ -30,6 +30,8 @@ pub struct ProviderMetadata {
     pub id_token_signing_alg_values_supported: Option<Vec<String>>,
     #[serde(default)]
     pub code_challenge_methods_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub backchannel_logout_supported: Option<bool>,
 }
 
 /// How long a document whose refresh failed is used before the next attempt.
@@ -230,6 +232,11 @@ fn check(
             offered = ?algorithms,
             allowed = ?config.id_token_signing_algs,
             "The provider signs ID tokens with none of the algorithms in id_token_signing_algs; sign-in will fail"
+        );
+    }
+    if config.logout.backchannel && metadata.backchannel_logout_supported != Some(true) {
+        warn!(
+            "The provider does not say it supports back-channel logout; signing out there may not end dashboard sessions"
         );
     }
     Ok(())

@@ -14,7 +14,9 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{Value, json};
 use url::Url;
 
-use super::config::{ClaimNames, ClientSecret, OidcConfig, RoleMapping, TokenEndpointAuthMethod, ValueMatcher};
+use super::config::{
+    ClaimNames, ClientSecret, LogoutSettings, OidcConfig, RoleMapping, TokenEndpointAuthMethod, ValueMatcher,
+};
 use super::discovery::ProviderMetadata;
 use crate::auth::types::UserRole;
 use crate::jwt_bearer::JwksClient;
@@ -59,6 +61,34 @@ pub fn sign(
     let mut header = Header::new(Algorithm::ES256);
     header.kid = kid.map(str::to_string);
     jsonwebtoken::encode(&header, claims, &EncodingKey::from_ec_pem(pem.as_bytes()).unwrap()).unwrap()
+}
+
+/// An ES256 logout token over `claims`, typed `logout+jwt` and signed with
+/// the provider's key.
+pub fn sign_logout(claims: &Value) -> String {
+    let mut header = Header::new(Algorithm::ES256);
+    header.typ = Some("logout+jwt".to_string());
+    header.kid = Some(KEY_A_KID.to_string());
+    jsonwebtoken::encode(&header, claims, &EncodingKey::from_ec_pem(KEY_A_PEM.as_bytes()).unwrap()).unwrap()
+}
+
+/// The claims of a valid logout token from `issuer`, for the account
+/// `user-1` and the provider session `sid`.
+pub fn logout_claims(
+    issuer: &str,
+    sid: &str,
+) -> Value {
+    let now = chrono::Utc::now().timestamp();
+    json!({
+        "iss": issuer,
+        "aud": CLIENT_ID,
+        "iat": now,
+        "exp": now + 120,
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "sub": "user-1",
+        "sid": sid,
+        "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
+    })
 }
 
 /// The claims of a valid ID token for `issuer` and the sign-in with `nonce`:
@@ -106,6 +136,7 @@ pub fn config_for(issuer: &str) -> OidcConfig {
             ],
             unmapped: None,
         },
+        logout: LogoutSettings::default(),
     }
 }
 
@@ -118,6 +149,7 @@ pub fn metadata_for(issuer: &str) -> ProviderMetadata {
         token_endpoint_auth_methods_supported: None,
         id_token_signing_alg_values_supported: None,
         code_challenge_methods_supported: Some(vec!["S256".to_string()]),
+        backchannel_logout_supported: Some(true),
     }
 }
 
@@ -291,6 +323,7 @@ async fn discovery(State(state): State<Arc<Mutex<StubState>>>) -> (StatusCode, J
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
             "id_token_signing_alg_values_supported": ["ES256"],
+            "backchannel_logout_supported": true,
         })),
     )
 }

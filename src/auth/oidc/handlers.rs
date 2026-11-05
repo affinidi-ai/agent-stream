@@ -18,9 +18,9 @@ use super::config::{OidcConfig, TokenEndpointAuthMethod};
 use super::discovery::{Discovery, ProviderMetadata};
 use super::pending::{PENDING_SIGN_IN_TTL, PendingSignIns};
 use super::roles::{mapped_role, unmet_required_claim};
-use super::tokens::{IdTokenFailure, verify_id_token};
+use super::tokens::{IdTokenFailure, SeenLogoutTokens, verify_id_token};
 use super::user_provisioning::{ProvisionRefusal, provision_user_from_oidc};
-use crate::auth::session::SessionManager;
+use crate::auth::session::{OidcSessionBinding, SessionManager};
 use crate::auth::session_cookie::{
     OIDC_STATE_COOKIE_NAME, build_oidc_state_cookie, clear_oidc_state_cookie, request_cookie,
 };
@@ -36,10 +36,11 @@ const MAX_TOKEN_RESPONSE_BYTES: usize = 256 * 1024;
 /// Everything OIDC sign-in needs.
 pub struct OidcState {
     pub config: Arc<OidcConfig>,
-    discovery: Discovery,
-    jwks: JwksClient,
+    pub(super) discovery: Discovery,
+    pub(super) jwks: JwksClient,
     token_client: reqwest::Client,
     pending: PendingSignIns,
+    pub(super) seen_logout_tokens: SeenLogoutTokens,
     pub storage: Arc<PasskeyStorage>,
     pub session_manager: Arc<SessionManager>,
     pub notification_store: Arc<tokio::sync::RwLock<Option<Arc<crate::integrations::FileSystemNotificationStore>>>>,
@@ -62,6 +63,7 @@ impl OidcState {
                 crate::http_client::EXTERNAL_TIMEOUT_SECS,
             ))?,
             pending: PendingSignIns::default(),
+            seen_logout_tokens: SeenLogoutTokens::default(),
             storage,
             session_manager,
             notification_store: Arc::new(tokio::sync::RwLock::new(None)),
@@ -326,6 +328,11 @@ async fn complete_sign_in(
             IdTokenFailure::Invalid(detail) => refused(Refusal::IdTokenInvalid, None, detail),
         })?;
 
+    let binding = OidcSessionBinding {
+        issuer: oidc.config.issuer.clone(),
+        subject: verified.subject.clone(),
+        sid: verified.sid,
+    };
     let identity = OidcIdentity {
         issuer: oidc.config.issuer.clone(),
         subject: verified.subject,
@@ -378,6 +385,18 @@ async fn complete_sign_in(
         .finalize_session(AuthenticatedPrincipal::new(user.username.clone(), user.user_id.clone()))
         .await
         .map_err(|e| refused(Refusal::ServerError, Some(&user.user_id), format!("{e:?}")))?;
+    // A session a provider logout could not find would outlive that logout,
+    // so a session that cannot be bound is not handed out.
+    if let Err(e) = oidc
+        .session_manager
+        .bind_oidc(&finalized.session_token, binding)
+        .await
+    {
+        oidc.session_manager
+            .remove_session(&finalized.session_token)
+            .await;
+        return Err(refused(Refusal::ServerError, Some(&user.user_id), e));
+    }
 
     if let Some(store) = oidc
         .notification_store

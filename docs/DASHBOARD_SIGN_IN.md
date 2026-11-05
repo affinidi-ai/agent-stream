@@ -110,6 +110,7 @@ fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson
 | `GET /oidc/login` | None (public) | Redirect the browser to the provider to sign in |
 | `GET /oidc/callback` | None (public) | Where the provider sends the browser back (`redirect_uri`): verify the sign-in and open a session |
 | `GET`, `POST /oidc/initiate` | None (public) | Third-party-initiated login: start a sign-in at the provider's request (the provider's `initiate_login_uri`) |
+| `POST /oidc/backchannel-logout` | None (public; a signed logout token) | Back-channel logout: end the sessions of a sign-out at the provider (the provider's `backchannel_logout_uri`) |
 
 The provider:
 
@@ -190,7 +191,35 @@ Outcomes:
   answers `403`.
 - On success the callback sets the session cookie and returns the same page as SAML sign-in,
   also sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
-- Signing out ends the appliance session only; it does not sign out of the provider.
+- Signing out of the dashboard ends the appliance session only; it does not sign out of the
+  provider.
+- Each OIDC session records the provider sign-in it came from: the issuer, `sub`, and the
+  provider's session id (`sid`) when the ID token carries one. A sign-in whose session cannot
+  record it is refused (`server_error`), since back-channel logout could not find that
+  session.
+
+Back-channel logout ([OpenID Connect Back-Channel Logout
+1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html)) lets a sign-out at the
+provider end the matching dashboard sessions. The provider posts a form with a
+`logout_token` to `/oidc/backchannel-logout`, server to server and without cookies:
+
+- The token is checked like an ID token: its signature against the provider's keys with an
+  algorithm in `id_token_signing_algs`, `iss`, `aud`, and `exp` when present. Then a `typ`
+  header, when present, must be `logout+jwt`; `iat` must not be more than 60 seconds ahead,
+  and without `exp` it must be at most 5 minutes old. It must have an `events` claim holding
+  the back-channel logout event, no `nonce` (so an ID token is never taken as a logout
+  token), `sub` or `sid`, and a `jti` not seen before. Each `jti` is remembered until its
+  token would expire, up to 10,000 at once.
+- A token with `sid` ends the sessions signed in with that provider session (and that `sub`,
+  when it also has one). A token with only `sub` ends every session of that account. Personal
+  access tokens are not touched.
+- The answer is `200` with `Cache-Control: no-store` whether or not a session matched, since
+  the provider may retry; a token that does not verify gets `400` with
+  `{"error":"invalid_request"}`, and `503` means the provider's keys could not be reached.
+- An open dashboard tab loses access within about 30 seconds, when its connection next
+  checks the session.
+- The route is not throttled, because a provider may send many logouts at once; a request
+  body is at most 16 KiB. `logout.backchannel: false` in `oidc.json` removes the route.
 
 Third-party-initiated login ([OpenID Connect Core 1.0 section
 4](https://openid.net/specs/openid-connect-core-1_0.html#ThirdPartyInitiatedLogin)) lets the
@@ -220,6 +249,7 @@ To register Agent Stream at the provider:
 | Client authentication | `client_secret_basic` (the default) or `client_secret_post`, as `token_endpoint_auth_method` says |
 | ID token signing | An algorithm in `id_token_signing_algs` (`ES256` by default) |
 | Claims in the ID token | The role claim, every claim in `required_claims`, and the profile claims |
+| Back-channel logout URI | `/oidc/backchannel-logout` on the same origin, for example `https://stream.example.com/api/oidc/backchannel-logout`; the provider must be able to reach it. Either setting of "session required" works: a logout with `sid` ends that provider session, one with only `sub` ends all of the account's sessions |
 | Initiate login URI (optional) | `/oidc/initiate` on the same origin, for example `https://stream.example.com/api/oidc/initiate`, when the provider links people into the dashboard |
 
 ## Sign-in throttling

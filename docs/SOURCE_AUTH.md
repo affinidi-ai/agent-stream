@@ -59,7 +59,9 @@ provider key (`SourceAuthMiddleware::is_front_door_credential`).
 `JwtBearerAuthConfig` ([`jwt_bearer/models.rs`](../src/jwt_bearer/models.rs)) names a
 `JwtVerificationStrategy` by id. The strategy holds the mandatory `expected_issuer` and
 a JWKS source: `static` (inline keys) or `remote` (`jwks_uri`, cached per
-`Cache-Control: max-age`).
+`Cache-Control: max-age`). A token naming a `kid` the cached keys lack fetches the keys again,
+at most once a minute for each strategy, so a rotated key is found at once but tokens with
+made-up `kid` values cannot make every request fetch from the key server.
 
 | Field | Default | Effect |
 | --- | --- | --- |

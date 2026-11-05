@@ -371,6 +371,7 @@ does not define stops startup, so a misspelt `required_claims` cannot pass unnot
 | `role_mapping.claim` | Required | The top-level claim carrying the role values (a string or an array of strings). |
 | `role_mapping.values` | Required, at least one | Claim value, or `regex:` pattern, to `administrator`, `poweruser` or `user`; any other role name stops startup. An exact entry for a value wins over every pattern it matches, so it can raise or lower one person; otherwise the highest role among the matching patterns applies. |
 | `role_mapping.unmapped` | `"deny"` | What an account with no mapped value gets: `deny`, or a role name. |
+| `logout.backchannel` | `true` | Serve `POST /oidc/backchannel-logout`, so a sign-out at the provider ends the matching dashboard sessions. `false` removes the route. |
 
 A value written as `regex:<pattern>` in `required_claims` or `role_mapping.values` is a regular
 expression ([Rust `regex` syntax](https://docs.rs/regex/latest/regex/#syntax)) that must match

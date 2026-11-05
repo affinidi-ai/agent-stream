@@ -53,6 +53,23 @@ struct OidcFile {
     #[serde(default)]
     required_claims: BTreeMap<String, Vec<RawClaimValue>>,
     role_mapping: RoleMappingFile,
+    #[serde(default)]
+    logout: LogoutSettings,
+}
+
+/// How a logout at the provider reaches the dashboard.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LogoutSettings {
+    /// Serve `POST /oidc/backchannel-logout`, so the provider can end
+    /// dashboard sessions when someone signs out there.
+    pub backchannel: bool,
+}
+
+impl Default for LogoutSettings {
+    fn default() -> Self {
+        Self { backchannel: true }
+    }
 }
 
 #[derive(Deserialize)]
@@ -252,6 +269,7 @@ pub struct OidcConfig {
     pub claims: ClaimNames,
     pub required_claims: BTreeMap<String, Vec<ValueMatcher>>,
     pub role_mapping: RoleMapping,
+    pub logout: LogoutSettings,
 }
 
 impl OidcConfig {
@@ -288,6 +306,7 @@ impl OidcConfig {
             claims: checked.claims,
             required_claims: checked.required_claims,
             role_mapping: checked.role_mapping,
+            logout: checked.logout,
         })
     }
 
@@ -316,6 +335,7 @@ struct CheckedFile {
     claims: ClaimNames,
     required_claims: BTreeMap<String, Vec<ValueMatcher>>,
     role_mapping: RoleMapping,
+    logout: LogoutSettings,
 }
 
 fn check(file: OidcFile) -> Result<CheckedFile, String> {
@@ -370,6 +390,7 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
         claims: file.claims,
         required_claims,
         role_mapping,
+        logout: file.logout,
     })
 }
 
@@ -825,6 +846,27 @@ mod tests {
                 .unwrap_err();
             assert!(refused.contains("is not a usable regular expression"), "{refused}");
         }
+    }
+
+    #[tokio::test]
+    async fn back_channel_logout_is_on_unless_the_file_turns_it_off() {
+        assert!(
+            load(valid_file())
+                .await
+                .unwrap()
+                .logout
+                .backchannel
+        );
+
+        let config = load(with(valid_file(), &["logout"], json!({ "backchannel": false })))
+            .await
+            .unwrap();
+        assert!(!config.logout.backchannel);
+
+        let refused = load(with(valid_file(), &["logout"], json!({ "back_channel": false })))
+            .await
+            .unwrap_err();
+        assert!(refused.contains("back_channel"), "{refused}");
     }
 
     #[tokio::test]

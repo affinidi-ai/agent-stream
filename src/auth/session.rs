@@ -39,6 +39,20 @@ pub struct Session {
     pub expires_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     pub terms_gate: TermsSessionGate,
+    /// The OpenID provider sign-in this session came from (OIDC mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcSessionBinding>,
+}
+
+/// The OpenID provider sign-in a session came from, so a logout from that
+/// provider can find the session: the provider, the account (`sub`), and the
+/// provider's own session id (`sid`) when its ID token carried one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OidcSessionBinding {
+    pub issuer: String,
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 impl StorableEntity for Session {
@@ -170,6 +184,7 @@ impl SessionManager {
             created_at: now,
             expires_at: now + chrono::Duration::minutes(self.timeout_minutes as i64),
             terms_gate,
+            oidc: None,
         };
 
         if let Err(e) = self
@@ -183,6 +198,27 @@ impl SessionManager {
         tracing::info!("Session created for username: {}, user_id: {}", username, user_id);
 
         session_token
+    }
+
+    /// Record the OpenID provider sign-in a session came from.
+    pub async fn bind_oidc(
+        &self,
+        token: &str,
+        binding: OidcSessionBinding,
+    ) -> Result<()> {
+        let session = self
+            .sessions()
+            .read()
+            .await
+            .get(token)
+            .cloned();
+        let Some(mut session) = session else {
+            anyhow::bail!("no session {} to bind", loggable_id::<Session>(token));
+        };
+        session.oidc = Some(binding);
+        self.storage
+            .save(&session)
+            .await
     }
 
     /// Mark every pending session for a user as allowed for its remaining lifetime.
@@ -317,37 +353,46 @@ impl SessionManager {
         &self,
         user_id: &str,
     ) -> usize {
-        let tokens: Vec<String> = {
+        let removed = self
+            .remove_sessions_where(|session| session.user_id == user_id)
+            .await
+            .len();
+        if removed > 0 {
+            tracing::info!("Revoked {} session(s) for user_id={}", removed, user_id);
+        }
+        removed
+    }
+
+    /// Remove every session `matches` selects, and return them.
+    pub async fn remove_sessions_where(
+        &self,
+        matches: impl Fn(&Session) -> bool,
+    ) -> Vec<Session> {
+        let removed: Vec<Session> = {
             let cache = self.sessions();
             let sessions = cache.read().await;
             sessions
-                .iter()
-                .filter(|(_, session)| session.user_id == user_id)
-                .map(|(token, _)| token.clone())
+                .values()
+                .filter(|session| matches(session))
+                .cloned()
                 .collect()
         };
 
-        if tokens.is_empty() {
-            return 0;
-        }
-
-        for token in &tokens {
+        for session in &removed {
             if let Err(e) = self
                 .storage
-                .delete(token)
+                .delete(&session.token)
                 .await
             {
                 tracing::warn!(
                     "Failed to delete session {} for user {}: {}",
-                    loggable_id::<Session>(token),
-                    user_id,
+                    loggable_id::<Session>(&session.token),
+                    session.user_id,
                     e
                 );
             }
         }
-
-        tracing::info!("Revoked {} session(s) for user_id={}", tokens.len(), user_id);
-        tokens.len()
+        removed
     }
 
     /// Clean up expired sessions from memory and disk
@@ -448,6 +493,7 @@ mod tests {
                 created_at: now - chrono::Duration::hours(2),
                 expires_at: now - chrono::Duration::hours(1),
                 terms_gate: TermsSessionGate::AllowedAtLogin,
+                oidc: None,
             })
             .await
             .unwrap();

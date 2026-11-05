@@ -7,6 +7,10 @@
 //! # Cache TTL
 //! The TTL is taken from the `Cache-Control: max-age=N` response header.
 //! When the header is absent, a default of **86 400 seconds (24 h)** is used.
+//!
+//! A `kid` missing from fresh keys causes at most one re-fetch per
+//! [`UNKNOWN_KID_REFETCH_COOLDOWN`] for each cache entry, so tokens naming
+//! made-up `kid` values cannot make every request fetch from the key server.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +31,10 @@ async fn validate_jwks_fetch_url(raw: &str) -> Result<(), JwtBearerError> {
 
 /// Default JWKS cache TTL when no `Cache-Control: max-age` header is present.
 const DEFAULT_TTL_SECS: u64 = 86_400;
+
+/// The shortest time between two re-fetches caused by a `kid` that fresh keys
+/// lack. A rotated key is picked up by the first token that names it.
+pub const UNKNOWN_KID_REFETCH_COOLDOWN: Duration = Duration::from_secs(60);
 
 // ── JSON Web Key types ────────────────────────────────────────────────────────
 
@@ -76,6 +84,8 @@ struct CacheEntry {
     keys: HashMap<String, Jwk>,
     fetched_at: Instant,
     ttl: Duration,
+    /// When this entry was fetched because fresh keys lacked a `kid`.
+    unknown_kid_refetch_at: Option<Instant>,
 }
 
 impl CacheEntry {
@@ -153,7 +163,9 @@ impl JwksClient {
     /// Retrieve the JWK for the given `kid` from `strategy_id`'s JWKS.
     ///
     /// 1. If the cache is present and fresh, look up `kid` there.
-    /// 2. If missing or expired, or if `kid` is not found, re-fetch once.
+    /// 2. If missing or expired, or if `kid` is not found, re-fetch once. A `kid`
+    ///    that fresh keys lack re-fetches only when the entry was not itself
+    ///    re-fetched for an unknown `kid` within [`UNKNOWN_KID_REFETCH_COOLDOWN`].
     /// 3. If `kid` is still absent after a re-fetch, return [`JwtBearerError::KeyNotFound`].
     pub async fn get_key(
         &self,
@@ -162,6 +174,7 @@ impl JwksClient {
         kid: &str,
     ) -> JwtBearerResult<Jwk> {
         // Fast path — read lock only
+        let mut unknown_kid = false;
         {
             let cache = self.cache.read().await;
             if let Some(entry) = cache.get(strategy_id) {
@@ -170,8 +183,16 @@ impl JwksClient {
                         debug!("JWKS cache hit for strategy {} kid {}", strategy_id, kid);
                         return Ok(jwk.clone());
                     }
+                    if entry
+                        .unknown_kid_refetch_at
+                        .is_some_and(|at| at.elapsed() < UNKNOWN_KID_REFETCH_COOLDOWN)
+                    {
+                        debug!("kid '{}' not found for strategy {}; re-fetched recently, not again", kid, strategy_id);
+                        return Err(JwtBearerError::KeyNotFound(kid.to_string()));
+                    }
                     // kid not in cache even though entry is fresh — fall through to re-fetch
                     debug!("kid '{}' not found in fresh cache for strategy {}, re-fetching", kid, strategy_id);
+                    unknown_kid = true;
                 } else {
                     debug!("JWKS cache expired for strategy {}, re-fetching", strategy_id);
                 }
@@ -180,9 +201,12 @@ impl JwksClient {
 
         // Slow path — re-fetch and write
         info!("Fetching JWKS for strategy {} from {}", strategy_id, jwks_uri);
-        let entry = self
+        let mut entry = self
             .fetch_and_build_entry(jwks_uri)
             .await?;
+        if unknown_kid {
+            entry.unknown_kid_refetch_at = Some(entry.fetched_at);
+        }
 
         let jwk = entry.keys.get(kid).cloned();
 
@@ -237,6 +261,7 @@ impl JwksClient {
             keys,
             fetched_at: Instant::now(),
             ttl,
+            unknown_kid_refetch_at: None,
         })
     }
 }
@@ -323,6 +348,7 @@ mod tests {
             keys: HashMap::new(),
             fetched_at: Instant::now(),
             ttl: Duration::from_secs(3600),
+            unknown_kid_refetch_at: None,
         };
         assert!(!entry.is_expired());
     }
@@ -333,6 +359,7 @@ mod tests {
             keys: HashMap::new(),
             fetched_at: Instant::now() - Duration::from_secs(1),
             ttl: Duration::from_secs(0),
+            unknown_kid_refetch_at: None,
         };
         assert!(entry.is_expired());
     }
@@ -388,6 +415,77 @@ mod tests {
         };
 
         assert_eq!(ttl_after_first, ttl_after_second);
+    }
+
+    /// Serve `jwks_body` at `/.well-known/jwks.json`, counting the fetches.
+    async fn counting_jwks_server(
+        jwks_body: std::sync::Arc<std::sync::Mutex<String>>
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, crate::jwt_bearer::test_utils::TestServer) {
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = fetches.clone();
+        let app = axum::Router::new().route(
+            "/.well-known/jwks.json",
+            axum::routing::get(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = jwks_body
+                    .lock()
+                    .unwrap()
+                    .clone();
+                async move { ([(axum::http::header::CONTENT_TYPE, "application/json")], body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .unwrap();
+        });
+        (format!("http://{address}/.well-known/jwks.json"), fetches, crate::jwt_bearer::test_utils::TestServer(server))
+    }
+
+    #[tokio::test]
+    async fn made_up_kids_refetch_at_most_once_per_cooldown_and_a_rotated_key_is_found() {
+        let body = std::sync::Arc::new(std::sync::Mutex::new(rsa_jwks_body("key-1", DUMMY_N, DUMMY_E)));
+        let (jwks_uri, fetches, _server) = counting_jwks_server(body.clone()).await;
+        let client = JwksClient::new(reqwest::Client::new());
+        client
+            .get_key("provider-k", &jwks_uri, "key-1")
+            .await
+            .unwrap();
+
+        *body.lock().unwrap() = rsa_jwks_body("key-2", DUMMY_N, DUMMY_E);
+        client
+            .get_key("provider-k", &jwks_uri, "key-2")
+            .await
+            .unwrap();
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2, "the first new kid re-fetches");
+
+        for made_up in ["made-up-1", "made-up-2", "made-up-3"] {
+            let result = client
+                .get_key("provider-k", &jwks_uri, made_up)
+                .await;
+            assert!(matches!(result, Err(JwtBearerError::KeyNotFound(_))), "{made_up}");
+        }
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2, "no re-fetch within the cooldown");
+        client
+            .get_key("provider-k", &jwks_uri, "key-2")
+            .await
+            .unwrap();
+
+        client
+            .cache
+            .write()
+            .await
+            .get_mut("provider-k")
+            .unwrap()
+            .unknown_kid_refetch_at = Some(Instant::now() - UNKNOWN_KID_REFETCH_COOLDOWN);
+        let _ = client
+            .get_key("provider-k", &jwks_uri, "made-up-4")
+            .await;
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 3, "after the cooldown one more re-fetch");
     }
 
     #[tokio::test]
@@ -452,6 +550,7 @@ mod tests {
                     keys: HashMap::new(),
                     fetched_at: Instant::now() - Duration::from_secs(90_000),
                     ttl: Duration::from_secs(3600),
+                    unknown_kid_refetch_at: None,
                 },
             );
         }
