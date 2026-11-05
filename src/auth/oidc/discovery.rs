@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 use url::Url;
 
@@ -32,10 +32,25 @@ pub struct ProviderMetadata {
     pub code_challenge_methods_supported: Option<Vec<String>>,
 }
 
+/// How long a document whose refresh failed is used before the next attempt.
+const RETRY_AFTER_FAILED_REFRESH: Duration = Duration::from_secs(60);
+
+struct Cached {
+    metadata: Arc<ProviderMetadata>,
+    refresh_at: Instant,
+}
+
+enum Lookup {
+    Fresh(Arc<ProviderMetadata>),
+    Stale(Arc<ProviderMetadata>),
+    Empty,
+}
+
 /// The cached discovery document.
 pub struct Discovery {
     http: reqwest::Client,
-    cached: RwLock<Option<(Arc<ProviderMetadata>, Instant)>>,
+    cached: RwLock<Option<Cached>>,
+    refreshing: Mutex<()>,
 }
 
 impl Discovery {
@@ -43,33 +58,91 @@ impl Discovery {
         Self {
             http,
             cached: RwLock::new(None),
+            refreshing: Mutex::new(()),
         }
     }
 
     /// The provider's metadata, from the cache while it is fresh, otherwise
-    /// fetched and checked against `config`.
+    /// fetched and checked against `config`. Once a document has been
+    /// fetched, sign-in keeps using it while the provider cannot be reached:
+    /// one call refreshes it, calls meanwhile use the cached document, and a
+    /// failed refresh is retried after `RETRY_AFTER_FAILED_REFRESH`.
     pub async fn metadata(
         &self,
         config: &OidcConfig,
     ) -> Result<Arc<ProviderMetadata>, String> {
-        if let Some((metadata, fetched_at)) = self
+        let stale = match self.lookup().await {
+            Lookup::Fresh(metadata) => return Ok(metadata),
+            Lookup::Stale(metadata) => metadata,
+            Lookup::Empty => {
+                let metadata = Arc::new(self.fetch(config).await?);
+                self.store(metadata.clone(), DISCOVERY_TTL)
+                    .await;
+                return Ok(metadata);
+            }
+        };
+        let Ok(_refreshing) = self.refreshing.try_lock() else {
+            return Ok(stale);
+        };
+        if let Lookup::Fresh(metadata) = self.lookup().await {
+            return Ok(metadata);
+        }
+        match self.fetch(config).await {
+            Ok(metadata) => {
+                let metadata = Arc::new(metadata);
+                self.store(metadata.clone(), DISCOVERY_TTL)
+                    .await;
+                Ok(metadata)
+            }
+            Err(detail) => {
+                warn!(
+                    issuer = %config.issuer,
+                    %detail,
+                    "Refreshing the OpenID provider's discovery document failed; sign-in keeps using the cached one"
+                );
+                self.store(stale.clone(), RETRY_AFTER_FAILED_REFRESH)
+                    .await;
+                Ok(stale)
+            }
+        }
+    }
+
+    /// Have the next sign-in fetch the document again (after a failure that a
+    /// moved endpoint could explain). The cached document is kept, and used if
+    /// that fetch fails.
+    pub async fn mark_stale(&self) {
+        if let Some(cached) = self
+            .cached
+            .write()
+            .await
+            .as_mut()
+        {
+            cached.refresh_at = Instant::now();
+        }
+    }
+
+    async fn lookup(&self) -> Lookup {
+        match self
             .cached
             .read()
             .await
             .as_ref()
-            && fetched_at.elapsed() < DISCOVERY_TTL
         {
-            return Ok(metadata.clone());
+            Some(cached) if Instant::now() < cached.refresh_at => Lookup::Fresh(cached.metadata.clone()),
+            Some(cached) => Lookup::Stale(cached.metadata.clone()),
+            None => Lookup::Empty,
         }
-        let metadata = Arc::new(self.fetch(config).await?);
-        *self.cached.write().await = Some((metadata.clone(), Instant::now()));
-        Ok(metadata)
     }
 
-    /// Drop the cached document, so the next sign-in fetches it again (after a
-    /// failure that a moved endpoint could explain).
-    pub async fn forget(&self) {
-        *self.cached.write().await = None;
+    async fn store(
+        &self,
+        metadata: Arc<ProviderMetadata>,
+        use_for: Duration,
+    ) {
+        *self.cached.write().await = Some(Cached {
+            metadata,
+            refresh_at: Instant::now() + use_for,
+        });
     }
 
     async fn fetch(
@@ -165,7 +238,88 @@ fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::oidc::test_support::{config_for, metadata_for};
+    use crate::auth::oidc::test_support::{StubProvider, config_for, metadata_for};
+    use crate::url_validation::test_service_endpoints;
+
+    fn allow_endpoints(provider: &StubProvider) -> test_service_endpoints::Allowed {
+        test_service_endpoints::allow(&[provider.discovery_url(), provider.token_endpoint(), provider.jwks_uri()])
+    }
+
+    async fn cached_from(provider: &StubProvider) -> (Discovery, OidcConfig, Arc<ProviderMetadata>) {
+        let discovery = Discovery::new(reqwest::Client::new());
+        let config = config_for(&provider.issuer);
+        let first = discovery
+            .metadata(&config)
+            .await
+            .unwrap();
+        (discovery, config, first)
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_keeps_the_cached_document_and_waits_before_retrying() {
+        let provider = StubProvider::start().await;
+        let _allowed = allow_endpoints(&provider);
+        let (discovery, config, first) = cached_from(&provider).await;
+        provider.set_discovery_down(true);
+        discovery.mark_stale().await;
+
+        let served = discovery
+            .metadata(&config)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &served), "the cached document is used");
+        assert_eq!(provider.discovery_fetches(), 2);
+
+        discovery
+            .metadata(&config)
+            .await
+            .unwrap();
+        assert_eq!(provider.discovery_fetches(), 2, "no retry before RETRY_AFTER_FAILED_REFRESH");
+
+        provider.set_discovery_down(false);
+        discovery.mark_stale().await;
+        let refreshed = discovery
+            .metadata(&config)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &refreshed), "a successful refresh replaces it");
+        assert_eq!(provider.discovery_fetches(), 3);
+    }
+
+    #[tokio::test]
+    async fn without_a_cached_document_a_failed_fetch_is_an_error() {
+        let provider = StubProvider::start().await;
+        let _allowed = allow_endpoints(&provider);
+        provider.set_discovery_down(true);
+        let discovery = Discovery::new(reqwest::Client::new());
+
+        let refused = discovery
+            .metadata(&config_for(&provider.issuer))
+            .await
+            .unwrap_err();
+
+        assert!(refused.contains("HTTP 503"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn while_one_call_refreshes_the_others_use_the_cached_document() {
+        let provider = StubProvider::start().await;
+        let _allowed = allow_endpoints(&provider);
+        let (discovery, config, first) = cached_from(&provider).await;
+        discovery.mark_stale().await;
+        let _refreshing = discovery
+            .refreshing
+            .try_lock()
+            .unwrap();
+
+        let served = discovery
+            .metadata(&config)
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &served));
+        assert_eq!(provider.discovery_fetches(), 1, "the waiting call does not fetch");
+    }
 
     #[test]
     fn a_document_naming_another_issuer_is_refused() {

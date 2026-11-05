@@ -116,6 +116,11 @@ The provider:
   the issuer dropped), is fetched when sign-in first needs it and kept for 24 hours. Startup
   tries once and logs the result, but a provider that cannot be reached does not stop
   startup: only sign-in waits, and `oidc/login` answers `503` with a readable page.
+- Once a document has been fetched, a refresh that fails logs a warning and sign-in keeps
+  using the cached document, trying again after a minute. One sign-in refreshes at a time;
+  the others use the cached document meanwhile. A token endpoint that cannot be reached,
+  answers `404` or fails with a `5xx` has the document fetched again at the next sign-in; an
+  OAuth error such as `invalid_grant` does not.
 - The document must name the configured `issuer` exactly, and every endpoint in it must be
   `https`. When it lists `code_challenge_methods_supported` that list must include `S256`,
   and when it lists `token_endpoint_auth_methods_supported` that list must include the
@@ -126,8 +131,10 @@ The flow:
 - `oidc/login` sends a fresh `state`, `nonce` and PKCE `S256` challenge, and sets a
   `__Host-oidc_state` cookie (`Secure`, `HttpOnly`, `SameSite=Lax`, 10 minutes) holding the
   `state`. The callback is refused unless the browser presents that cookie for the same
-  `state`, so a callback URL cannot be completed in a different browser. Each `state` works
-  once, within 10 minutes; at most 10,000 sign-ins wait at once, and past that the oldest is
+  `state`, so a callback URL cannot be completed in a different browser. A callback without
+  that cookie is refused before its `state` is used, so the browser that started the sign-in
+  can still finish it. A browser has one such cookie, so when several sign-ins are started in
+  it only the most recently started one can finish. Each `state` works once, within 10 minutes; at most 10,000 sign-ins wait at once, and past that the oldest is
   dropped.
 - The callback exchanges the code at the provider's token endpoint, authenticating with
   `client_secret_basic` or `client_secret_post`, and verifies the ID token:
@@ -161,7 +168,7 @@ Users:
   sign in again with the new role. When `required_claims` or `role_mapping` refuses an
   existing user, all their sessions end; the user record is kept.
 - A user who is not approved (an administrator disabled them) is refused even with a valid ID
-  token. When creating a user would pass the appliance user limit, the callback answers `403`
+  token, and all their sessions end. When creating a user would pass the appliance user limit, the callback answers `403`
   with a readable page.
 
 Outcomes:
@@ -170,8 +177,8 @@ Outcomes:
   code: `state_unknown`, `binding_mismatch`, `access_denied`, `exchange_failed`,
   `id_token_invalid`, `claim_not_allowed`, `role_unmapped`, `user_disabled`, `user_limit`,
   `op_unavailable` or `server_error`. No token, code, secret or claim value is logged.
-- A callback that does not verify (an unknown or expired `state`, a missing binding cookie,
-  a failed code exchange or ID token check) answers `401`. An account the settings refuse, a
+- A callback with an unknown or expired `state`, or without this browser's binding cookie,
+  answers `400`. A failed code exchange or ID token check answers `401`. An account the settings refuse, a
   disabled user, or a sign-in the provider declined answers `403`.
 - On success the callback sets the session cookie and returns the same page as SAML sign-in,
   also sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.

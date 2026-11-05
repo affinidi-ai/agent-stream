@@ -122,13 +122,14 @@ impl Refusal {
         }
     }
 
-    /// `401` for a callback that could be guessing or replaying, so the
-    /// sign-in throttle counts it; `403` for an account the policy refuses.
+    /// `401` for a code or ID token that did not verify, so the sign-in
+    /// throttle counts it; `400` for an unknown or unbound `state`, which
+    /// cannot be guessed and comes from stale or parallel sign-ins; `403` for
+    /// an account the policy refuses.
     fn status(&self) -> StatusCode {
         match self {
-            Self::StateUnknown | Self::BindingMismatch | Self::ExchangeFailed | Self::IdTokenInvalid => {
-                StatusCode::UNAUTHORIZED
-            }
+            Self::StateUnknown | Self::BindingMismatch => StatusCode::BAD_REQUEST,
+            Self::ExchangeFailed | Self::IdTokenInvalid => StatusCode::UNAUTHORIZED,
             Self::AccessDenied
             | Self::ClaimNotAllowed
             | Self::RoleUnmapped
@@ -162,7 +163,11 @@ impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
         let mut response = (self.status(), Html(sign_in_error_page(&self.message()))).into_response();
         let headers = response.headers_mut();
-        if let Ok(clear) = HeaderValue::from_str(&clear_oidc_state_cookie()) {
+        // On a mismatch the cookie belongs to a newer sign-in in this browser,
+        // which must still be able to finish.
+        if !matches!(self, Self::BindingMismatch)
+            && let Ok(clear) = HeaderValue::from_str(&clear_oidc_state_cookie())
+        {
             headers.append(SET_COOKIE, clear);
         }
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -258,10 +263,6 @@ async fn complete_sign_in(
     let state = params
         .state
         .ok_or_else(|| refused(Refusal::StateUnknown, None, "the callback has no state"))?;
-    let pending = oidc
-        .pending
-        .take(&state)
-        .ok_or_else(|| refused(Refusal::StateUnknown, None, "no sign-in is waiting for this state"))?;
     let bound = request_cookie(headers, OIDC_STATE_COOKIE_NAME).is_some_and(|cookie| {
         cookie
             .as_bytes()
@@ -271,6 +272,10 @@ async fn complete_sign_in(
     if !bound {
         return Err(refused(Refusal::BindingMismatch, None, "the state cookie is missing or names another sign-in"));
     }
+    let pending = oidc
+        .pending
+        .take(&state)
+        .ok_or_else(|| refused(Refusal::StateUnknown, None, "no sign-in is waiting for this state"))?;
     if let Some(error) = params.error {
         return Err(refused(Refusal::AccessDenied, None, format!("the provider answered {}", loggable_code(&error))));
     }
@@ -285,9 +290,13 @@ async fn complete_sign_in(
         .map_err(|detail| refused(Refusal::OpUnavailable, None, detail))?;
     let id_token = match exchange_code(oidc, &metadata, &code, &pending.code_verifier).await {
         Ok(id_token) => id_token,
-        Err(detail) => {
-            oidc.discovery.forget().await;
-            return Err(refused(Refusal::ExchangeFailed, None, detail));
+        Err(failure) => {
+            if failure.endpoint_may_have_moved {
+                oidc.discovery
+                    .mark_stale()
+                    .await;
+            }
+            return Err(refused(Refusal::ExchangeFailed, None, failure.detail));
         }
     };
     let verified = verify_id_token(&id_token, &oidc.config, &oidc.jwks, &metadata.jwks_uri, &pending.nonce)
@@ -317,20 +326,26 @@ async fn complete_sign_in(
     };
 
     let provisioned =
-        provision_user_from_oidc(&oidc.storage, identity, &verified.claims, &oidc.config.claims, role.clone())
+        match provision_user_from_oidc(&oidc.storage, identity, &verified.claims, &oidc.config.claims, role.clone())
             .await
-            .map_err(|refusal| match refusal {
-                ProvisionRefusal::NotApproved => {
-                    refused(Refusal::UserDisabled, existing_id, "the user is not approved")
-                }
-                ProvisionRefusal::UserLimit(limit) => {
-                    refused(Refusal::UserLimit(limit), None, "the appliance user limit is reached")
-                }
-                ProvisionRefusal::UsernameTaken => {
-                    refused(Refusal::ServerError, None, "every username for this account belongs to another user")
-                }
-                ProvisionRefusal::Storage(e) => refused(Refusal::ServerError, existing_id, e),
-            })?;
+        {
+            Ok(provisioned) => provisioned,
+            Err(ProvisionRefusal::NotApproved) => {
+                end_sessions(oidc, existing.as_ref()).await;
+                return Err(refused(Refusal::UserDisabled, existing_id, "the user is not approved"));
+            }
+            Err(ProvisionRefusal::UserLimit(limit)) => {
+                return Err(refused(Refusal::UserLimit(limit), None, "the appliance user limit is reached"));
+            }
+            Err(ProvisionRefusal::UsernameTaken) => {
+                return Err(refused(
+                    Refusal::ServerError,
+                    None,
+                    "every username for this account belongs to another user",
+                ));
+            }
+            Err(ProvisionRefusal::Storage(e)) => return Err(refused(Refusal::ServerError, existing_id, e)),
+        };
     let user = provisioned.user;
     if provisioned.role_changed {
         end_sessions(oidc, Some(&user)).await;
@@ -397,18 +412,50 @@ struct TokenResponse {
     error: Option<String>,
 }
 
+/// Why a code exchange failed. `detail` is for the log and never holds the
+/// code, the secret or a token.
+struct ExchangeFailure {
+    detail: String,
+    /// The token endpoint could not be reached, answered `404`, or failed
+    /// with a `5xx`: a moved endpoint could explain it, so the discovery
+    /// document is fetched again. An OAuth error such as `invalid_grant` is
+    /// the caller's fault and leaves the document alone.
+    endpoint_may_have_moved: bool,
+}
+
+impl ExchangeFailure {
+    fn endpoint(detail: String) -> Self {
+        Self {
+            detail,
+            endpoint_may_have_moved: true,
+        }
+    }
+
+    fn response(detail: String) -> Self {
+        Self {
+            detail,
+            endpoint_may_have_moved: false,
+        }
+    }
+}
+
+/// Whether a token endpoint answer suggests the endpoint itself is wrong
+/// rather than the request.
+fn endpoint_may_have_moved(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND || status.is_server_error()
+}
+
 /// Exchange the authorization code at the token endpoint and return the ID
-/// token. The error says what failed for the log; it never holds the code,
-/// the secret or a token.
+/// token.
 async fn exchange_code(
     oidc: &OidcState,
     metadata: &ProviderMetadata,
     code: &str,
     code_verifier: &str,
-) -> Result<String, String> {
+) -> Result<String, ExchangeFailure> {
     crate::url_validation::validate_service_endpoint_url(&metadata.token_endpoint)
         .await
-        .map_err(|e| format!("token endpoint refused: {e}"))?;
+        .map_err(|e| ExchangeFailure::endpoint(format!("token endpoint refused: {e}")))?;
     let config = &oidc.config;
     let mut form = vec![
         ("grant_type", "authorization_code"),
@@ -434,9 +481,11 @@ async fn exchange_code(
         .form(&form)
         .send()
         .await
-        .map_err(|e| format!("token request failed: {}", e.without_url()))?;
+        .map_err(|e| ExchangeFailure::endpoint(format!("token request failed: {}", e.without_url())))?;
     let status = response.status();
-    let body = crate::http_client::read_capped(response, MAX_TOKEN_RESPONSE_BYTES).await?;
+    let body = crate::http_client::read_capped(response, MAX_TOKEN_RESPONSE_BYTES)
+        .await
+        .map_err(ExchangeFailure::response)?;
     let parsed: TokenResponse = serde_json::from_slice(&body).unwrap_or_default();
     if !status.is_success() {
         let error = parsed
@@ -444,11 +493,16 @@ async fn exchange_code(
             .as_deref()
             .map(loggable_code)
             .unwrap_or_else(|| "no error code".to_string());
-        return Err(format!("token endpoint answered HTTP {status} ({error})"));
+        let detail = format!("token endpoint answered HTTP {status} ({error})");
+        return Err(if endpoint_may_have_moved(status) {
+            ExchangeFailure::endpoint(detail)
+        } else {
+            ExchangeFailure::response(detail)
+        });
     }
     parsed
         .id_token
-        .ok_or_else(|| "the token response has no id_token".to_string())
+        .ok_or_else(|| ExchangeFailure::response("the token response has no id_token".to_string()))
 }
 
 /// `client_secret_basic` credentials: each part form-encoded, then joined and
@@ -494,10 +548,11 @@ mod tests {
 
     #[test]
     fn refusals_that_could_be_guessing_count_toward_the_lockout() {
-        for refusal in
-            [Refusal::StateUnknown, Refusal::BindingMismatch, Refusal::ExchangeFailed, Refusal::IdTokenInvalid]
-        {
+        for refusal in [Refusal::ExchangeFailed, Refusal::IdTokenInvalid] {
             assert_eq!(refusal.status(), StatusCode::UNAUTHORIZED, "{}", refusal.code());
+        }
+        for refusal in [Refusal::StateUnknown, Refusal::BindingMismatch] {
+            assert_eq!(refusal.status(), StatusCode::BAD_REQUEST, "{}", refusal.code());
         }
         for refusal in [Refusal::AccessDenied, Refusal::ClaimNotAllowed, Refusal::RoleUnmapped, Refusal::UserDisabled] {
             assert_eq!(refusal.status(), StatusCode::FORBIDDEN, "{}", refusal.code());
