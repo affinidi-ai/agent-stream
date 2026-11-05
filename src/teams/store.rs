@@ -4,6 +4,7 @@
 //! [`crate::pipes::filesystem::FileSystemPipeStore`]. Stored under
 //! `_storage/teams`, authoritative cache in memory, immediate disk writes.
 
+use crate::server::mode::ReloadOnPromotion;
 use crate::storage::filesystem::{StorageBackend, rwlock_storage};
 use crate::teams::types::Team;
 use anyhow::{Context, Result};
@@ -167,6 +168,18 @@ impl FileSystemTeamStore {
     }
 }
 
+#[async_trait::async_trait]
+impl ReloadOnPromotion for FileSystemTeamStore {
+    /// Re-read the teams another instance stored, so a promoted standby
+    /// gates callers on their current membership.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +292,43 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_membership_another_instance_stored() {
+        let dir = std::env::temp_dir().join(format!("team_shared_{}", uuid::Uuid::new_v4()));
+        let path = dir
+            .to_string_lossy()
+            .to_string();
+        let standby = FileSystemTeamStore::new(path.clone())
+            .await
+            .unwrap();
+        let active = FileSystemTeamStore::new(path)
+            .await
+            .unwrap();
+        active
+            .seed_defaults(&seed_dir_with_anonymous().await)
+            .await
+            .unwrap();
+        assert!(
+            standby
+                .teams_for_member(ANONYMOUS_MEMBER_ID)
+                .await
+                .is_empty()
+        );
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            standby
+                .teams_for_member(ANONYMOUS_MEMBER_ID)
+                .await
+                .len(),
+            1
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

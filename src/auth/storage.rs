@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use webauthn_rs::prelude::*;
 
 use super::types::{UserRole, UserStatus};
+use crate::server::mode::ReloadOnPromotion;
 use crate::storage::filesystem::{StorableEntity, StorageBackend, cached_storage};
 
 /// Storage for passkey user data, backed by CachedFilesystemStorage
@@ -346,10 +347,119 @@ impl PasskeyStorage {
     }
 }
 
+#[async_trait::async_trait]
+impl ReloadOnPromotion for PasskeyStorage {
+    /// Re-read the dashboard users another instance stored, so they can sign
+    /// in on a promoted standby and users removed there are no longer accepted.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PasskeyStorage;
+    use super::{PasskeyStorage, UserData, UserRole, UserStatus};
+    use crate::server::mode::ReloadOnPromotion;
     use tempfile::tempdir;
+
+    async fn storage_in(dir: &std::path::Path) -> PasskeyStorage {
+        PasskeyStorage::new(
+            dir.join("users")
+                .to_string_lossy()
+                .into_owned(),
+            dir.join("avatars")
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn user(id: &str) -> UserData {
+        let now = chrono::Utc::now();
+        UserData {
+            user_id: id.to_string(),
+            username: id.to_string(),
+            passkeys: Vec::new(),
+            role: UserRole::User,
+            status: UserStatus::New,
+            is_primary: false,
+            first_name: None,
+            last_name: None,
+            email: None,
+            department: None,
+            job_title: None,
+            avatar_path: None,
+            created_at: now,
+            updated_at: now,
+            last_logged_in: None,
+            saml_id: None,
+            oidc: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_users_another_instance_stored() {
+        let temp_dir = tempdir().unwrap();
+        let standby = storage_in(temp_dir.path()).await;
+        standby
+            .save_user(&user("removed"))
+            .await
+            .unwrap();
+        let active = storage_in(temp_dir.path()).await;
+        active
+            .save_user(&user("added"))
+            .await
+            .unwrap();
+        active
+            .delete_user("removed")
+            .await
+            .unwrap();
+        assert!(
+            standby
+                .load_user("added")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert!(
+            standby
+                .load_user("added")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            standby
+                .load_user("removed")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_user_stored_before_oidc_sign_in_still_loads() {
+        let mut stored = serde_json::to_value(user("u1")).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("oidc");
+
+        let loaded: UserData = serde_json::from_value(stored).unwrap();
+
+        assert_eq!(loaded.user_id, "u1");
+        assert!(loaded.oidc.is_none());
+    }
 
     #[tokio::test]
     async fn missing_user_is_not_approved() {

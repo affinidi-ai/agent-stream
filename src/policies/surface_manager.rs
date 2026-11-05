@@ -557,6 +557,59 @@ allow if {
         assert_eq!(mgr.evaluate_policy("surf-1", serde_json::json!({})), Ok(false), "deny takes effect immediately");
     }
 
+    /// A policy set only on the default variant is compiled, and a later
+    /// update that drops it evicts the engine.
+    #[tokio::test]
+    async fn default_variant_policy_is_compiled_and_evicted_when_removed() {
+        use crate::config::agent_surface_variants::{SurfaceOverrides, SurfaceVariant, TargetOverrides};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileSystemPolicyDefinitionStore::new(
+            dir.path()
+                .to_string_lossy()
+                .to_string(),
+        )
+        .await
+        .expect("store");
+        save_surface_def(&store, DENY_ALL_SURFACE, true).await;
+        let mgr = SurfacePolicyManager::new();
+        mgr.set_policy_definition_store(Arc::new(store));
+
+        let mut surface = AgentSurface {
+            surface_id: "surf-1".to_string(),
+            default_variant_id: Some("v1".to_string()),
+            variants: vec![SurfaceVariant {
+                id: "v1".to_string(),
+                alias: "default".to_string(),
+                name: "Default".to_string(),
+                description: String::new(),
+                enabled: true,
+                overrides: SurfaceOverrides {
+                    target: Some(TargetOverrides {
+                        policy: Some(PolicyRef {
+                            policy_definition_id: "def".to_string(),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        assert!(!surface.opa_enabled(), "the base target carries no policy");
+        mgr.update_channel_policy(&surface)
+            .await
+            .expect("compile");
+        assert!(mgr.has_policy("surf-1"), "the default variant's policy is compiled");
+
+        surface.variants.clear();
+        surface.default_variant_id = None;
+        mgr.update_channel_policy(&surface)
+            .await
+            .expect("recompile");
+        assert!(!mgr.has_policy("surf-1"), "removing the policy evicts the engine");
+    }
+
     /// Disabling or breaking a surface definition evicts the engine (fail closed).
     #[tokio::test]
     async fn surface_disable_and_bad_recompile_fail_closed() {

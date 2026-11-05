@@ -61,7 +61,7 @@ adds procedures for deploying and operating an appliance, operator guides, and F
 
 | Document | Revision-specific scope |
 | --- | --- |
-| [Dashboard sign-in](DASHBOARD_SIGN_IN.md) | Passkey and SAML sign-in, sign-in throttling, sessions, the signed-in user's profile and avatar, image uploads, and dashboard settings |
+| [Dashboard sign-in](DASHBOARD_SIGN_IN.md) | Passkey, SAML and OIDC sign-in, sign-in throttling, sessions, the signed-in user's profile and avatar, image uploads, and dashboard settings |
 | [Source authentication](SOURCE_AUTH.md) | Caller authentication methods, API keys, public discovery reads, and the inbound gate order |
 | [Policy](POLICY.md) | Policy layers and packages, policy input, versioned definitions, appliance-wide enforcement, and dry run |
 | [Management RBAC](RBAC.md) | Roles, permissions, enforcement, and the permissions response |

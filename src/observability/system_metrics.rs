@@ -85,6 +85,17 @@ pub struct SystemMetricsStore {
     last_persisted: Mutex<Option<Instant>>,
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for SystemMetricsStore {
+    /// Continue the history the previous Active wrote instead of overwriting
+    /// it with the samples this instance collected while Standby.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.load()
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
 impl SystemMetricsStore {
     pub fn new<P: AsRef<Path>>(storage_dir: P) -> Self {
         Self::with_persist_interval(storage_dir, PERSIST_INTERVAL)
@@ -116,27 +127,28 @@ impl SystemMetricsStore {
         self.remove_stale_temp_files()
             .await;
 
-        if self.storage_path.exists() {
-            match tokio::fs::read_to_string(&self.storage_path).await {
-                Ok(content) => match serde_json::from_str::<Vec<SystemMetricsSample>>(&content) {
-                    Ok(mut loaded) => {
-                        if loaded.len() > MAX_SAMPLES {
-                            loaded.drain(..loaded.len() - MAX_SAMPLES);
-                        }
-                        info!("Loaded {} system metrics samples from {:?}", loaded.len(), self.storage_path);
-                        let mut samples = self.samples.write().await;
-                        *samples = loaded;
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse system metrics file, starting fresh: {}", e);
-                    }
-                },
-                Err(e) => {
-                    warn!("Failed to read system metrics file, starting fresh: {}", e);
-                }
+        let content = match tokio::fs::read_to_string(&self.storage_path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("No previous system metrics file found, starting fresh");
+                return Ok(());
             }
-        } else {
-            info!("No previous system metrics file found, starting fresh");
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to read system metrics file {:?}", self.storage_path));
+            }
+        };
+        match serde_json::from_str::<Vec<SystemMetricsSample>>(&content) {
+            Ok(mut loaded) => {
+                if loaded.len() > MAX_SAMPLES {
+                    loaded.drain(..loaded.len() - MAX_SAMPLES);
+                }
+                info!("Loaded {} system metrics samples from {:?}", loaded.len(), self.storage_path);
+                let mut samples = self.samples.write().await;
+                *samples = loaded;
+            }
+            Err(e) => {
+                warn!("Failed to parse system metrics file, starting fresh: {}", e);
+            }
         }
         Ok(())
     }
@@ -178,23 +190,46 @@ impl SystemMetricsStore {
         }
     }
 
+    /// Append a new sample to the in-memory history without persisting it.
+    async fn append(
+        &self,
+        sample: SystemMetricsSample,
+    ) {
+        let mut samples = self.samples.write().await;
+        samples.push(sample);
+        let len = samples.len();
+        if len > MAX_SAMPLES {
+            samples.drain(..len - MAX_SAMPLES);
+        }
+    }
+
+    /// Record a collected sample. Only the Active instance writes the shared
+    /// history file; a Standby keeps its samples in memory.
+    async fn record(
+        &self,
+        sample: SystemMetricsSample,
+    ) {
+        if crate::server::mode::is_ready_to_serve() {
+            self.push(sample).await;
+        } else {
+            self.append(sample).await;
+        }
+    }
+
     /// Append a new sample, persisting the history when [`Self::persist_interval`] has elapsed.
     async fn push(
         &self,
         sample: SystemMetricsSample,
     ) {
-        let data = {
-            let mut samples = self.samples.write().await;
-            samples.push(sample);
-            let len = samples.len();
-            if len > MAX_SAMPLES {
-                samples.drain(..len - MAX_SAMPLES);
-            }
-            if !self.persist_due().await {
-                return;
-            }
-            samples.clone()
-        };
+        self.append(sample).await;
+        if !self.persist_due().await {
+            return;
+        }
+        let data = self
+            .samples
+            .read()
+            .await
+            .clone();
 
         if let Err(e) = write_samples_atomically(&self.storage_path, &data).await {
             error!("Failed to persist system metrics: {:#}", e);
@@ -429,7 +464,7 @@ pub async fn periodic_system_metrics_collection(
         // Record into OpenTelemetry gauges (exported via OTLP on next flush).
         otel_gauges.record(&sample);
 
-        store.push(sample).await;
+        store.record(sample).await;
     }
 }
 
@@ -457,6 +492,35 @@ mod tests {
             .iter()
             .map(|s| s.process_cpu_percent)
             .collect()
+    }
+
+    #[test]
+    fn only_the_active_instance_persists_recorded_samples() {
+        use crate::server::mode::{self, ServerMode};
+
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemMetricsStore::with_persist_interval(dir.path(), Duration::from_secs(0));
+
+        mode::set_server_mode(ServerMode::Standby);
+        runtime.block_on(store.record(sample(1.0)));
+        assert!(
+            !dir.path()
+                .join("system_metrics.json")
+                .exists(),
+            "a Standby keeps samples in memory"
+        );
+
+        mode::set_server_mode(ServerMode::Active);
+        assert!(mode::mark_activation_ready(mode::current_activation_generation()));
+        runtime.block_on(store.record(sample(2.0)));
+        assert_eq!(runtime.block_on(persisted_cpu(dir.path())), vec![1.0, 2.0]);
     }
 
     #[tokio::test]
@@ -511,6 +575,64 @@ mod tests {
             .map(|s| s.process_cpu_percent)
             .collect();
         assert_eq!(restored, vec![1.0, 2.0]);
+    }
+
+    #[tokio::test]
+    async fn reload_replaces_standby_samples_with_the_active_history() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let standby = SystemMetricsStore::with_persist_interval(dir.path(), Duration::ZERO);
+        standby
+            .append(sample(9.0))
+            .await;
+        let active = SystemMetricsStore::with_persist_interval(dir.path(), Duration::ZERO);
+        active.push(sample(1.0)).await;
+        active.push(sample(2.0)).await;
+
+        standby
+            .reload_from_storage()
+            .await
+            .expect("reload");
+        standby
+            .push(sample(3.0))
+            .await;
+
+        assert_eq!(persisted_cpu(dir.path()).await, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[tokio::test]
+    async fn reload_from_unreadable_storage_fails_and_keeps_samples() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemMetricsStore::new(dir.path());
+        store
+            .append(sample(9.0))
+            .await;
+        tokio::fs::create_dir(
+            dir.path()
+                .join("system_metrics.json"),
+        )
+        .await
+        .expect("create_dir");
+
+        assert!(
+            store
+                .reload_from_storage()
+                .await
+                .is_err(),
+            "a read error is retried, not read as no history"
+        );
+
+        let kept: Vec<f32> = store
+            .get_response_since(None)
+            .await
+            .samples
+            .iter()
+            .map(|s| s.process_cpu_percent)
+            .collect();
+        assert_eq!(kept, vec![9.0]);
     }
 
     #[tokio::test]

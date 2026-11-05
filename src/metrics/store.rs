@@ -3012,9 +3012,10 @@ impl MetricsStore {
                     }
                 }
 
-                // Only persist if data has changed (dirty flag is set)
+                // Only persist if data has changed (dirty flag is set), and only
+                // on the Active instance, which owns the shared file.
                 let is_dirty = *dirty.read().await;
-                if !is_dirty {
+                if !is_dirty || !crate::server::mode::is_ready_to_serve() {
                     continue;
                 }
 
@@ -3590,6 +3591,51 @@ impl Default for MetricsStore {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for MetricsStore {
+    /// Continue the request log the previous Active wrote instead of
+    /// overwriting it with this instance's startup copy. A storage error is
+    /// returned so the reload is retried; a log that cannot be parsed starts
+    /// empty, as at startup.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        let Some(ref backend) = self.backend else {
+            return Ok(());
+        };
+        let snapshot = match backend.load().await {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                if let Some(io) = e.downcast_ref::<std::io::Error>()
+                    && io.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(std::io::Error::new(io.kind(), format!("metrics from {}: {e}", backend.name())));
+                }
+                tracing::warn!("Failed to reload metrics from {}: {}", backend.name(), e);
+                crate::metrics::backends::types::MetricsSnapshot {
+                    connections: Vec::new(),
+                    rule_validation_events: Vec::new(),
+                }
+            }
+        };
+        *self.connections.write().await = snapshot.connections;
+        *self
+            .rule_validation_events
+            .write()
+            .await = snapshot.rule_validation_events;
+        *self.dirty.write().await = false;
+        for cache_time in [
+            &self.pipe_stats_cache_time,
+            &self.channel_stats_cache_time,
+            &self.identity_channel_stats_cache_time,
+            &self.cached_scalar_metrics_time,
+            &self.cached_time_series_time,
+            &self.cached_recent_connections_time,
+        ] {
+            *cache_time.write().await = None;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MetricsStore;
@@ -3613,6 +3659,153 @@ mod tests {
             .get();
 
         assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_the_log_another_instance_saved() {
+        use crate::metrics::backends::MetricsBackend;
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().unwrap();
+        let standby = store_in(dir.path());
+        let active = store_in(dir.path());
+        record_channel_round_trip(&active, "ch-promoted", "t1", 10, 20, ConnectionStatus::Success).await;
+        let connections = recorded_connections(&active, 2).await;
+        crate::metrics::backends::FileMetricsBackend::new(
+            dir.path()
+                .join("metrics.json"),
+        )
+        .persist(&connections, &std::collections::HashMap::new(), &[])
+        .await
+        .unwrap();
+        assert!(
+            standby
+                .connections
+                .read()
+                .await
+                .is_empty()
+        );
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        let reloaded = standby
+            .connections
+            .read()
+            .await
+            .clone();
+        assert_eq!(reloaded.len(), 2);
+        assert!(
+            reloaded
+                .iter()
+                .all(|c| c.channel_config_id == "ch-promoted")
+        );
+    }
+
+    async fn recorded_connections(
+        store: &MetricsStore,
+        count: usize,
+    ) -> Vec<crate::metrics::ConnectionMetric> {
+        loop {
+            let connections = store
+                .connections
+                .read()
+                .await
+                .clone();
+            if connections.len() == count {
+                return connections;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A store backed by `dir/metrics.json` through the same multi-backend the
+    /// server uses, without the periodic save, so nothing but the test writes
+    /// the file.
+    fn store_in(dir: &std::path::Path) -> MetricsStore {
+        let file = std::sync::Arc::new(crate::metrics::backends::FileMetricsBackend::new(dir.join("metrics.json")));
+        MetricsStore {
+            backend: Some(std::sync::Arc::new(crate::metrics::backends::MultiBackend::new().add_backend(file))),
+            ..MetricsStore::new(100)
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_from_unreadable_storage_fails_and_keeps_the_log() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        record_channel_round_trip(&store, "ch-kept", "t1", 10, 20, ConnectionStatus::Success).await;
+        recorded_connections(&store, 2).await;
+        std::fs::create_dir(
+            dir.path()
+                .join("metrics.json"),
+        )
+        .unwrap();
+
+        let result = store
+            .reload_from_storage()
+            .await;
+
+        assert!(result.is_err(), "a read error is retried, not read as an empty log");
+        assert_eq!(
+            store
+                .connections
+                .read()
+                .await
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_from_an_unparseable_log_starts_empty() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        record_channel_round_trip(&store, "ch-dropped", "t1", 10, 20, ConnectionStatus::Success).await;
+        recorded_connections(&store, 2).await;
+        std::fs::write(
+            dir.path()
+                .join("metrics.json"),
+            "not json",
+        )
+        .unwrap();
+
+        store
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .connections
+                .read()
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_without_a_backend_is_a_no_op() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let store = MetricsStore::new(10);
+        store
+            .reload_from_storage()
+            .await
+            .unwrap();
+        assert!(
+            store
+                .connections
+                .read()
+                .await
+                .is_empty()
+        );
     }
 
     // Records one channel round-trip: a Request datapoint carrying

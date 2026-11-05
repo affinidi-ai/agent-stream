@@ -40,18 +40,29 @@ pub async fn periodic_eval_scheduler(
     let last_run: DashMap<String, Instant> = DashMap::new();
     loop {
         interval.tick().await;
-        run_due_surfaces(&pipe_store, &state, &last_run).await;
+        // A run writes drift and usage series to shared storage, which only
+        // the Active instance may do.
+        if !crate::server::mode::is_ready_to_serve() {
+            continue;
+        }
+        let generation = crate::server::mode::current_activation_generation();
+        run_due_surfaces(&pipe_store, &state, &last_run, generation).await;
     }
 }
 
-/// Run every scheduled surface whose interval has elapsed since its last run.
+/// Run every scheduled surface whose interval has elapsed since its last run,
+/// stopping once a mode change supersedes `generation`.
 async fn run_due_surfaces(
     pipe_store: &FileSystemPipeStore,
     state: &IdentityApiState,
     last_run: &DashMap<String, Instant>,
+    generation: u64,
 ) {
     let now = Instant::now();
     for pipe in pipe_store.list().await {
+        if !crate::server::mode::is_serving_generation(generation) {
+            return;
+        }
         let Some(eval) = pipe
             .drift
             .as_ref()
@@ -88,7 +99,7 @@ async fn run_due_surfaces(
             continue;
         }
         last_run.insert(pipe.id.clone(), now);
-        run_one(state, &pipe.id, &pipe.name, eval).await;
+        run_one(state, &pipe.id, &pipe.name, eval, generation).await;
     }
 }
 
@@ -115,6 +126,7 @@ async fn run_one(
     surface_id: &str,
     surface_name: &str,
     eval: &DriftEvalConfig,
+    generation: u64,
 ) {
     // Nothing to replay ⇒ don't dispatch a scheduled run at all. A surface with
     // no captured sessions (no traffic yet, or retention purged them) would only
@@ -178,6 +190,7 @@ async fn run_one(
                     .drift
                     .as_ref()
                     .and_then(|d| d.drift_threshold),
+                activation_generation: Some(generation),
             })
             .await;
         }

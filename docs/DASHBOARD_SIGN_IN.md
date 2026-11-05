@@ -175,13 +175,19 @@ Users:
 Outcomes:
 
 - A refused sign-in shows a readable page that does not say why; the log records a reason
-  code: `issuer_mismatch`, `state_unknown`, `binding_mismatch`, `access_denied`,
-  `exchange_failed`, `id_token_invalid`, `claim_not_allowed`, `role_unmapped`,
-  `user_disabled`, `user_limit`, `op_unavailable` or `server_error`. No token, code, secret
-  or claim value is logged.
-- A callback with an unknown or expired `state`, or without this browser's binding cookie,
-  answers `400`. A failed code exchange or ID token check answers `401`. An account the settings refuse, a
-  disabled user, or a sign-in the provider declined answers `403`.
+  code: `issuer_mismatch`, `state_unknown`, `binding_mismatch`, `code_missing`,
+  `access_denied`, `exchange_failed`, `id_token_invalid`, `claim_not_allowed`, `role_unmapped`,
+  `user_disabled`, `user_limit`, `op_unavailable` or `server_error`. No token, code, secret or
+  claim value is logged.
+- Only a code the provider refuses (`invalid_grant`) answers `401`, because the code is the
+  only thing a caller sends that could be a guess. The ID token comes from the token endpoint,
+  never from the caller.
+- A callback with an unknown or expired `state`, without this browser's binding cookie, or
+  with neither a code nor an error answers `400`. An ID token that does not verify answers
+  `502`. A token endpoint or key set that cannot be reached, answers `404` or fails with a
+  `5xx` answers `503`; any other token endpoint error, such as `invalid_client`, answers
+  `500`. An account the settings refuse, a disabled user, or a sign-in the provider declined
+  answers `403`.
 - On success the callback sets the session cookie and returns the same page as SAML sign-in,
   also sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 - Signing out ends the appliance session only; it does not sign out of the provider.
@@ -230,8 +236,8 @@ hop that is not a listed proxy; from any other peer the header is ignored.
 | `/auth/check` requests | 120 per client per minute | `429` with `Retry-After`, unless the request carries a valid session, which is always answered |
 | Failed sign-ins | 10 per client | The client is locked out of the sign-in routes for 15 minutes after its last failure |
 
-Only a `login/finish`, ACS or OIDC callback response of `401` (a passkey, SAML response or
-OIDC callback that did not verify) counts as a failed sign-in. Any successful finish step, registration included, clears
+Only a `login/finish`, ACS or OIDC callback response of `401` (a passkey or SAML response that
+did not verify, or an OIDC code the provider refused) counts as a failed sign-in. Any successful finish step, registration included, clears
 the count. A registration whose passkey does not verify answers `400` and does not count, and
 neither does a malformed request, an unknown or expired challenge, or a refusal for another
 reason.

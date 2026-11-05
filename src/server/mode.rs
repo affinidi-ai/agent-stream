@@ -114,6 +114,12 @@ pub fn is_ready_to_serve() -> bool {
     state(SERVE_STATE.load(Ordering::SeqCst)) == STATE_ACTIVE
 }
 
+/// Whether the instance is still ready in `generation`. False once a later
+/// mode change has superseded it, even if a re-promotion made it ready again.
+pub fn is_serving_generation(generation: u64) -> bool {
+    SERVE_STATE.load(Ordering::SeqCst) == pack(generation, STATE_ACTIVE)
+}
+
 #[cfg(unix)]
 fn register_raw_signals() -> Option<(tokio::signal::unix::Signal, tokio::signal::unix::Signal)> {
     use tokio::signal::unix::{SignalKind, signal};
@@ -216,6 +222,27 @@ mod tests {
         assert!(mark_activation_ready(current_activation_generation()));
         assert!(!mark_activation_ready(current_activation_generation()), "already ready");
         assert!(is_ready_to_serve());
+    }
+
+    #[test]
+    fn serving_generation_ends_on_demotion_and_stays_ended_after_repromotion() {
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_server_mode(ServerMode::Active);
+        let activating = current_activation_generation();
+        assert!(!is_serving_generation(activating), "not serving until ready");
+        assert!(mark_activation_ready(activating));
+        assert!(is_serving_generation(activating));
+
+        set_server_mode(ServerMode::Standby);
+        assert!(!is_serving_generation(activating), "a demotion ends the generation");
+
+        set_server_mode(ServerMode::Active);
+        assert!(mark_activation_ready(current_activation_generation()));
+        assert!(is_ready_to_serve());
+        assert!(!is_serving_generation(activating), "a re-promotion starts a new generation");
+        assert!(is_serving_generation(current_activation_generation()));
     }
 
     #[test]

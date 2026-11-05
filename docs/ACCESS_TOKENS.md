@@ -1,7 +1,7 @@
 # Access Tokens
 
 Management access tokens (personal access tokens, PATs) let a service call the management
-API without an interactive passkey or SAML sign-in. This page covers the token contract,
+API without an interactive passkey, SAML or OIDC sign-in. This page covers the token contract,
 expiry, delegation and rotation, resource patterns, and tenant ownership of management
 records. For concepts, use the hosted
 [security and access control](https://docs.affinidi.com/products/affinidi-trust-fabric/agent-stream/concepts/security-and-access-control/)

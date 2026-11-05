@@ -678,6 +678,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                             e
                                         );
                                         error_count += 1;
+                                        crate::metrics::backends::prometheus::track_storage_load_error(
+                                            entity_name,
+                                            "migrate_failed",
+                                        );
                                     }
                                     continue;
                                 }
@@ -691,6 +695,7 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                         loggable_path::<T>(&file_to_load, &id)
                     );
                     error_count += 1;
+                    crate::metrics::backends::prometheus::track_storage_load_error(entity_name, "missing");
                     processed_ids.insert(id);
                     continue;
                 }
@@ -724,6 +729,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                             entity_name, logged_id, e
                                         );
                                         error_count += 1;
+                                        crate::metrics::backends::prometheus::track_storage_load_error(
+                                            entity_name,
+                                            "decrypt_failed",
+                                        );
                                         continue;
                                     }
                                 };
@@ -737,6 +746,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                             e
                                         );
                                         error_count += 1;
+                                        crate::metrics::backends::prometheus::track_storage_load_error(
+                                            entity_name,
+                                            "decrypt_failed",
+                                        );
                                         continue;
                                     }
                                 }
@@ -757,6 +770,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                     e
                                 );
                                 error_count += 1;
+                                crate::metrics::backends::prometheus::track_storage_load_error(
+                                    entity_name,
+                                    "parse_failed",
+                                );
                                 processed_ids.insert(id);
                                 continue;
                             }
@@ -776,6 +793,10 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                         e
                                     );
                                     error_count += 1;
+                                    crate::metrics::backends::prometheus::track_storage_load_error(
+                                        entity_name,
+                                        "migrate_failed",
+                                    );
                                 }
                                 processed_ids.insert(id);
                                 continue;
@@ -876,12 +897,17 @@ async fn load_all_entities_from_disk<T: StorableEntity>(
                                     e
                                 );
                                 error_count += 1;
+                                crate::metrics::backends::prometheus::track_storage_load_error(
+                                    entity_name,
+                                    "parse_failed",
+                                );
                             }
                         }
                     }
                     Err(e) => {
                         error!("Failed to read {} from {}: {}", entity_name, loggable_path::<T>(&file_to_load, &id), e);
                         error_count += 1;
+                        crate::metrics::backends::prometheus::track_storage_load_error(entity_name, "read_failed");
                     }
                 }
 
@@ -2156,6 +2182,15 @@ impl<T: StorableEntity> RwLockFilesystemStorage<T> {
     ) -> Result<bool> {
         Ok(self.get(id).await?.is_some())
     }
+
+    /// Replace the cache with what is on disk now. The write lock is taken
+    /// before the scan, so a local save or delete cannot be overwritten by an
+    /// older snapshot. A failed scan leaves the cache unchanged.
+    pub async fn refresh_from_disk(&self) -> Result<()> {
+        let mut cache = self.cache.write().await;
+        *cache = load_all_entities_from_disk(&self.storage_dir, self.entity_name, &self.config).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2196,6 +2231,9 @@ impl<T: StorableEntity> StorageBackend<T> for RwLockFilesystemStorage<T> {
     }
     fn raw_cache(&self) -> Option<&StorageCache<T>> {
         Some(&self.cache)
+    }
+    async fn refresh_from_disk(&self) -> Result<()> {
+        RwLockFilesystemStorage::refresh_from_disk(self).await
     }
 }
 
@@ -3151,60 +3189,70 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_refresh_from_disk_reflects_external_update_and_eviction() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = CachedFilesystemStorage::<TestEntity>::new(temp_dir.path().to_path_buf(), "test_entity")
-            .await
-            .unwrap();
+    #[test]
+    fn test_refresh_from_disk_reflects_external_update_and_eviction() {
+        let _guard = CACHE_REFRESH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let a = TestEntity {
-            id: "a".to_string(),
-            name: "A".to_string(),
-            value: 1,
-        };
-        let b = TestEntity {
-            id: "b".to_string(),
-            name: "B".to_string(),
-            value: 2,
-        };
-        storage
-            .save(&a)
-            .await
-            .unwrap();
-        storage
-            .save(&b)
-            .await
-            .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let temp_dir = TempDir::new().unwrap();
+                let storage = CachedFilesystemStorage::<TestEntity>::new(temp_dir.path().to_path_buf(), "test_entity")
+                    .await
+                    .unwrap();
 
-        let a_updated = TestEntity {
-            id: "a".to_string(),
-            name: "A-updated".to_string(),
-            value: 99,
-        };
-        save_entity_to_disk(&storage.storage_dir, storage.entity_name, &storage.config, &a_updated)
-            .await
-            .unwrap();
-        delete_entity_from_disk::<TestEntity>(&storage.storage_dir, storage.entity_name, "b")
-            .await
-            .unwrap();
+                let a = TestEntity {
+                    id: "a".to_string(),
+                    name: "A".to_string(),
+                    value: 1,
+                };
+                let b = TestEntity {
+                    id: "b".to_string(),
+                    name: "B".to_string(),
+                    value: 2,
+                };
+                storage
+                    .save(&a)
+                    .await
+                    .unwrap();
+                storage
+                    .save(&b)
+                    .await
+                    .unwrap();
 
-        let mut before = storage
-            .list_all()
-            .await
-            .unwrap();
-        before.sort_by(|x, y| x.id.cmp(&y.id));
-        assert_eq!(before, vec![a.clone(), b.clone()]);
+                let a_updated = TestEntity {
+                    id: "a".to_string(),
+                    name: "A-updated".to_string(),
+                    value: 99,
+                };
+                save_entity_to_disk(&storage.storage_dir, storage.entity_name, &storage.config, &a_updated)
+                    .await
+                    .unwrap();
+                delete_entity_from_disk::<TestEntity>(&storage.storage_dir, storage.entity_name, "b")
+                    .await
+                    .unwrap();
 
-        <CachedFilesystemStorage<TestEntity> as StorageBackend<TestEntity>>::refresh_from_disk(&storage)
-            .await
-            .unwrap();
+                let mut before = storage
+                    .list_all()
+                    .await
+                    .unwrap();
+                before.sort_by(|x, y| x.id.cmp(&y.id));
+                assert_eq!(before, vec![a.clone(), b.clone()]);
 
-        let after = storage
-            .list_all()
-            .await
-            .unwrap();
-        assert_eq!(after, vec![a_updated]);
+                <CachedFilesystemStorage<TestEntity> as StorageBackend<TestEntity>>::refresh_from_disk(&storage)
+                    .await
+                    .unwrap();
+
+                let after = storage
+                    .list_all()
+                    .await
+                    .unwrap();
+                assert_eq!(after, vec![a_updated]);
+            });
     }
 
     #[tokio::test]
@@ -3809,6 +3857,171 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded, Some(entity));
+    }
+
+    fn entity(
+        id: &str,
+        value: i32,
+    ) -> TestEntity {
+        TestEntity {
+            id: id.to_string(),
+            name: id.to_string(),
+            value,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rwlock_refresh_from_disk_reflects_another_writer() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_path_buf();
+        let reader = RwLockFilesystemStorage::<TestEntity>::new(dir.clone(), "test_entity")
+            .await
+            .unwrap();
+        reader
+            .save(&entity("updated", 1))
+            .await
+            .unwrap();
+        reader
+            .save(&entity("deleted", 1))
+            .await
+            .unwrap();
+
+        let writer = RwLockFilesystemStorage::<TestEntity>::new(dir, "test_entity")
+            .await
+            .unwrap();
+        writer
+            .save(&entity("added", 1))
+            .await
+            .unwrap();
+        writer
+            .save(&entity("updated", 2))
+            .await
+            .unwrap();
+        writer
+            .delete("deleted")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader
+                .get("added")
+                .await
+                .unwrap(),
+            None,
+            "not seen before a refresh"
+        );
+        StorageBackend::refresh_from_disk(&reader)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader
+                .get("added")
+                .await
+                .unwrap(),
+            Some(entity("added", 1))
+        );
+        assert_eq!(
+            reader
+                .get("updated")
+                .await
+                .unwrap(),
+            Some(entity("updated", 2))
+        );
+        assert_eq!(
+            reader
+                .get("deleted")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reader
+                .list_all()
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rwlock_refresh_from_disk_failure_keeps_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().join("store");
+        let storage = RwLockFilesystemStorage::<TestEntity>::new(dir.clone(), "test_entity")
+            .await
+            .unwrap();
+        storage
+            .save(&entity("kept", 1))
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            storage
+                .refresh_from_disk()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage
+                .get("kept")
+                .await
+                .unwrap(),
+            Some(entity("kept", 1))
+        );
+        assert!(!dir.exists(), "a refresh does not recreate the directory");
+    }
+
+    #[tokio::test]
+    async fn test_skipped_record_is_counted_by_entity_and_reason() {
+        const ENTITY: &str = "load_error_counted_entity";
+        let skipped = |reason: &str| {
+            crate::metrics::backends::prometheus::STORAGE_LOAD_ERRORS
+                .with_label_values(&[ENTITY, reason])
+                .get()
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_path_buf();
+        let storage = RwLockFilesystemStorage::<TestEntity>::new(dir.clone(), ENTITY)
+            .await
+            .unwrap();
+        for id in ["good", "corrupt"] {
+            storage
+                .save(&entity(id, 1))
+                .await
+                .unwrap();
+        }
+        let before = skipped("parse_failed");
+
+        storage
+            .refresh_from_disk()
+            .await
+            .unwrap();
+        assert_eq!(skipped("parse_failed"), before, "readable records are not counted");
+
+        std::fs::write(dir.join("corrupt.json"), "not json").unwrap();
+        storage
+            .refresh_from_disk()
+            .await
+            .unwrap();
+        assert_eq!(skipped("parse_failed"), before + 1);
+        assert_eq!(
+            storage
+                .get("corrupt")
+                .await
+                .unwrap(),
+            None,
+            "the unreadable record is skipped"
+        );
+        assert_eq!(
+            storage
+                .get("good")
+                .await
+                .unwrap(),
+            Some(entity("good", 1))
+        );
     }
 
     #[tokio::test]

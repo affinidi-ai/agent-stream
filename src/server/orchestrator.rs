@@ -370,12 +370,102 @@ struct ActivationIntegrations {
     secrets: Option<Arc<dyn crate::secrets::SecretsStore>>,
 }
 
+/// The policy stores a promotion re-reads before it reloads Surfaces.
+struct ActivationPolicyStores {
+    definitions: Option<Arc<crate::policies::FileSystemPolicyDefinitionStore>>,
+    global: Option<Arc<crate::policies::FileSystemGlobalPolicyStore>>,
+    gateways: Option<Arc<crate::gateways::FileSystemGatewayStore>>,
+}
+
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for ActivationPolicyStores {
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        if let Some(store) = &self.definitions {
+            store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        if let Some(store) = &self.global {
+            store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        if let Some(store) = &self.gateways {
+            store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+}
+
+/// The Surface routes and policy engines a promotion rebuilds once the policy
+/// stores are re-read.
+struct ActivationSurfaces {
+    pipes: Option<(Arc<crate::pipes::FileSystemPipeStore>, Arc<crate::pipes::PipeRouteManager>)>,
+    engines: Option<Arc<crate::identity::handlers::policy_definitions::EngineStores>>,
+}
+
+#[async_trait::async_trait]
+impl crate::server::mode::ReloadOnPromotion for ActivationSurfaces {
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        if let Some((pipe_store, route_manager)) = &self.pipes {
+            pipe_store
+                .refresh_from_disk()
+                .await
+                .map_err(std::io::Error::other)?;
+            match route_manager
+                .reload_all_pipes(pipe_store)
+                .await
+            {
+                Ok(routes) => info!("Activation reloaded {routes} pipe route(s) from storage"),
+                Err(error) => warn!("Promotion pipe route reload failed: {error}"),
+            }
+        }
+        if let Some(engines) = &self.engines {
+            crate::identity::handlers::policy_definitions::recompile_policy_engines(
+                engines,
+                crate::identity::handlers::policy_definitions::EngineScope::All,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Run `reload`, retrying with backoff until it succeeds. Returns `false` once
+/// a later mode change supersedes `generation`.
+async fn reload_until_done(
+    reload: &dyn crate::server::mode::ReloadOnPromotion,
+    generation: u64,
+) -> bool {
+    let mut delay = ACTIVATION_RELOAD_RETRY_FIRST;
+    while let Err(error) = reload
+        .reload_from_storage()
+        .await
+    {
+        error!("Activation cannot reload shared state from storage, retrying in {delay:?}: {error}");
+        tokio::time::sleep(delay).await;
+        if crate::server::mode::current_activation_generation() != generation {
+            return false;
+        }
+        delay = (delay * 2).min(ACTIVATION_RELOAD_RETRY_MAX);
+    }
+    true
+}
+
 /// What a promotion reloads and reconnects.
 #[derive(Clone)]
 struct Activation {
     listeners: Option<FabricListeners>,
     pipe_store: Option<Arc<crate::pipes::FileSystemPipeStore>>,
     route_manager: Option<Arc<crate::pipes::PipeRouteManager>>,
+    policy_stores: Option<Arc<ActivationPolicyStores>>,
+    /// Where every policy engine is recompiled from once Surfaces are reloaded.
+    policy_engines: Option<Arc<crate::identity::handlers::policy_definitions::EngineStores>>,
     reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>>,
     integrations: Option<ActivationIntegrations>,
     /// Runs one pipe reload at a time when promotions overlap.
@@ -394,6 +484,8 @@ impl Activation {
             listeners,
             pipe_store,
             route_manager,
+            policy_stores: None,
+            policy_engines: None,
             reloads: Vec::new(),
             integrations: None,
             reload_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -435,6 +527,18 @@ impl Activation {
         self
     }
 
+    /// Policy stores to re-read before Surfaces, and the stores to recompile
+    /// every policy engine from after them.
+    fn with_policies(
+        mut self,
+        stores: Arc<ActivationPolicyStores>,
+        engines: Arc<crate::identity::handlers::policy_definitions::EngineStores>,
+    ) -> Self {
+        self.policy_stores = Some(stores);
+        self.policy_engines = Some(engines);
+        self
+    }
+
     /// Integrations to migrate and pin before reporting ready.
     fn with_integrations(
         mut self,
@@ -453,17 +557,8 @@ impl Activation {
         generation: u64,
     ) -> bool {
         for reload in &self.reloads {
-            let mut delay = ACTIVATION_RELOAD_RETRY_FIRST;
-            while let Err(error) = reload
-                .reload_from_storage()
-                .await
-            {
-                error!("Activation cannot reload shared state from storage, retrying in {delay:?}: {error}");
-                tokio::time::sleep(delay).await;
-                if crate::server::mode::current_activation_generation() != generation {
-                    return false;
-                }
-                delay = (delay * 2).min(ACTIVATION_RELOAD_RETRY_MAX);
+            if !reload_until_done(reload.as_ref(), generation).await {
+                return false;
             }
         }
         true
@@ -521,20 +616,24 @@ impl Activation {
                 info!("Activation for generation {generation} was superseded before reloading");
                 return false;
             }
-            if let (Some(pipe_store), Some(route_manager)) = (&self.pipe_store, &self.route_manager) {
-                if let Err(error) = pipe_store
-                    .refresh_from_disk()
-                    .await
-                {
-                    warn!("Promotion pipe refresh failed: {error}");
-                }
-                match route_manager
-                    .reload_all_pipes(pipe_store)
-                    .await
-                {
-                    Ok(routes) => info!("Activation reloaded {routes} pipe route(s) from storage"),
-                    Err(error) => warn!("Promotion pipe route reload failed: {error}"),
-                }
+            // Policy definitions are read before Surfaces, so every Surface
+            // compiled from here on resolves the current Rego.
+            if let Some(stores) = &self.policy_stores
+                && !reload_until_done(stores.as_ref(), generation).await
+            {
+                info!("Activation for generation {generation} was superseded while reloading policies");
+                return false;
+            }
+            let surfaces = ActivationSurfaces {
+                pipes: self
+                    .pipe_store
+                    .clone()
+                    .zip(self.route_manager.clone()),
+                engines: self.policy_engines.clone(),
+            };
+            if !reload_until_done(&surfaces, generation).await {
+                info!("Activation for generation {generation} was superseded while reloading Surfaces");
+                return false;
             }
             if !self
                 .reload_shared_state(generation)
@@ -2488,8 +2587,60 @@ pub async fn run_axum_proxy(
             .await,
         );
         crate::teams::set_global_team_usage_tracker(team_usage_tracker.clone());
-        let promotion_reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> =
-            vec![budget_tracker.clone(), team_usage_tracker.clone()];
+        let mut promotion_reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> = Vec::new();
+        if let Some(store) = &identity_state.member_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(store) = &identity_state.team_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(store) = &identity_state.prompt_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(provisioner) = &identity_state.member_provisioner {
+            promotion_reloads.push(provisioner.clone());
+        }
+        promotion_reloads.push(terms_manager.clone());
+        if let Some(state) = &auth_state {
+            promotion_reloads.push(state.storage.clone());
+            promotion_reloads.push(state.session_manager.clone());
+        }
+        if let Some(state) = &saml_state {
+            promotion_reloads.push(state.storage.clone());
+            promotion_reloads.push(state.session_manager.clone());
+        }
+        promotion_reloads.push(budget_tracker.clone());
+        promotion_reloads.push(team_usage_tracker.clone());
+        if let Some(store) = &metrics_store {
+            promotion_reloads.push(store.clone());
+        }
+        if let Some(store) = &system_metrics_store {
+            promotion_reloads.push(store.clone());
+        }
+        promotion_reloads.push(settings_store.clone());
+        if let Some(issuer) = &vc_issuer {
+            promotion_reloads.push(issuer.clone());
+        }
+        if let Some(store) = crate::governance::store() {
+            promotion_reloads.push(Arc::new(store.clone()));
+        }
+        let activation_policy_stores = Arc::new(ActivationPolicyStores {
+            definitions: policy_definition_store.clone(),
+            global: global_policy_store.clone(),
+            gateways: gateway_store.clone(),
+        });
+        let activation_policy_engines = Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
+            pipe_store: pipe_store.clone(),
+            global_policy_store: global_policy_store.clone(),
+            agent_surfaces_path: bootstrap_config
+                .storage_paths
+                .agent_surfaces
+                .clone(),
+            gateways_path: bootstrap_config
+                .storage_paths
+                .gateways
+                .clone(),
+        });
         identity_state.team_usage_tracker = Some(team_usage_tracker);
         info!("✓ Team usage tracker initialized");
 
@@ -2501,6 +2652,7 @@ pub async fn run_axum_proxy(
             .telemetry
             .clone();
         let telemetry_store = Arc::new(crate::telemetry::TelemetryStore::new(telemetry_path).await);
+        promotion_reloads.push(telemetry_store.clone());
         crate::telemetry::set_global_telemetry_store(telemetry_store);
         info!("✓ Usage telemetry store initialized (loaded on boot)");
 
@@ -2509,6 +2661,7 @@ pub async fn run_axum_proxy(
             .ops_telemetry
             .clone();
         let ops_metrics_store = Arc::new(crate::metrics::ops_telemetry::OpsMetricsStore::embedded(ops_path).await);
+        promotion_reloads.push(ops_metrics_store.clone());
         crate::metrics::ops_telemetry::set_global_ops_store(ops_metrics_store);
         info!("✓ Operational metrics store initialized");
 
@@ -2517,6 +2670,7 @@ pub async fn run_axum_proxy(
             .drift
             .clone();
         let drift_store = Arc::new(crate::drift::DriftStore::new(drift_path).await);
+        promotion_reloads.push(drift_store.clone());
         crate::drift::set_global_drift_store(drift_store);
         info!("✓ Drift dimension store initialized");
 
@@ -2529,7 +2683,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_baseline_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_baseline_store(store);
                 info!("✓ Drift baseline store initialized");
             }
             Err(e) => tracing::warn!("Drift baseline store init failed: {e}"),
@@ -2586,7 +2742,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_session_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_session_store(store);
                 info!("✓ Drift session store initialized");
             }
             Err(e) => tracing::warn!("Drift session store init failed: {e}"),
@@ -2602,7 +2760,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_run_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_run_store(store);
                 info!("✓ Drift run store initialized");
             }
             Err(e) => tracing::warn!("Drift run store init failed: {e}"),
@@ -2617,7 +2777,9 @@ pub async fn run_axum_proxy(
         .await
         {
             Ok(store) => {
-                crate::drift::set_global_drift_eval_state_store(Arc::new(store));
+                let store = Arc::new(store);
+                promotion_reloads.push(store.clone());
+                crate::drift::set_global_drift_eval_state_store(store);
                 info!("✓ Drift eval-state store initialized");
             }
             Err(e) => tracing::warn!("Drift eval-state store init failed: {e}"),
@@ -2851,6 +3013,7 @@ pub async fn run_axum_proxy(
                     pipe_store.clone(),
                     pipe_route_manager.clone(),
                 )
+                .with_policies(activation_policy_stores.clone(), activation_policy_engines.clone())
                 .with_reloads(promotion_reloads.clone())
                 .with_integrations(
                     integration_storage.clone(),
@@ -3073,6 +3236,7 @@ pub async fn run_axum_proxy(
             error!("Cannot initialize listener manager without message store");
             spawn_mode_lifecycle(
                 Activation::new(None, pipe_store.clone(), pipe_route_manager.clone())
+                    .with_policies(activation_policy_stores.clone(), activation_policy_engines.clone())
                     .with_reloads(promotion_reloads.clone())
                     .with_integrations(
                         integration_storage.clone(),
@@ -4080,6 +4244,263 @@ mod tests {
 
         assert!(run(Activation::new(None, None, None).activate(mode::current_activation_generation(), None)));
 
+        assert!(mode::is_ready_to_serve());
+    }
+
+    #[test]
+    fn activation_compiles_surface_policy_from_definitions_another_instance_stored() {
+        use crate::pipes::{FileSystemPipeStore, PIPE_POLICY_MANAGER, PipeConfig, PipeType, config::PipeOpaConfig};
+        use crate::policies::FileSystemPolicyDefinitionStore;
+        use crate::policies::policy_definitions::{PolicyDefinition, PolicyType};
+
+        /// Restores the process-wide pipe policy manager when the test ends,
+        /// even on a panic, so no other test resolves definitions from this
+        /// test's store or sees its compiled pipe.
+        struct RestorePipePolicyManager(Option<Arc<FileSystemPolicyDefinitionStore>>);
+
+        impl Drop for RestorePipePolicyManager {
+            fn drop(&mut self) {
+                PIPE_POLICY_MANAGER.replace_policy_definition_store(self.0.take());
+                PIPE_POLICY_MANAGER.remove_pipe("promotion-pipe");
+            }
+        }
+
+        fn definition(name: &str) -> PolicyDefinition {
+            PolicyDefinition {
+                id: "promotion-gate".to_string(),
+                name: name.to_string(),
+                description: String::new(),
+                policy_type: PolicyType::Llm,
+                policy: format!("package llm.policy\nimport rego.v1\n# {name}\ndefault allow := true"),
+                enabled: true,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: None,
+                version: None,
+                content_hash: None,
+                sample_input: None,
+                tenant_id: None,
+            }
+        }
+
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| {
+            dir.path()
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        mode::set_server_mode(ServerMode::Active);
+
+        run(async {
+            let definitions = Arc::new(
+                FileSystemPolicyDefinitionStore::new(path("policies"))
+                    .await
+                    .unwrap(),
+            );
+            definitions
+                .save(definition("booted"))
+                .await
+                .unwrap();
+            let pipes = Arc::new(
+                FileSystemPipeStore::new(path("pipes"))
+                    .await
+                    .unwrap(),
+            );
+            let mut pipe = PipeConfig::new(
+                "promotion-pipe".to_string(),
+                "Promotion".to_string(),
+                PipeType::Webhook {
+                    endpoint: "https://example.com".to_string(),
+                },
+            );
+            pipe.opa_policy = Some(PipeOpaConfig {
+                enabled: true,
+                policy_definition_id: Some("promotion-gate".to_string()),
+                policy_definition_ids: Vec::new(),
+                log_decisions: false,
+            });
+            pipes
+                .save(pipe.clone())
+                .await
+                .unwrap();
+            let _restore = RestorePipePolicyManager(
+                PIPE_POLICY_MANAGER.replace_policy_definition_store(Some(definitions.clone())),
+            );
+            PIPE_POLICY_MANAGER
+                .update_pipe_policy(&pipe)
+                .await
+                .unwrap();
+
+            FileSystemPolicyDefinitionStore::new(path("policies"))
+                .await
+                .unwrap()
+                .save(definition("edited on the active"))
+                .await
+                .unwrap();
+
+            let activation = Activation::new(None, Some(pipes.clone()), None).with_policies(
+                Arc::new(ActivationPolicyStores {
+                    definitions: Some(definitions),
+                    global: None,
+                    gateways: None,
+                }),
+                Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
+                    pipe_store: Some(pipes),
+                    global_policy_store: None,
+                    agent_surfaces_path: path("agent_surfaces"),
+                    gateways_path: path("gateways"),
+                }),
+            );
+            assert!(
+                activation
+                    .activate(mode::current_activation_generation(), None)
+                    .await
+            );
+
+            let evidence = PIPE_POLICY_MANAGER
+                .policy_evidence("promotion-pipe", None)
+                .expect("the pipe policy is compiled");
+            assert_eq!(evidence.name.as_deref(), Some("edited on the active"));
+        });
+        assert!(mode::is_ready_to_serve());
+    }
+
+    #[test]
+    fn activation_reloads_members_teams_users_and_sessions_before_reporting_ready() {
+        use crate::auth::{SessionManager, UserRole, UserStatus, storage::PasskeyStorage, storage::UserData};
+        use crate::members::FileSystemMemberStore;
+        use crate::teams::FileSystemTeamStore;
+
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| {
+            dir.path()
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        mode::set_server_mode(ServerMode::Active);
+
+        run(async {
+            let members = Arc::new(
+                FileSystemMemberStore::new(path("members"))
+                    .await
+                    .unwrap(),
+            );
+            let teams = Arc::new(
+                FileSystemTeamStore::new(path("teams"))
+                    .await
+                    .unwrap(),
+            );
+            let users = Arc::new(
+                PasskeyStorage::new(path("users"), path("avatars"))
+                    .await
+                    .unwrap(),
+            );
+            let sessions = Arc::new(
+                SessionManager::with_storage(20, path("sessions").into())
+                    .await
+                    .unwrap(),
+            );
+
+            let member: crate::members::Member = serde_json::from_value(serde_json::json!({
+                "id": "m1", "status": "enabled",
+                "identifiers": [{ "kind": "custom", "value": "m1@x.io" }],
+                "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"
+            }))
+            .unwrap();
+            FileSystemMemberStore::new(path("members"))
+                .await
+                .unwrap()
+                .save(member)
+                .await
+                .unwrap();
+            let team: crate::teams::types::Team = serde_json::from_value(serde_json::json!({
+                "id": "t1", "name": "T1", "status": "enabled", "members": ["m1"]
+            }))
+            .unwrap();
+            FileSystemTeamStore::new(path("teams"))
+                .await
+                .unwrap()
+                .save(team)
+                .await
+                .unwrap();
+            let now = chrono::Utc::now();
+            PasskeyStorage::new(path("users"), path("avatars"))
+                .await
+                .unwrap()
+                .save_user(&UserData {
+                    user_id: "u1".to_string(),
+                    username: "alice".to_string(),
+                    passkeys: Vec::new(),
+                    role: UserRole::User,
+                    status: UserStatus::New,
+                    is_primary: false,
+                    first_name: None,
+                    last_name: None,
+                    email: None,
+                    department: None,
+                    job_title: None,
+                    avatar_path: None,
+                    created_at: now,
+                    updated_at: now,
+                    last_logged_in: None,
+                    saml_id: None,
+                    oidc: None,
+                })
+                .await
+                .unwrap();
+            let token = SessionManager::with_storage(20, path("sessions").into())
+                .await
+                .unwrap()
+                .create_session("alice".into(), "u1".into())
+                .await;
+
+            let activation = Activation::new(None, None, None).with_reloads([
+                members.clone() as Arc<dyn mode::ReloadOnPromotion>,
+                teams.clone(),
+                users.clone(),
+                sessions.clone(),
+            ]);
+            assert!(
+                activation
+                    .activate(mode::current_activation_generation(), None)
+                    .await
+            );
+
+            assert_eq!(
+                members
+                    .find_for_gate("m1@x.io")
+                    .await
+                    .map(|m| m.id),
+                Some("m1".to_string())
+            );
+            assert_eq!(
+                teams
+                    .teams_for_member("m1")
+                    .await
+                    .len(),
+                1
+            );
+            assert!(
+                users
+                    .load_user("alice")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(
+                sessions
+                    .validate_session(&token)
+                    .await,
+                Some(("alice".to_string(), "u1".to_string()))
+            );
+        });
         assert!(mode::is_ready_to_serve());
     }
 

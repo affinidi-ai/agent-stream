@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::server::mode::ReloadOnPromotion;
 use crate::storage::filesystem::{
     StorableEntity, StorageBackend, in_memory_storage_with_timeout, loggable_id, rwlock_storage,
 };
@@ -73,17 +74,27 @@ impl SessionManager {
         storage_path: PathBuf,
     ) -> Result<Self> {
         let storage: Box<dyn StorageBackend<Session>> = rwlock_storage(storage_path.clone(), "session").await?;
+        let manager = Self {
+            storage,
+            timeout_minutes,
+            terms_gate_update_lock: RwLock::new(()),
+        };
+        manager
+            .prepare_loaded_sessions()
+            .await;
+        Ok(manager)
+    }
 
-        // Fix up loaded sessions: set token from cache key for legacy files that lack it,
-        // and remove expired ones
+    /// Set the token from the cache key for legacy files that lack it, and
+    /// remove expired sessions from memory and disk.
+    async fn prepare_loaded_sessions(&self) {
+        let Some(cache) = self.storage.raw_cache() else {
+            return;
+        };
         let now = chrono::Utc::now();
         let mut expired_tokens = Vec::new();
-        {
-            let mut cache = storage
-                .raw_cache()
-                .expect("cached storage")
-                .write()
-                .await;
+        let loaded = {
+            let mut cache = cache.write().await;
             for (key, session) in cache.iter_mut() {
                 if session.token.is_empty() {
                     session.token = key.clone();
@@ -95,11 +106,15 @@ impl SessionManager {
             for token in &expired_tokens {
                 cache.remove(token);
             }
-        }
+            cache.len()
+        };
 
-        // Delete expired session files from disk
         for token in &expired_tokens {
-            if let Err(e) = storage.delete(token).await {
+            if let Err(e) = self
+                .storage
+                .delete(token)
+                .await
+            {
                 tracing::warn!("Failed to delete expired session file {}: {}", loggable_id::<Session>(token), e);
             }
         }
@@ -107,22 +122,9 @@ impl SessionManager {
         if !expired_tokens.is_empty() {
             tracing::info!("Cleaned up {} expired session(s) on load", expired_tokens.len());
         }
-
-        let loaded = storage
-            .raw_cache()
-            .expect("cached storage")
-            .read()
-            .await
-            .len();
         if loaded > 0 {
             tracing::info!("Loaded {} session(s) from disk", loaded);
         }
-
-        Ok(Self {
-            storage,
-            timeout_minutes,
-            terms_gate_update_lock: RwLock::new(()),
-        })
     }
 
     /// Get the session timeout in seconds
@@ -380,6 +382,21 @@ impl SessionManager {
     }
 }
 
+#[async_trait::async_trait]
+impl ReloadOnPromotion for SessionManager {
+    /// Re-read the sessions another instance stored, so a promoted standby
+    /// keeps users signed in and stops accepting sessions signed out there.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+            .map_err(std::io::Error::other)?;
+        self.prepare_loaded_sessions()
+            .await;
+        Ok(())
+    }
+}
+
 impl Default for SessionManager {
     fn default() -> Self {
         Self::new()
@@ -398,6 +415,82 @@ mod tests {
 
         assert_eq!(logged, "aaaaaaaa...");
         assert!(!logged.contains('b'));
+    }
+
+    #[tokio::test]
+    async fn reload_follows_sessions_another_instance_stored() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path().to_path_buf();
+        let standby = SessionManager::with_storage(20, dir.clone())
+            .await
+            .unwrap();
+        let signed_out = standby
+            .create_session("alice".into(), "user-a".into())
+            .await;
+        let active = SessionManager::with_storage(20, dir.clone())
+            .await
+            .unwrap();
+        let signed_in = active
+            .create_session("bob".into(), "user-b".into())
+            .await;
+        active
+            .remove_session(&signed_out)
+            .await;
+        let shared = rwlock_storage::<Session>(dir, "session")
+            .await
+            .unwrap();
+        let now = chrono::Utc::now();
+        shared
+            .save(&Session {
+                token: "expired-token".to_string(),
+                username: "carol".to_string(),
+                user_id: "user-c".to_string(),
+                created_at: now - chrono::Duration::hours(2),
+                expires_at: now - chrono::Duration::hours(1),
+                terms_gate: TermsSessionGate::AllowedAtLogin,
+            })
+            .await
+            .unwrap();
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            standby
+                .validate_session(&signed_in)
+                .await,
+            Some(("bob".to_string(), "user-b".to_string()))
+        );
+        assert!(
+            standby
+                .validate_session(&signed_out)
+                .await
+                .is_none()
+        );
+        assert!(
+            standby
+                .validate_session("expired-token")
+                .await
+                .is_none()
+        );
+        assert!(
+            !standby
+                .sessions()
+                .read()
+                .await
+                .contains_key("expired-token")
+        );
+        let on_disk = rwlock_storage::<Session>(temp_dir.path().to_path_buf(), "session")
+            .await
+            .unwrap();
+        assert!(
+            !on_disk
+                .exists("expired-token")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

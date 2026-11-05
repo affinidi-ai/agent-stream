@@ -619,6 +619,7 @@ pub async fn run_eval(
         max_failures: runtime.max_failures,
         target_warn_threshold: target_warn,
         target_drift_threshold: target_drift,
+        activation_generation: None,
     };
     tokio::spawn(async move {
         run_eval_task(task).await;

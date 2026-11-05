@@ -75,6 +75,18 @@ impl AdminClient {
         }
     }
 
+    /// The same client and credentials sent to the appliance at `base_url`,
+    /// as a load balancer does after a Standby appliance is promoted.
+    pub fn with_base_url(
+        &self,
+        base_url: &str,
+    ) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            ..self.clone()
+        }
+    }
+
     pub async fn create_pipe(
         &self,
         pipe: Value,

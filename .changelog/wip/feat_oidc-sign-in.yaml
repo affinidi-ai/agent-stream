@@ -16,7 +16,13 @@ changes:
         example every address at one email domain, and an exact entry overrides a pattern.
         The client secret is a secret reference and is never written into the file. Sign-in
         keeps working on the cached discovery document while the provider cannot be reached.
-  changed: []
+  changed:
+    - timestamp: '2026-11-05T12:30:00.000Z'
+      title: Return the sign-in label from the auth mode endpoint
+      description: >-
+        GET /v1/auth/mode now returns a label field next to mode: the provider name shown on
+        the sign-in button in OIDC mode, and null in passkey and SAML modes. Clients that
+        read only mode are unaffected.
   fixed:
     - timestamp: '2026-11-05T04:47:00.000Z'
       title: Raise the user login integration event for SAML sign-ins

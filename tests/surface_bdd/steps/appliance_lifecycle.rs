@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use cucumber::given;
+use cucumber::{given, when};
 use serde_json::Value;
 
+use super::support::latest_client;
 use crate::world::SurfaceWorld;
 
 #[given("the appliance has restarted")]
@@ -71,9 +72,41 @@ async fn standby_promoted(world: &mut SurfaceWorld) {
     }
 }
 
+#[when(expr = "human user {string} requests a protected Admin API resource with their existing session")]
+async fn human_user_requests_protected_resource_with_existing_session(
+    world: &mut SurfaceWorld,
+    username: String,
+) {
+    let serving = world
+        .infra
+        .as_ref()
+        .expect("an appliance should be serving")
+        ._appliance
+        .base_url()
+        .to_string();
+    world.caller_response = Some(
+        latest_client(world, &username)
+            .with_base_url(&serving)
+            .get_admin_json("/v1/settings")
+            .await,
+    );
+}
+
 /// Wait until the usage files under `_storage` hold the tokens the scenario
 /// recorded, so a restart or promotion does not race their background write.
+/// A scenario that has not reached a provider has recorded nothing to wait for.
 async fn wait_for_recorded_usage(world: &SurfaceWorld) {
+    let mut completions = 0;
+    for provider in world.providers.values() {
+        completions += provider
+            .server
+            .received_chat_completions()
+            .await
+            .len();
+    }
+    if completions == 0 {
+        return;
+    }
     let storage = world
         .temp_dir
         .path()

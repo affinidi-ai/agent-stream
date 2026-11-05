@@ -22,8 +22,8 @@ use tracing::{debug, warn};
 
 use crate::auth::session::SessionManager;
 
-/// Sign-in requests (registration, passkey login, SAML login and ACS) one
-/// client may send per window.
+/// Sign-in requests (registration, passkey login, SAML login and ACS, OIDC
+/// login and callback) one client may send per window.
 pub(crate) const SIGN_IN_REQUESTS_PER_WINDOW: u32 = 10;
 /// `/auth/check` requests one client may send per window. Past it, a request
 /// with a valid dashboard session is still answered: the dashboard checks on
@@ -60,8 +60,8 @@ fn trusted_proxies() -> &'static [IpNet] {
 enum SignInStep {
     /// Starts a sign-in or registration; any caller can.
     Start,
-    /// Completes one; a `401` (the passkey or SAML response did not verify)
-    /// counts as a failed sign-in.
+    /// Completes one; a `401` (the passkey or SAML response did not verify,
+    /// or the provider refused the OIDC code) counts as a failed sign-in.
     Finish,
 }
 

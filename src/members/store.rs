@@ -6,6 +6,7 @@
 //! writes.
 
 use crate::members::types::{Member, normalize_identifier};
+use crate::server::mode::ReloadOnPromotion;
 use crate::storage::filesystem::{StorageBackend, rwlock_storage};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -272,6 +273,20 @@ impl FileSystemMemberStore {
     }
 }
 
+#[async_trait::async_trait]
+impl ReloadOnPromotion for FileSystemMemberStore {
+    /// Re-read the members another instance stored, so a promoted standby
+    /// resolves them instead of provisioning duplicates.
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+            .map_err(std::io::Error::other)?;
+        self.rebuild_index().await;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +452,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn reload_resolves_members_another_instance_stored() {
+        let dir = std::env::temp_dir().join(format!("member_shared_{}", uuid::Uuid::new_v4()));
+        let path = dir
+            .to_string_lossy()
+            .to_string();
+        let standby = FileSystemMemberStore::new(path.clone())
+            .await
+            .unwrap();
+        standby
+            .save(member("gone", "gone@x.io", EntityStatus::Enabled))
+            .await
+            .unwrap();
+        let active = FileSystemMemberStore::new(path)
+            .await
+            .unwrap();
+        active
+            .save(member("m1", "new@x.io", EntityStatus::Enabled))
+            .await
+            .unwrap();
+        active
+            .delete("gone")
+            .await
+            .unwrap();
+        assert!(
+            standby
+                .find_for_gate("new@x.io")
+                .await
+                .is_none()
+        );
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            standby
+                .find_for_gate("new@x.io")
+                .await
+                .map(|m| m.id),
+            Some("m1".to_string())
+        );
+        assert!(
+            standby
+                .find_for_gate("gone@x.io")
+                .await
+                .is_none()
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reload_fails_when_storage_is_unreadable() {
+        let dir = std::env::temp_dir().join(format!("member_missing_{}", uuid::Uuid::new_v4()));
+        let store = FileSystemMemberStore::new(
+            dir.to_string_lossy()
+                .to_string(),
+        )
+        .await
+        .unwrap();
+        store
+            .save(member("m1", "kept@x.io", EntityStatus::Enabled))
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .reload_from_storage()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .find_for_gate("kept@x.io")
+                .await
+                .map(|m| m.id),
+            Some("m1".to_string())
+        );
     }
 
     #[tokio::test]
