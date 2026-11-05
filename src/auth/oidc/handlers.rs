@@ -232,12 +232,8 @@ pub(super) async fn start_sign_in(
         .append_pair("state", &state)
         .append_pair("nonce", &nonce)
         .append_pair("code_challenge", &generate_pkce_challenge(&code_verifier))
-        .append_pair("code_challenge_method", "S256");
-    if let Some(login_hint) = login_hint {
-        authorization
-            .query_pairs_mut()
-            .append_pair("login_hint", login_hint);
-    }
+        .append_pair("code_challenge_method", "S256")
+        .extend_pairs(login_hint.map(|hint| ("login_hint", hint)));
 
     let Ok(cookie) = HeaderValue::from_str(&build_oidc_state_cookie(&state, PENDING_SIGN_IN_TTL.as_secs())) else {
         return refused(Refusal::ServerError, None, "the state cookie could not be built").into_response();
