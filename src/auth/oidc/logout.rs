@@ -63,8 +63,9 @@ async fn unbound_session_owner(
 /// End the sessions a logout token from the provider names. Answers `200`
 /// whether or not any matched, since a logout is idempotent and the provider
 /// may retry, `400` for a request that does not verify or a logout that could
-/// not end every session it names, and `503` when the provider's keys cannot
-/// be reached.
+/// not end every session it names, and `503` when the provider or its keys
+/// cannot be reached or this instance is not the ready Active one, whose
+/// sessions are the live ones.
 /// POST /oidc/backchannel-logout
 pub async fn oidc_backchannel_logout(
     State(oidc): State<Arc<OidcState>>,
@@ -84,6 +85,10 @@ pub async fn oidc_backchannel_logout(
     else {
         return invalid("the request has no logout_token");
     };
+    if !crate::server::mode::is_ready_to_serve() {
+        warn!("OIDC back-channel logout refused: this instance is not the ready Active instance");
+        return unavailable();
+    }
     let metadata = match oidc
         .discovery
         .metadata(&oidc.config)

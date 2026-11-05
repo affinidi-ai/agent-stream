@@ -171,7 +171,9 @@ impl JwksClient {
     /// 2. If missing or expired, or if `kid` is not found, re-fetch once. A `kid`
     ///    that fresh keys lack re-fetches only when the entry was not itself
     ///    re-fetched for an unknown `kid` within [`UNKNOWN_KID_REFETCH_COOLDOWN`].
-    /// 3. If `kid` is still absent after a re-fetch, return [`JwtBearerError::KeyNotFound`].
+    /// 3. If `kid` is still absent after a re-fetch, return [`JwtBearerError::KeyNotFound`];
+    ///    when the cooldown prevents the re-fetch, return
+    ///    [`JwtBearerError::KeyNotFoundDuringCooldown`].
     pub async fn get_key(
         &self,
         strategy_id: &str,
@@ -190,7 +192,7 @@ impl JwksClient {
                     }
                     if entry.refetched_for_unknown_kid_recently() {
                         debug!("kid '{}' not found for strategy {}; re-fetched recently, not again", kid, strategy_id);
-                        return Err(JwtBearerError::KeyNotFound(kid.to_string()));
+                        return Err(JwtBearerError::KeyNotFoundDuringCooldown(kid.to_string()));
                     }
                     unknown_kid = true;
                 } else {
@@ -213,7 +215,7 @@ impl JwksClient {
                     return Ok(jwk.clone());
                 }
                 if entry.refetched_for_unknown_kid_recently() {
-                    return Err(JwtBearerError::KeyNotFound(kid.to_string()));
+                    return Err(JwtBearerError::KeyNotFoundDuringCooldown(kid.to_string()));
                 }
                 debug!("kid '{}' not found in fresh cache for strategy {}, re-fetching", kid, strategy_id);
                 let now = Instant::now();
@@ -488,7 +490,7 @@ mod tests {
             let result = client
                 .get_key("provider-k", &jwks_uri, made_up)
                 .await;
-            assert!(matches!(result, Err(JwtBearerError::KeyNotFound(_))), "{made_up}");
+            assert!(matches!(result, Err(JwtBearerError::KeyNotFoundDuringCooldown(_))), "{made_up}");
         }
         assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2, "no re-fetch within the cooldown");
         client
@@ -529,7 +531,10 @@ mod tests {
             })
         });
         for lookup in futures::future::join_all(lookups).await {
-            assert!(matches!(lookup.unwrap(), Err(JwtBearerError::KeyNotFound(_))));
+            assert!(matches!(
+                lookup.unwrap(),
+                Err(JwtBearerError::KeyNotFound(_) | JwtBearerError::KeyNotFoundDuringCooldown(_))
+            ));
         }
         assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
@@ -555,7 +560,7 @@ mod tests {
             client
                 .get_key("provider-f", &jwks_uri, "made-up-2")
                 .await,
-            Err(JwtBearerError::KeyNotFound(_))
+            Err(JwtBearerError::KeyNotFoundDuringCooldown(_))
         ));
         assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2);
         client

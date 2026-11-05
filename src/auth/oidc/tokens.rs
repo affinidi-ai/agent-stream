@@ -20,8 +20,6 @@ const JWKS_CACHE_KEY: &str = "oidc-login";
 const LEEWAY_SECS: u64 = 60;
 /// The longest `sub`, `sid` or `jti` accepted.
 const MAX_IDENTIFIER_CLAIM_LEN: usize = 255;
-/// How old a logout token without `exp` may be.
-const LOGOUT_TOKEN_MAX_AGE_SECS: i64 = 5 * 60;
 /// The event a logout token must carry.
 const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 /// Most logout token ids remembered at once; at the cap the one that would be
@@ -178,7 +176,7 @@ pub async fn verify_logout_token(
     jwks_uri: &str,
     seen: &SeenLogoutTokens,
 ) -> Result<VerifiedLogoutToken, TokenFailure> {
-    let (header, claims) = signed_claims(token, config, jwks, jwks_uri, &["iss", "aud"]).await?;
+    let (header, claims) = signed_claims(token, config, jwks, jwks_uri, &["exp", "iss", "aud"]).await?;
     if let Some(typ) = &header.typ {
         let typ = typ.to_ascii_lowercase();
         if typ != "logout+jwt" && typ != "application/logout+jwt" {
@@ -186,7 +184,8 @@ pub async fn verify_logout_token(
         }
     }
     let now = chrono::Utc::now().timestamp();
-    let (target, jti, remember_until) = check_logout_claims(&claims, now).map_err(TokenFailure::Invalid)?;
+    let (target, jti, remember_until) =
+        check_logout_claims(&claims, &config.client_id, now).map_err(TokenFailure::Invalid)?;
     if !seen.remember(&jti, remember_until, now) {
         return Err(TokenFailure::Invalid("jti was already used".to_string()));
     }
@@ -282,21 +281,15 @@ fn short_string_claim(
 /// out, the `jti`, and until when to remember it.
 fn check_logout_claims(
     claims: &Map<String, Value>,
+    client_id: &str,
     now: i64,
 ) -> Result<(LogoutTarget, String, i64), String> {
-    let issued_at = claims
-        .get("iat")
-        .and_then(Value::as_i64)
-        .ok_or("iat is missing")?;
-    if issued_at > now + LEEWAY_SECS as i64 {
-        return Err("iat is in the future".to_string());
-    }
+    check_issued_at(claims, now)?;
     let expires_at = claims
         .get("exp")
-        .and_then(Value::as_i64);
-    if expires_at.is_none() && issued_at < now - LOGOUT_TOKEN_MAX_AGE_SECS {
-        return Err("a token without exp is more than 5 minutes old".to_string());
-    }
+        .and_then(Value::as_i64)
+        .ok_or("exp is missing")?;
+    check_authorized_party(claims, client_id)?;
     if claims.contains_key("nonce") {
         return Err("a logout token must not carry a nonce".to_string());
     }
@@ -316,8 +309,41 @@ fn check_logout_claims(
         return Err("neither sub nor sid is present".to_string());
     }
     let jti = short_string_claim(claims, "jti")?.ok_or("jti is missing")?;
-    let remember_until = expires_at.unwrap_or(issued_at + LOGOUT_TOKEN_MAX_AGE_SECS) + LEEWAY_SECS as i64;
+    let remember_until = expires_at + LEEWAY_SECS as i64;
     Ok((target, jti, remember_until))
+}
+
+/// `iat` must be present and not ahead of `now` by more than the leeway.
+fn check_issued_at(
+    claims: &Map<String, Value>,
+    now: i64,
+) -> Result<(), String> {
+    let issued_at = claims
+        .get("iat")
+        .and_then(Value::as_i64)
+        .ok_or("iat is missing")?;
+    if issued_at > now + LEEWAY_SECS as i64 {
+        return Err("iat is in the future".to_string());
+    }
+    Ok(())
+}
+
+/// `azp`, when present, must be this client, and a token with several
+/// audiences must have it.
+fn check_authorized_party(
+    claims: &Map<String, Value>,
+    client_id: &str,
+) -> Result<(), String> {
+    let several_audiences = claims
+        .get("aud")
+        .and_then(Value::as_array)
+        .is_some_and(|audiences| audiences.len() > 1);
+    match claims.get("azp") {
+        Some(Value::String(azp)) if azp == client_id => Ok(()),
+        Some(_) => Err("azp is not this client".to_string()),
+        None if several_audiences => Err("azp is missing for a token with several audiences".to_string()),
+        None => Ok(()),
+    }
 }
 
 /// The checks `jsonwebtoken` does not make: `iat`, `azp`, `nonce` and the
@@ -328,24 +354,8 @@ fn check_claims(
     expected_nonce: &str,
     now: i64,
 ) -> Result<(), String> {
-    let issued_at = claims
-        .get("iat")
-        .and_then(Value::as_i64)
-        .ok_or("iat is missing")?;
-    if issued_at > now + LEEWAY_SECS as i64 {
-        return Err("iat is in the future".to_string());
-    }
-
-    let several_audiences = claims
-        .get("aud")
-        .and_then(Value::as_array)
-        .is_some_and(|audiences| audiences.len() > 1);
-    match claims.get("azp") {
-        Some(Value::String(azp)) if azp == &config.client_id => {}
-        Some(_) => return Err("azp is not this client".to_string()),
-        None if several_audiences => return Err("azp is missing for a token with several audiences".to_string()),
-        None => {}
-    }
+    check_issued_at(claims, now)?;
+    check_authorized_party(claims, &config.client_id)?;
 
     if claims
         .get("nonce")
@@ -683,7 +693,7 @@ mod tests {
                 claims[name] = value.clone();
             }
         }
-        check_logout_claims(claims.as_object().unwrap(), chrono::Utc::now().timestamp())
+        check_logout_claims(claims.as_object().unwrap(), CLIENT_ID, chrono::Utc::now().timestamp())
     }
 
     #[test]
@@ -708,6 +718,9 @@ mod tests {
             (json!({ "jti": null }), "jti is missing"),
             (json!({ "iat": null }), "iat is missing"),
             (json!({ "iat": chrono::Utc::now().timestamp() + 600 }), "future"),
+            (json!({ "exp": null }), "exp is missing"),
+            (json!({ "azp": "other" }), "azp is not this client"),
+            (json!({ "aud": [CLIENT_ID, "other"] }), "azp is missing"),
         ] {
             let refused = logout_checked(change.clone()).unwrap_err();
             assert!(refused.contains(expected), "{change}: {refused}");
@@ -717,14 +730,8 @@ mod tests {
     }
 
     #[test]
-    fn a_logout_token_without_exp_must_be_recent() {
-        let now = chrono::Utc::now().timestamp();
-        let (_, _, remember_until) = logout_checked(json!({ "exp": null, "iat": now - 60 })).unwrap();
-        assert_eq!(remember_until, now - 60 + LOGOUT_TOKEN_MAX_AGE_SECS + LEEWAY_SECS as i64);
-
-        let refused = logout_checked(json!({ "exp": null, "iat": now - 600 })).unwrap_err();
-        assert!(refused.contains("more than 5 minutes old"), "{refused}");
-        assert!(logout_checked(json!({ "iat": now - 600 })).is_ok(), "an old token with exp in the future");
+    fn a_logout_token_for_this_client_among_several_audiences_names_it_as_azp() {
+        assert!(logout_checked(json!({ "aud": [CLIENT_ID, "other"], "azp": CLIENT_ID })).is_ok());
     }
 
     #[test]
@@ -817,6 +824,19 @@ mod tests {
                 .await
                 .unwrap_err()
                 .contains("InvalidSignature")
+        );
+
+        let mut without_exp = claims.clone();
+        without_exp
+            .as_object_mut()
+            .unwrap()
+            .remove("exp");
+        let token = crate::auth::oidc::test_support::sign_logout(&without_exp);
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap_err()
+                .contains("exp")
         );
 
         let mut misaddressed = claims.clone();

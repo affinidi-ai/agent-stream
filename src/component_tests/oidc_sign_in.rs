@@ -29,6 +29,7 @@ struct Flow {
     provider: StubProvider,
     _dir: tempfile::TempDir,
     _allowed: test_service_endpoints::Allowed,
+    _ready: std::sync::MutexGuard<'static, ()>,
 }
 
 /// The sign-in a test started: what the provider was sent, and the binding
@@ -88,6 +89,7 @@ impl Flow {
             provider,
             _dir: dir,
             _allowed: allowed,
+            _ready: crate::server::mode::ready_for_test(),
         }
     }
 
@@ -1142,6 +1144,65 @@ async fn a_logout_naming_the_account_ends_its_sessions_from_before_sessions_reco
     assert!(
         !flow
             .session_is_live(&bound)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_signed_with_a_key_published_during_the_unknown_key_cooldown_answers_unavailable() {
+    let flow = Flow::new().await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+    let made_up_kid = crate::auth::oidc::test_support::sign(
+        crate::auth::oidc::test_support::KEY_A_PEM,
+        Some("made-up"),
+        &logout_claims(&flow.provider.issuer, "op-session-1"),
+    );
+    assert_eq!(
+        flow.backchannel_logout(&made_up_kid)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST,
+        "a key the provider does not publish, just fetched again"
+    );
+
+    flow.provider
+        .rotate_to_key_b();
+    let signed_with_the_new_key = crate::auth::oidc::test_support::sign(
+        crate::auth::oidc::test_support::KEY_B_PEM,
+        Some(crate::auth::oidc::test_support::KEY_B_KID),
+        &logout_claims(&flow.provider.issuer, "op-session-1"),
+    );
+    let response = flow
+        .backchannel_logout(&signed_with_the_new_key)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "the provider retries after the cooldown");
+    assert!(
+        flow.session_is_live(&session)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_logout_posted_to_a_standby_answers_unavailable_and_ends_nothing() {
+    let flow = Flow::new().await;
+    let session = flow
+        .signed_in_with_sid("op-session-1")
+        .await;
+
+    crate::server::mode::set_server_mode(crate::server::mode::ServerMode::Standby);
+    let response = flow
+        .logout_by(|claims| claims["sid"] = json!("op-session-1"))
+        .await;
+    crate::server::mode::set_server_mode(crate::server::mode::ServerMode::Active);
+    assert!(crate::server::mode::mark_activation_ready(crate::server::mode::current_activation_generation()));
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header_value(&response, header::CACHE_CONTROL), "no-store");
+    assert!(
+        flow.session_is_live(&session)
             .await
     );
 }

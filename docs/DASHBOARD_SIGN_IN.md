@@ -205,12 +205,16 @@ provider end the matching dashboard sessions. The provider posts a form with a
 `logout_token` to `/oidc/backchannel-logout`, server to server and without cookies:
 
 - The token is checked like an ID token: its signature against the provider's keys with an
-  algorithm in `id_token_signing_algs`, `iss`, `aud`, and `exp` when present. Then a `typ`
-  header, when present, must be `logout+jwt`; `iat` must not be more than 60 seconds ahead,
-  and without `exp` it must be at most 5 minutes old. It must have an `events` claim holding
-  the back-channel logout event, no `nonce` (so an ID token is never taken as a logout
-  token), `sub` or `sid`, and a `jti` not seen before. Each `jti` is remembered until its
-  token would expire plus the 60 seconds of clock skew allowed, up to 10,000 at once.
+  algorithm in `id_token_signing_algs`, `iss`, `aud`, `exp` (required, as Back-Channel
+  Logout 1.0 requires it), and `azp`, which when present must be the `client_id` and must be
+  present when `aud` names several audiences. Then a `typ` header, when present, must be
+  `logout+jwt`, and `iat` must not be more than 60 seconds ahead. It must have an `events`
+  claim holding the back-channel logout event, no `nonce` (so an ID token is never taken as
+  a logout token), `sub` or `sid`, and a `jti` not seen before.
+- Replay protection is best effort. Each `jti` is remembered until its token would expire
+  plus the 60 seconds of clock skew allowed, in this process's memory only: a restart or a
+  promotion of another instance forgets them, and at 10,000 the one closest to expiry is
+  dropped. A replay needs a logout token the provider signed, and only ends sessions again.
 - A token with `sid` ends the sessions signed in with that provider session (and that `sub`,
   when it also has one). A token with only `sub` ends every session of that account. A
   session whose ID token had no `sid` cannot be told apart from the account's other provider
@@ -221,7 +225,13 @@ provider end the matching dashboard sessions. The provider posts a form with a
   since the provider may retry. A request that is not a form with a token that verifies gets
   `400` with `{"error":"invalid_request"}`. A logout that could not end every session it
   names gets `400` with `{"error":"logout_failed"}`, and its `jti` is forgotten so the
-  provider can send it again. `503` means the provider or its keys could not be reached.
+  provider can send it again. `503` asks the provider to retry: the provider or its keys
+  could not be reached; the token names a key not in the keys fetched within the last minute
+  (a key rotated in that minute is seen after it); or this instance is not the ready Active
+  instance, whose sessions are the live ones.
+- The provider's back-channel logout URI must reach the Active instance through readiness
+  routing, like dashboard traffic; see
+  [Server mode](CONFIGURATION_RELOAD.md#server-mode).
 - An open dashboard tab loses access within about 30 seconds, when its connection next
   checks the session.
 - The route is not throttled, because a provider may send many logouts at once; a request
@@ -255,7 +265,7 @@ To register Agent Stream at the provider:
 | Client authentication | `client_secret_basic` (the default) or `client_secret_post`, as `token_endpoint_auth_method` says |
 | ID token signing | An algorithm in `id_token_signing_algs` (`ES256` by default) |
 | Claims in the ID token | The role claim, every claim in `required_claims`, and the profile claims |
-| Back-channel logout URI | `/oidc/backchannel-logout` on the same origin, for example `https://stream.example.com/api/oidc/backchannel-logout`; the provider must be able to reach it. Either setting of "session required" works: a logout with `sid` ends that provider session, one with only `sub` ends all of the account's sessions |
+| Back-channel logout URI | `/oidc/backchannel-logout` on the same origin, for example `https://stream.example.com/api/oidc/backchannel-logout`; the provider must be able to reach it, through the same readiness routing as dashboard traffic. Either setting of "session required" works: a logout with `sid` ends that provider session, one with only `sub` ends all of the account's sessions |
 | Initiate login URI (optional) | `/oidc/initiate` on the same origin, for example `https://stream.example.com/api/oidc/initiate`, when the provider links people into the dashboard |
 
 ## Sign-in throttling

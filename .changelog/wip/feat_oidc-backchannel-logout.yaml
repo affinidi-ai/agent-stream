@@ -6,9 +6,10 @@ changes:
       description: >-
         In OIDC mode, the provider can post a signed logout token to
         /oidc/backchannel-logout (OpenID Connect Back-Channel Logout 1.0). Agent Stream
-        verifies it, refuses a replayed jti, an ID token posted in its place and anything not
-        signed by the provider, and ends the sessions it names: one provider session by sid,
-        or every session of the account by sub. Each OIDC session now records the provider
+        verifies it, requires exp, refuses a replayed jti, an ID token posted in its place and
+        anything not signed by the provider, and ends the sessions it names: one provider
+        session by sid, or every session of the account by sub. A Standby answers 503 so the
+        provider retries against the Active. Each OIDC session now records the provider
         sign-in it came from. logout.backchannel in oidc.json turns the route off. Until the
         provider's discovery document has been fetched once, a failed fetch is not tried
         again for a minute, so requests while the provider is unreachable do not each reach it.
