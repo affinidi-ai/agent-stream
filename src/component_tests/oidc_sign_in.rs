@@ -17,7 +17,7 @@ use crate::auth::oidc::config::TokenEndpointAuthMethod;
 use crate::auth::oidc::test_support::{
     CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, StubProvider, config_for, id_token_claims,
 };
-use crate::auth::oidc::{OidcConfig, OidcState, oidc_callback, oidc_login};
+use crate::auth::oidc::{OidcConfig, OidcState, oidc_callback, oidc_initiate_get, oidc_initiate_post, oidc_login};
 use crate::auth::session::SessionManager;
 use crate::auth::storage::{OidcIdentity, PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
@@ -78,6 +78,7 @@ impl Flow {
         let app = Router::new()
             .route("/oidc/login", get(oidc_login))
             .route("/oidc/callback", get(oidc_callback))
+            .route("/oidc/initiate", get(oidc_initiate_get).post(oidc_initiate_post))
             .with_state(oidc.clone());
         Self {
             app,
@@ -112,8 +113,49 @@ impl Flow {
         let response = self
             .get("/oidc/login", None)
             .await;
+        self.started(&response)
+    }
+
+    async fn post_form(
+        &self,
+        uri: &str,
+        form: &str,
+    ) -> Response<Body> {
+        self.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(form.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// The query string that names this provider as `iss`, with `rest` after it.
+    fn initiate_query(
+        &self,
+        rest: &str,
+    ) -> String {
+        let issuer = url::form_urlencoded::byte_serialize(
+            self.provider
+                .issuer
+                .as_bytes(),
+        )
+        .collect::<String>();
+        format!("iss={issuer}{rest}")
+    }
+
+    /// The sign-in a response from `/oidc/login` or `/oidc/initiate` started.
+    fn started(
+        &self,
+        response: &Response<Body>,
+    ) -> Started {
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let location = url::Url::parse(header_value(&response, header::LOCATION)).unwrap();
+        let location = url::Url::parse(header_value(response, header::LOCATION)).unwrap();
         assert!(
             location
                 .as_str()
@@ -124,7 +166,7 @@ impl Flow {
             .query_pairs()
             .into_owned()
             .collect();
-        let set_cookie = header_value(&response, header::SET_COOKIE);
+        let set_cookie = header_value(response, header::SET_COOKIE);
         let cookie = set_cookie
             .split(';')
             .next()
@@ -551,4 +593,97 @@ async fn an_unreachable_provider_shows_a_readable_page() {
             .await
             .contains("identity provider could not be reached")
     );
+}
+
+/// Where the hand-off page sends the browser.
+fn handed_off_path(page: &str) -> String {
+    page.split("window.location.href = \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .replace("\\u0026", "&")
+}
+
+#[tokio::test]
+async fn the_providers_link_starts_a_sign_in_by_get_or_post_with_its_login_hint() {
+    let flow = Flow::new().await;
+
+    let by_get = flow
+        .get(&format!("/oidc/initiate?{}", flow.initiate_query("&login_hint=alice%40example.com")), None)
+        .await;
+    let started = flow.started(&by_get);
+    assert_eq!(started.authorization["login_hint"], "alice@example.com");
+
+    let by_post = flow
+        .post_form("/oidc/initiate", &flow.initiate_query("&login_hint=bob%40example.com"))
+        .await;
+    let started = flow.started(&by_post);
+    assert_eq!(started.authorization["login_hint"], "bob@example.com");
+    assert!(
+        started
+            .cookie
+            .starts_with("__Host-oidc_state=")
+    );
+
+    let plain = flow
+        .get(&format!("/oidc/initiate?{}", flow.initiate_query("&login_hint=a%0Ab")), None)
+        .await;
+    assert!(
+        !flow
+            .started(&plain)
+            .authorization
+            .contains_key("login_hint"),
+        "a hint with a control character is dropped"
+    );
+}
+
+#[tokio::test]
+async fn a_link_for_another_provider_or_without_one_is_refused() {
+    let flow = Flow::new().await;
+
+    for uri in ["/oidc/initiate?iss=https%3A%2F%2Fother.example", "/oidc/initiate", "/oidc/initiate?iss="] {
+        let response = flow.get(uri, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert!(
+            body(response)
+                .await
+                .contains("not for this dashboard"),
+            "{uri}"
+        );
+    }
+    let response = flow
+        .post_form("/oidc/initiate", "iss=https%3A%2F%2Fother.example")
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_dashboard_opens_at_a_target_on_its_own_origin_and_nowhere_else() {
+    let flow = Flow::new().await;
+    for (target, expected) in [
+        ("https%3A%2F%2Fstream.example.com%2Fsurfaces%3Ftab%3Dlogs%26x%3D1", "/surfaces?tab=logs&x=1"),
+        ("https%3A%2F%2Fevil.example%2Fsurfaces", "/"),
+        ("https%3A%2F%2Fstream.example.com%2F%2Fevil.example", "/"),
+        ("%2Fsurfaces", "/"),
+    ] {
+        let response = flow
+            .get(&format!("/oidc/initiate?{}", flow.initiate_query(&format!("&target_link_uri={target}"))), None)
+            .await;
+        let started = flow.started(&response);
+        flow.issue(id_token_claims(&flow.provider.issuer, &started.nonce));
+
+        let page = flow.callback(&started).await;
+
+        assert_eq!(page.status(), StatusCode::OK, "{target}");
+        assert_eq!(handed_off_path(&body(page).await), expected, "{target}");
+    }
+}
+
+#[tokio::test]
+async fn a_sign_in_started_at_the_login_page_opens_the_dashboard_home() {
+    let flow = Flow::new().await;
+
+    let page = flow.sign_in(|_| {}).await;
+
+    assert_eq!(handed_off_path(&body(page).await), "/");
 }

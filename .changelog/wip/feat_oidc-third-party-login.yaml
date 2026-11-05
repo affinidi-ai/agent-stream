@@ -1,0 +1,17 @@
+branch: feat/oidc-third-party-login
+changes:
+  added:
+    - timestamp: '2026-11-05T08:30:00.000Z'
+      title: Let an OpenID provider start a dashboard sign-in from its own portal
+      description: >-
+        In OIDC mode, /oidc/initiate (GET or POST) starts a fresh sign-in at the configured
+        provider, as OpenID Connect Core section 4 describes, so a provider's portal can link
+        people straight into the dashboard. The iss parameter must name the configured
+        issuer, a short plain login_hint is passed on to the provider, and target_link_uri
+        chooses where the dashboard opens, but only a path on the dashboard's own origin;
+        anything else opens the home page.
+  changed: []
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

@@ -19,6 +19,8 @@ const MAX_PENDING_SIGN_INS: usize = 10_000;
 pub struct PendingSignIn {
     pub nonce: String,
     pub code_verifier: String,
+    /// Where the dashboard opens once signed in: a checked path on this origin.
+    pub return_path: String,
     expires_at: Instant,
 }
 
@@ -33,6 +35,7 @@ impl PendingSignIns {
         state: String,
         nonce: String,
         code_verifier: String,
+        return_path: String,
     ) {
         let now = Instant::now();
         self.entries
@@ -53,6 +56,7 @@ impl PendingSignIns {
             PendingSignIn {
                 nonce,
                 code_verifier,
+                return_path,
                 expires_at: now + PENDING_SIGN_IN_TTL,
             },
         );
@@ -82,11 +86,12 @@ mod tests {
     #[test]
     fn a_sign_in_can_be_taken_once() {
         let pending = PendingSignIns::default();
-        pending.insert("s1".into(), "n1".into(), "v1".into());
+        pending.insert("s1".into(), "n1".into(), "v1".into(), "/surfaces".into());
 
         let taken = pending.take("s1").unwrap();
         assert_eq!(taken.nonce, "n1");
         assert_eq!(taken.code_verifier, "v1");
+        assert_eq!(taken.return_path, "/surfaces");
         assert!(pending.take("s1").is_none(), "a state works once");
         assert!(
             pending
@@ -98,7 +103,7 @@ mod tests {
     #[test]
     fn an_expired_sign_in_cannot_be_taken() {
         let pending = PendingSignIns::default();
-        pending.insert("s1".into(), "n1".into(), "v1".into());
+        pending.insert("s1".into(), "n1".into(), "v1".into(), "/surfaces".into());
         pending
             .entries
             .get_mut("s1")
@@ -112,7 +117,7 @@ mod tests {
     fn at_the_cap_the_oldest_sign_in_makes_room() {
         let pending = PendingSignIns::default();
         for index in 0..MAX_PENDING_SIGN_INS {
-            pending.insert(format!("s{index}"), String::new(), String::new());
+            pending.insert(format!("s{index}"), String::new(), String::new(), "/".into());
         }
         pending
             .entries
@@ -120,7 +125,7 @@ mod tests {
             .unwrap()
             .expires_at -= Duration::from_secs(60);
 
-        pending.insert("newest".into(), String::new(), String::new());
+        pending.insert("newest".into(), String::new(), String::new(), "/".into());
 
         assert_eq!(pending.len(), MAX_PENDING_SIGN_INS);
         assert!(

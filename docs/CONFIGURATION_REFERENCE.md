@@ -363,7 +363,7 @@ does not define stops startup, so a misspelt `required_claims` cannot pass unnot
 | `client_id` | Required | The client registered at the provider. It is not secret, so it may be written as is, or given as a secret reference (`env://`, `file://`, `aws_secrets://`, `aws_parameter_store://`) to keep it beside the client secret. |
 | `client_secret` | Required | A secret reference (see [Secret references](#secret-references)). |
 | `token_endpoint_auth_method` | `"client_secret_basic"` | `client_secret_basic` or `client_secret_post`. |
-| `redirect_uri` | Required | The callback URL registered at the provider, verbatim: the dashboard's public origin and the API prefix, for example `https://stream.example.com/api/oidc/callback`. `https`, and never derived from a request. |
+| `redirect_uri` | Required | The callback URL registered at the provider, verbatim: the dashboard's public origin and the API prefix, for example `https://stream.example.com/api/oidc/callback`. `https`, and never derived from a request. Its origin is the dashboard's origin: a third-party-initiated login may only open the dashboard at a path on it. |
 | `scopes` | `["openid", "profile", "email"]` | Must include `openid`. Add any scope the provider needs before it puts the role and tenant claims in the ID token. |
 | `id_token_signing_algs` | `["ES256"]` | The algorithms an ID token may be signed with: any of `ES256`, `ES384`, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512` and `EdDSA`. `none` and `HS*` are refused. |
 | `claims` | `preferred_username`, `email`, `given_name`, `family_name` | Which claim fills `username`, `email`, `first_name` and `last_name`. Display data only. |
