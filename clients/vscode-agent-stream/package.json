@@ -172,7 +172,7 @@
     "package": "npm run compile && npx --yes @vscode/vsce package --allow-missing-repository --no-dependencies -o agent-stream-vscode.vsix"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^26.6.6",
     "@types/vscode": "^1.104.0",
     "typescript": "^5.5.0"
   }
