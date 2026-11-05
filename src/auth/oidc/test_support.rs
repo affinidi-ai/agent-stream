@@ -132,6 +132,8 @@ struct StubState {
     issuer: String,
     jwks: Value,
     jwks_fetches: usize,
+    discovery_fetches: usize,
+    discovery_down: bool,
     token_answer: (StatusCode, Value),
     token_requests: Vec<TokenRequest>,
 }
@@ -153,6 +155,8 @@ impl StubProvider {
             issuer: issuer.clone(),
             jwks: json!({ "keys": [jwk(KEY_A_KID, KEY_A_X, KEY_A_Y)] }),
             jwks_fetches: 0,
+            discovery_fetches: 0,
+            discovery_down: false,
             token_answer: (StatusCode::BAD_REQUEST, json!({ "error": "invalid_grant" })),
             token_requests: Vec::new(),
         }));
@@ -229,6 +233,24 @@ impl StubProvider {
             .jwks_fetches
     }
 
+    pub fn discovery_fetches(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .discovery_fetches
+    }
+
+    /// Answer discovery requests with `503` while `down` is true.
+    pub fn set_discovery_down(
+        &self,
+        down: bool,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .discovery_down = down;
+    }
+
     /// Answer the next token requests with `status` and `body`.
     pub fn answer_token_requests(
         &self,
@@ -250,21 +272,27 @@ impl StubProvider {
     }
 }
 
-async fn discovery(State(state): State<Arc<Mutex<StubState>>>) -> Json<Value> {
-    let issuer = state
-        .lock()
-        .unwrap()
-        .issuer
-        .clone();
-    Json(json!({
-        "issuer": issuer,
-        "authorization_endpoint": format!("{issuer}/authorize"),
-        "token_endpoint": format!("{issuer}/token"),
-        "jwks_uri": format!("{issuer}/jwks"),
-        "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
-        "id_token_signing_alg_values_supported": ["ES256"],
-    }))
+async fn discovery(State(state): State<Arc<Mutex<StubState>>>) -> (StatusCode, Json<Value>) {
+    let issuer = {
+        let mut state = state.lock().unwrap();
+        state.discovery_fetches += 1;
+        if state.discovery_down {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
+        }
+        state.issuer.clone()
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": format!("{issuer}/token"),
+            "jwks_uri": format!("{issuer}/jwks"),
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+            "id_token_signing_alg_values_supported": ["ES256"],
+        })),
+    )
 }
 
 async fn jwks(State(state): State<Arc<Mutex<StubState>>>) -> Json<Value> {

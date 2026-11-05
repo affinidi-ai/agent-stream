@@ -403,7 +403,7 @@ async fn a_state_works_once() {
 
     let replayed = flow.callback(&started).await;
 
-    assert_eq!(replayed.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(replayed.status(), StatusCode::BAD_REQUEST, "an unknown state does not count toward the lockout");
     assert!(
         body(replayed)
             .await
@@ -421,7 +421,7 @@ async fn a_callback_without_this_browsers_binding_cookie_is_refused() {
         let response = flow
             .get(&format!("/oidc/callback?code=the-code&state={}", restarted.state), cookie)
             .await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{cookie:?}");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{cookie:?}");
     }
     assert!(
         flow.provider
@@ -430,6 +430,52 @@ async fn a_callback_without_this_browsers_binding_cookie_is_refused() {
         "no code is exchanged for an unbound callback"
     );
     assert!(flow.user().await.is_none());
+}
+
+#[tokio::test]
+async fn an_unbound_callback_leaves_the_sign_in_waiting() {
+    let flow = Flow::new().await;
+    let started = flow.start().await;
+
+    let foreign = flow
+        .get(&format!("/oidc/callback?code=the-code&state={}", started.state), None)
+        .await;
+    assert_eq!(foreign.status(), StatusCode::BAD_REQUEST);
+
+    flow.issue(id_token_claims(&flow.provider.issuer, &started.nonce));
+    assert_eq!(
+        flow.callback(&started)
+            .await
+            .status(),
+        StatusCode::OK,
+        "the browser that started the sign-in can still finish it"
+    );
+}
+
+#[tokio::test]
+async fn in_one_browser_the_most_recently_started_sign_in_finishes() {
+    let flow = Flow::new().await;
+    let earlier = flow.start().await;
+    let later = flow.start().await;
+
+    let stale = flow
+        .get(&format!("/oidc/callback?code=the-code&state={}", earlier.state), Some(&later.cookie))
+        .await;
+    assert_eq!(stale.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        set_cookies(&stale)
+            .iter()
+            .all(|cookie| !cookie.starts_with("__Host-oidc_state=")),
+        "the newer sign-in's cookie is left in place"
+    );
+
+    flow.issue(id_token_claims(&flow.provider.issuer, &later.nonce));
+    assert_eq!(
+        flow.callback(&later)
+            .await
+            .status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -460,6 +506,34 @@ async fn a_failed_code_exchange_is_refused() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(flow.user().await.is_none());
+    flow.start().await;
+    assert_eq!(
+        flow.provider
+            .discovery_fetches(),
+        1,
+        "an OAuth error keeps the discovery document"
+    );
+}
+
+#[tokio::test]
+async fn a_token_endpoint_that_is_gone_has_the_discovery_document_fetched_again() {
+    for status in [StatusCode::NOT_FOUND, StatusCode::BAD_GATEWAY] {
+        let flow = Flow::new().await;
+        let started = flow.start().await;
+        flow.provider
+            .answer_token_requests(status, json!({}));
+
+        let response = flow.callback(&started).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{status}");
+        flow.start().await;
+        assert_eq!(
+            flow.provider
+                .discovery_fetches(),
+            2,
+            "{status}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -563,10 +637,13 @@ async fn a_changed_role_takes_effect_and_ends_other_sessions_while_an_unchanged_
 }
 
 #[tokio::test]
-async fn a_disabled_user_is_refused_even_with_a_valid_token() {
+async fn a_disabled_user_is_refused_even_with_a_valid_token_and_signed_out_everywhere() {
     let flow = Flow::new().await;
     flow.sign_in(|_| {}).await;
     let mut user = flow.user().await.unwrap();
+    let elsewhere = flow
+        .other_session(&user)
+        .await;
     user.status = UserStatus::Disabled;
     flow.oidc
         .storage
@@ -577,6 +654,12 @@ async fn a_disabled_user_is_refused_even_with_a_valid_token() {
     let response = flow.sign_in(|_| {}).await;
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        !flow
+            .session_is_live(&elsewhere)
+            .await,
+        "the user's other sessions ended"
+    );
 }
 
 #[tokio::test]
