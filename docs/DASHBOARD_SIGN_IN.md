@@ -117,7 +117,9 @@ The provider:
 - Its discovery document, `{issuer}/.well-known/openid-configuration` (one trailing `/` of
   the issuer dropped), is fetched when sign-in first needs it and kept for 24 hours. Startup
   tries once and logs the result, but a provider that cannot be reached does not stop
-  startup: only sign-in waits, and `oidc/login` answers `503` with a readable page.
+  startup: only sign-in waits, and `oidc/login` answers `503` with a readable page. Until a
+  document has been fetched, one request fetches it while the others wait, and after a
+  failed fetch the next attempt is a minute later; requests meanwhile get the same failure.
 - Once a document has been fetched, a refresh that fails logs a warning and sign-in keeps
   using the cached document, trying again after a minute. One sign-in refreshes at a time;
   the others use the cached document meanwhile. A token endpoint that cannot be reached,
@@ -194,9 +196,8 @@ Outcomes:
 - Signing out of the dashboard ends the appliance session only; it does not sign out of the
   provider.
 - Each OIDC session records the provider sign-in it came from: the issuer, `sub`, and the
-  provider's session id (`sid`) when the ID token carries one. A sign-in whose session cannot
-  record it is refused (`server_error`), since back-channel logout could not find that
-  session.
+  provider's session id (`sid`) when the ID token carries one. The session is created with
+  it, so back-channel logout can always find the session.
 
 Back-channel logout ([OpenID Connect Back-Channel Logout
 1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html)) lets a sign-out at the
@@ -209,13 +210,18 @@ provider end the matching dashboard sessions. The provider posts a form with a
   and without `exp` it must be at most 5 minutes old. It must have an `events` claim holding
   the back-channel logout event, no `nonce` (so an ID token is never taken as a logout
   token), `sub` or `sid`, and a `jti` not seen before. Each `jti` is remembered until its
-  token would expire, up to 10,000 at once.
+  token would expire plus the 60 seconds of clock skew allowed, up to 10,000 at once.
 - A token with `sid` ends the sessions signed in with that provider session (and that `sub`,
-  when it also has one). A token with only `sub` ends every session of that account. Personal
-  access tokens are not touched.
-- The answer is `200` with `Cache-Control: no-store` whether or not a session matched, since
-  the provider may retry; a token that does not verify gets `400` with
-  `{"error":"invalid_request"}`, and `503` means the provider's keys could not be reached.
+  when it also has one). A token with only `sub` ends every session of that account. A
+  session whose ID token had no `sid` cannot be told apart from the account's other provider
+  sessions, so a token with `sid` and `sub` ends it when `sub` names its account. A session
+  created by OIDC sign-in before sessions recorded the provider sign-in is ended by any token
+  whose `sub` names its account. Personal access tokens are not touched.
+- Every answer has `Cache-Control: no-store`. It is `200` whether or not a session matched,
+  since the provider may retry. A request that is not a form with a token that verifies gets
+  `400` with `{"error":"invalid_request"}`. A logout that could not end every session it
+  names gets `400` with `{"error":"logout_failed"}`, and its `jti` is forgotten so the
+  provider can send it again. `503` means the provider or its keys could not be reached.
 - An open dashboard tab loses access within about 30 seconds, when its connection next
   checks the session.
 - The route is not throttled, because a provider may send many logouts at once; a request

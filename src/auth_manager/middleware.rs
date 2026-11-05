@@ -1205,7 +1205,7 @@ mod tests {
             (TermsSessionGate::ConsentPending, 503),
         ] {
             let token = sessions
-                .create_session_with_terms_gate("alice".into(), "user-1".into(), gate)
+                .create_session_with_terms_gate("alice".into(), "user-1".into(), gate, None)
                 .await;
             assert_eq!(get_status_with_bearer(&app, "/v1/settings", &token).await, expected);
             for path in ["/auth/login/start", "/saml/acs", "/v1/terms/status"] {
@@ -1313,7 +1313,12 @@ mod tests {
         );
         let sessions = Arc::new(crate::auth::session::SessionManager::new());
         let token = sessions
-            .create_session_with_terms_gate("alice".to_string(), "user-1".to_string(), TermsSessionGate::ConsentPending)
+            .create_session_with_terms_gate(
+                "alice".to_string(),
+                "user-1".to_string(),
+                TermsSessionGate::ConsentPending,
+                None,
+            )
             .await;
         let app = Router::new()
             .route("/v1/terms/status", get(ok_handler))

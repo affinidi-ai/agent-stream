@@ -300,8 +300,8 @@ fn saml_auth_routes(
 }
 
 /// The OIDC sign-in routes, with the same per-client throttle as
-/// [`passkey_auth_routes`]. `/auth/check` and `/auth/logout` behave as in SAML
-/// mode.
+/// [`passkey_auth_routes`], and the unthrottled back-channel logout route.
+/// `/auth/check` and `/auth/logout` behave as in SAML mode.
 fn oidc_auth_routes(
     oidc_state: std::sync::Arc<crate::auth::oidc::OidcState>,
     sessions: std::sync::Arc<crate::auth::SessionManager>,
@@ -4049,6 +4049,20 @@ mod auth_throttle_route_tests {
             );
         }
         assert_auth_check_throttled(&app, "192.0.2.73:5000").await;
+    }
+
+    #[tokio::test]
+    async fn a_back_channel_logout_body_over_the_limit_is_refused_as_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(crate::auth::SessionManager::new());
+        let app = oidc_auth_routes(oidc_state(&dir, sessions.clone(), true).await, sessions)
+            .layer(Extension(Arc::new(crate::terms::TermsManager::disabled())));
+        let oversized = format!("logout_token={}", "a".repeat(crate::auth::oidc::MAX_BACKCHANNEL_LOGOUT_BYTES));
+
+        assert_eq!(
+            status(&app, form_request("/oidc/backchannel-logout", "192.0.2.65:5000", &oversized)).await,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]

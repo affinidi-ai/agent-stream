@@ -33,7 +33,7 @@ async fn validate_jwks_fetch_url(raw: &str) -> Result<(), JwtBearerError> {
 const DEFAULT_TTL_SECS: u64 = 86_400;
 
 /// The shortest time between two re-fetches caused by a `kid` that fresh keys
-/// lack. A rotated key is picked up by the first token that names it.
+/// lack, so a rotated key is picked up within this long of its first use.
 pub const UNKNOWN_KID_REFETCH_COOLDOWN: Duration = Duration::from_secs(60);
 
 // ── JSON Web Key types ────────────────────────────────────────────────────────
@@ -91,6 +91,11 @@ struct CacheEntry {
 impl CacheEntry {
     fn is_expired(&self) -> bool {
         self.fetched_at.elapsed() > self.ttl
+    }
+
+    fn refetched_for_unknown_kid_recently(&self) -> bool {
+        self.unknown_kid_refetch_at
+            .is_some_and(|at| at.elapsed() < UNKNOWN_KID_REFETCH_COOLDOWN)
     }
 }
 
@@ -183,19 +188,37 @@ impl JwksClient {
                         debug!("JWKS cache hit for strategy {} kid {}", strategy_id, kid);
                         return Ok(jwk.clone());
                     }
-                    if entry
-                        .unknown_kid_refetch_at
-                        .is_some_and(|at| at.elapsed() < UNKNOWN_KID_REFETCH_COOLDOWN)
-                    {
+                    if entry.refetched_for_unknown_kid_recently() {
                         debug!("kid '{}' not found for strategy {}; re-fetched recently, not again", kid, strategy_id);
                         return Err(JwtBearerError::KeyNotFound(kid.to_string()));
                     }
-                    // kid not in cache even though entry is fresh — fall through to re-fetch
-                    debug!("kid '{}' not found in fresh cache for strategy {}, re-fetching", kid, strategy_id);
                     unknown_kid = true;
                 } else {
                     debug!("JWKS cache expired for strategy {}, re-fetching", strategy_id);
                 }
+            }
+        }
+
+        // Claim the unknown-kid re-fetch under the write lock before fetching,
+        // so concurrent requests make one fetch between them and a failed
+        // fetch still starts the cooldown.
+        let mut unknown_kid_refetch_at = None;
+        if unknown_kid {
+            let mut cache = self.cache.write().await;
+            if let Some(entry) = cache
+                .get_mut(strategy_id)
+                .filter(|entry| !entry.is_expired())
+            {
+                if let Some(jwk) = entry.keys.get(kid) {
+                    return Ok(jwk.clone());
+                }
+                if entry.refetched_for_unknown_kid_recently() {
+                    return Err(JwtBearerError::KeyNotFound(kid.to_string()));
+                }
+                debug!("kid '{}' not found in fresh cache for strategy {}, re-fetching", kid, strategy_id);
+                let now = Instant::now();
+                entry.unknown_kid_refetch_at = Some(now);
+                unknown_kid_refetch_at = Some(now);
             }
         }
 
@@ -204,9 +227,7 @@ impl JwksClient {
         let mut entry = self
             .fetch_and_build_entry(jwks_uri)
             .await?;
-        if unknown_kid {
-            entry.unknown_kid_refetch_at = Some(entry.fetched_at);
-        }
+        entry.unknown_kid_refetch_at = unknown_kid_refetch_at;
 
         let jwk = entry.keys.get(kid).cloned();
 
@@ -486,6 +507,61 @@ mod tests {
             .get_key("provider-k", &jwks_uri, "made-up-4")
             .await;
         assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 3, "after the cooldown one more re-fetch");
+    }
+
+    #[tokio::test]
+    async fn concurrent_made_up_kids_make_one_refetch_between_them() {
+        let body = std::sync::Arc::new(std::sync::Mutex::new(rsa_jwks_body("key-1", DUMMY_N, DUMMY_E)));
+        let (jwks_uri, fetches, _server) = counting_jwks_server(body).await;
+        let client = JwksClient::new(reqwest::Client::new());
+        client
+            .get_key("provider-c", &jwks_uri, "key-1")
+            .await
+            .unwrap();
+
+        let lookups = (0..20).map(|index| {
+            let client = client.clone();
+            let jwks_uri = jwks_uri.clone();
+            tokio::spawn(async move {
+                client
+                    .get_key("provider-c", &jwks_uri, &format!("made-up-{index}"))
+                    .await
+            })
+        });
+        for lookup in futures::future::join_all(lookups).await {
+            assert!(matches!(lookup.unwrap(), Err(JwtBearerError::KeyNotFound(_))));
+        }
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_unknown_kid_refetch_still_starts_the_cooldown() {
+        let body = std::sync::Arc::new(std::sync::Mutex::new(rsa_jwks_body("key-1", DUMMY_N, DUMMY_E)));
+        let (jwks_uri, fetches, _server) = counting_jwks_server(body.clone()).await;
+        let client = JwksClient::new(reqwest::Client::new());
+        client
+            .get_key("provider-f", &jwks_uri, "key-1")
+            .await
+            .unwrap();
+
+        *body.lock().unwrap() = "not a key set".to_string();
+        assert!(matches!(
+            client
+                .get_key("provider-f", &jwks_uri, "made-up-1")
+                .await,
+            Err(JwtBearerError::JwksFetchFailed(_))
+        ));
+        assert!(matches!(
+            client
+                .get_key("provider-f", &jwks_uri, "made-up-2")
+                .await,
+            Err(JwtBearerError::KeyNotFound(_))
+        ));
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 2);
+        client
+            .get_key("provider-f", &jwks_uri, "key-1")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

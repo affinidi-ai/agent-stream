@@ -19,9 +19,8 @@ const JWKS_CACHE_KEY: &str = "oidc-login";
 /// Clock skew allowed on `exp` and `iat`.
 const LEEWAY_SECS: u64 = 60;
 /// The longest `sub`, `sid` or `jti` accepted.
-const MAX_SUBJECT_LEN: usize = 255;
-/// How old a logout token without `exp` may be, and how long a `jti` is
-/// remembered when the token has no `exp`.
+const MAX_IDENTIFIER_CLAIM_LEN: usize = 255;
+/// How old a logout token without `exp` may be.
 const LOGOUT_TOKEN_MAX_AGE_SECS: i64 = 5 * 60;
 /// The event a logout token must carry.
 const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
@@ -38,17 +37,17 @@ pub struct VerifiedIdToken {
     pub claims: Map<String, Value>,
 }
 
-/// Why an ID token was not accepted. The detail names the check that failed,
+/// Why an ID token or a logout token was not accepted. The detail names the check that failed,
 /// for the log; it never contains the token.
 #[derive(Debug)]
-pub enum IdTokenFailure {
+pub enum TokenFailure {
     /// The provider's published keys could not be fetched.
     KeysUnavailable(String),
     /// The token did not pass a check.
     Invalid(String),
 }
 
-impl std::fmt::Display for IdTokenFailure {
+impl std::fmt::Display for TokenFailure {
     fn fmt(
         &self,
         f: &mut std::fmt::Formatter<'_>,
@@ -57,6 +56,13 @@ impl std::fmt::Display for IdTokenFailure {
             Self::KeysUnavailable(detail) | Self::Invalid(detail) => f.write_str(detail),
         }
     }
+}
+
+/// A verified logout token: what it signs out, and its `jti`.
+#[derive(Debug)]
+pub struct VerifiedLogoutToken {
+    pub target: LogoutTarget,
+    pub jti: String,
 }
 
 /// What a verified logout token signs out: one provider session (`sid`), or
@@ -70,22 +76,28 @@ pub struct LogoutTarget {
 impl LogoutTarget {
     /// Whether a session bound to `binding` is one this logout ends: the same
     /// issuer, and the same `sid` (and `sub`, when the token gives both), or,
-    /// for a token with only `sub`, the same account.
+    /// for a token with only `sub`, the same account. A session whose ID token
+    /// had no `sid` cannot be told apart from the account's other provider
+    /// sessions, so a token with `sid` ends it when its `sub` names the account.
     pub fn matches(
         &self,
         issuer: &str,
         binding: &OidcSessionBinding,
     ) -> bool {
+        let same_account = self
+            .subject
+            .as_ref()
+            .is_some_and(|subject| subject == &binding.subject);
         binding.issuer == issuer
-            && match (&self.sid, &self.subject) {
-                (Some(sid), subject) => {
-                    binding.sid.as_ref() == Some(sid)
-                        && subject
+            && match (&self.sid, &binding.sid) {
+                (Some(sid), Some(bound)) => {
+                    sid == bound
+                        && self
+                            .subject
                             .as_ref()
                             .is_none_or(|subject| subject == &binding.subject)
                 }
-                (None, Some(subject)) => subject == &binding.subject,
-                (None, None) => false,
+                (Some(_), None) | (None, _) => same_account,
             }
     }
 }
@@ -129,6 +141,14 @@ impl SeenLogoutTokens {
             }
         }
     }
+
+    /// Forget `jti`, so the provider can send its logout token again.
+    pub fn forget(
+        &self,
+        jti: &str,
+    ) {
+        self.ids.remove(jti);
+    }
 }
 
 /// Verify an ID token from the token endpoint, issued for the sign-in whose
@@ -139,9 +159,9 @@ pub async fn verify_id_token(
     jwks: &JwksClient,
     jwks_uri: &str,
     expected_nonce: &str,
-) -> Result<VerifiedIdToken, IdTokenFailure> {
+) -> Result<VerifiedIdToken, TokenFailure> {
     let (_, claims) = signed_claims(token, config, jwks, jwks_uri, &["exp", "iss", "aud", "sub"]).await?;
-    check_claims(&claims, config, expected_nonce, chrono::Utc::now().timestamp()).map_err(IdTokenFailure::Invalid)?;
+    check_claims(&claims, config, expected_nonce, chrono::Utc::now().timestamp()).map_err(TokenFailure::Invalid)?;
     Ok(VerifiedIdToken {
         subject: string_claim(&claims, "sub").unwrap_or_default(),
         sid: string_claim(&claims, "sid"),
@@ -150,29 +170,27 @@ pub async fn verify_id_token(
 }
 
 /// Verify a logout token the provider posted, and record its `jti` so it
-/// works once. The error names the check that failed, for the log.
+/// works once.
 pub async fn verify_logout_token(
     token: &str,
     config: &OidcConfig,
     jwks: &JwksClient,
     jwks_uri: &str,
     seen: &SeenLogoutTokens,
-) -> Result<LogoutTarget, String> {
-    let (header, claims) = signed_claims(token, config, jwks, jwks_uri, &["iss", "aud"])
-        .await
-        .map_err(|failure| failure.to_string())?;
+) -> Result<VerifiedLogoutToken, TokenFailure> {
+    let (header, claims) = signed_claims(token, config, jwks, jwks_uri, &["iss", "aud"]).await?;
     if let Some(typ) = &header.typ {
         let typ = typ.to_ascii_lowercase();
         if typ != "logout+jwt" && typ != "application/logout+jwt" {
-            return Err(format!("typ is {typ}, not logout+jwt"));
+            return Err(TokenFailure::Invalid(format!("typ is {typ}, not logout+jwt")));
         }
     }
     let now = chrono::Utc::now().timestamp();
-    let (target, jti, remember_until) = check_logout_claims(&claims, now)?;
+    let (target, jti, remember_until) = check_logout_claims(&claims, now).map_err(TokenFailure::Invalid)?;
     if !seen.remember(&jti, remember_until, now) {
-        return Err("jti was already used".to_string());
+        return Err(TokenFailure::Invalid("jti was already used".to_string()));
     }
-    Ok(target)
+    Ok(VerifiedLogoutToken { target, jti })
 }
 
 /// Check the header's algorithm against `id_token_signing_algs`, the signature
@@ -184,13 +202,13 @@ async fn signed_claims(
     jwks: &JwksClient,
     jwks_uri: &str,
     required: &[&str],
-) -> Result<(Header, Map<String, Value>), IdTokenFailure> {
-    let header = decode_header(token).map_err(|e| IdTokenFailure::Invalid(format!("unreadable header: {e}")))?;
+) -> Result<(Header, Map<String, Value>), TokenFailure> {
+    let header = decode_header(token).map_err(|e| TokenFailure::Invalid(format!("unreadable header: {e}")))?;
     if !config
         .id_token_signing_algs
         .contains(&header.alg)
     {
-        return Err(IdTokenFailure::Invalid(format!("algorithm {:?} is not in id_token_signing_algs", header.alg)));
+        return Err(TokenFailure::Invalid(format!("algorithm {:?} is not in id_token_signing_algs", header.alg)));
     }
     let jwk = jwks
         .get_key(
@@ -203,8 +221,8 @@ async fn signed_claims(
         )
         .await
         .map_err(|e| match e {
-            JwtBearerError::KeyNotFound(_) => IdTokenFailure::Invalid(format!("no published key matches: {e}")),
-            _ => IdTokenFailure::KeysUnavailable(format!("signing key unavailable: {e}")),
+            JwtBearerError::KeyNotFound(_) => TokenFailure::Invalid(format!("no published key matches: {e}")),
+            _ => TokenFailure::KeysUnavailable(format!("signing key unavailable: {e}")),
         })?;
     if let Some(key_alg) = &jwk.alg
         && key_alg
@@ -212,17 +230,17 @@ async fn signed_claims(
             .ok()
             != Some(header.alg)
     {
-        return Err(IdTokenFailure::Invalid(format!("the signing key is for {key_alg}, not {:?}", header.alg)));
+        return Err(TokenFailure::Invalid(format!("the signing key is for {key_alg}, not {:?}", header.alg)));
     }
     if jwk
         .key_use
         .as_deref()
         .is_some_and(|key_use| key_use != "sig")
     {
-        return Err(IdTokenFailure::Invalid("the signing key is not published for signatures".to_string()));
+        return Err(TokenFailure::Invalid("the signing key is not published for signatures".to_string()));
     }
     let key = crate::jwt_bearer::validator::decoding_key_from_jwk(&jwk)
-        .map_err(|e| IdTokenFailure::Invalid(format!("signing key unusable: {e}")))?;
+        .map_err(|e| TokenFailure::Invalid(format!("signing key unusable: {e}")))?;
 
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&config.issuer]);
@@ -230,7 +248,7 @@ async fn signed_claims(
     validation.set_required_spec_claims(required);
     validation.leeway = LEEWAY_SECS;
     let claims = decode::<Map<String, Value>>(token, &key, &validation)
-        .map_err(|e| IdTokenFailure::Invalid(format!("{e}")))?
+        .map_err(|e| TokenFailure::Invalid(format!("{e}")))?
         .claims;
     Ok((header, claims))
 }
@@ -253,8 +271,10 @@ fn short_string_claim(
 ) -> Result<Option<String>, String> {
     match claims.get(name) {
         None => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() && value.len() <= MAX_SUBJECT_LEN => Ok(Some(value.clone())),
-        Some(_) => Err(format!("{name} must be a string of 1 to {MAX_SUBJECT_LEN} characters")),
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= MAX_IDENTIFIER_CLAIM_LEN => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(format!("{name} must be a string of 1 to {MAX_IDENTIFIER_CLAIM_LEN} characters")),
     }
 }
 
@@ -296,7 +316,7 @@ fn check_logout_claims(
         return Err("neither sub nor sid is present".to_string());
     }
     let jti = short_string_claim(claims, "jti")?.ok_or("jti is missing")?;
-    let remember_until = expires_at.unwrap_or(issued_at + LOGOUT_TOKEN_MAX_AGE_SECS);
+    let remember_until = expires_at.unwrap_or(issued_at + LOGOUT_TOKEN_MAX_AGE_SECS) + LEEWAY_SECS as i64;
     Ok((target, jti, remember_until))
 }
 
@@ -336,7 +356,7 @@ fn check_claims(
     }
 
     if short_string_claim(claims, "sub")?.is_none() {
-        return Err(format!("sub must be a string of 1 to {MAX_SUBJECT_LEN} characters"));
+        return Err(format!("sub must be a string of 1 to {MAX_IDENTIFIER_CLAIM_LEN} characters"));
     }
     short_string_claim(claims, "sid").map(|_| ())
 }
@@ -459,13 +479,13 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(unavailable, IdTokenFailure::KeysUnavailable(_)), "{unavailable:?}");
+        assert!(matches!(unavailable, TokenFailure::KeysUnavailable(_)), "{unavailable:?}");
 
         let unknown_key = sign(KEY_B_PEM, Some(KEY_B_KID), &id_token_claims(&provider.issuer, "nonce-1"));
         let invalid = verify_id_token(&unknown_key, &config, &provider.jwks_client(), &provider.jwks_uri(), "nonce-1")
             .await
             .unwrap_err();
-        assert!(matches!(invalid, IdTokenFailure::Invalid(_)), "{invalid:?}");
+        assert!(matches!(invalid, TokenFailure::Invalid(_)), "{invalid:?}");
     }
 
     #[tokio::test]
@@ -616,6 +636,9 @@ mod tests {
 
         let both = target(Some("user-1"), Some("s1"));
         assert!(both.matches(issuer, &binding(Some("s1"))));
+        assert!(!both.matches(issuer, &binding(Some("s2"))));
+        assert!(both.matches(issuer, &binding(None)), "a session without a sid, of that account");
+        assert!(!target(Some("user-2"), Some("s1")).matches(issuer, &binding(None)));
         assert!(!target(Some("user-2"), Some("s1")).matches(issuer, &binding(Some("s1"))), "sub must agree too");
 
         let by_sub = target(Some("user-1"), None);
@@ -697,11 +720,18 @@ mod tests {
     fn a_logout_token_without_exp_must_be_recent() {
         let now = chrono::Utc::now().timestamp();
         let (_, _, remember_until) = logout_checked(json!({ "exp": null, "iat": now - 60 })).unwrap();
-        assert_eq!(remember_until, now - 60 + LOGOUT_TOKEN_MAX_AGE_SECS);
+        assert_eq!(remember_until, now - 60 + LOGOUT_TOKEN_MAX_AGE_SECS + LEEWAY_SECS as i64);
 
         let refused = logout_checked(json!({ "exp": null, "iat": now - 600 })).unwrap_err();
         assert!(refused.contains("more than 5 minutes old"), "{refused}");
         assert!(logout_checked(json!({ "iat": now - 600 })).is_ok(), "an old token with exp in the future");
+    }
+
+    #[test]
+    fn a_logout_token_id_is_remembered_for_as_long_as_the_leeway_still_accepts_the_token() {
+        let now = chrono::Utc::now().timestamp();
+        let (_, _, remember_until) = logout_checked(json!({ "exp": now - 30 })).unwrap();
+        assert_eq!(remember_until, now - 30 + LEEWAY_SECS as i64);
     }
 
     async fn verify_logout(
@@ -709,6 +739,17 @@ mod tests {
         token: &str,
         seen: &SeenLogoutTokens,
     ) -> Result<LogoutTarget, String> {
+        verify_logout_failure(provider, token, seen)
+            .await
+            .map(|verified| verified.target)
+            .map_err(|failure| failure.to_string())
+    }
+
+    async fn verify_logout_failure(
+        provider: &StubProvider,
+        token: &str,
+        seen: &SeenLogoutTokens,
+    ) -> Result<VerifiedLogoutToken, TokenFailure> {
         let config = config_for(&provider.issuer);
         verify_logout_token(token, &config, &provider.jwks_client(), &provider.jwks_uri(), seen).await
     }
@@ -787,6 +828,94 @@ mod tests {
                 .unwrap_err()
                 .contains("InvalidAudience")
         );
+    }
+
+    #[tokio::test]
+    async fn a_signed_logout_token_inside_the_exp_leeway_is_accepted_once() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let mut claims = crate::auth::oidc::test_support::logout_claims(&provider.issuer, "s1");
+        claims["exp"] = json!(chrono::Utc::now().timestamp() - 30);
+        let token = crate::auth::oidc::test_support::sign_logout(&claims);
+
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .is_ok()
+        );
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .unwrap_err()
+                .contains("jti was already used")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_logout_token_id_can_be_sent_again() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let token = crate::auth::oidc::test_support::sign_logout(&crate::auth::oidc::test_support::logout_claims(
+            &provider.issuer,
+            "s1",
+        ));
+
+        let verified = verify_logout_failure(&provider, &token, &seen)
+            .await
+            .unwrap();
+        seen.forget(&verified.jti);
+        assert!(
+            verify_logout(&provider, &token, &seen)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_logout_token_type_is_logout_jwt_with_or_without_its_media_type_prefix() {
+        let provider = StubProvider::start().await;
+        let seen = SeenLogoutTokens::default();
+        let claims = crate::auth::oidc::test_support::logout_claims(&provider.issuer, "s1");
+        let typed = |typ: &str| {
+            let mut header = Header::new(Algorithm::ES256);
+            header.typ = Some(typ.to_string());
+            header.kid = Some(KEY_A_KID.to_string());
+            let mut claims = claims.clone();
+            claims["jti"] = json!(uuid::Uuid::new_v4().to_string());
+            jsonwebtoken::encode(
+                &header,
+                &claims,
+                &EncodingKey::from_ec_pem(crate::auth::oidc::test_support::KEY_A_PEM.as_bytes()).unwrap(),
+            )
+            .unwrap()
+        };
+
+        assert!(
+            verify_logout(&provider, &typed("application/logout+jwt"), &seen)
+                .await
+                .is_ok()
+        );
+        assert!(
+            verify_logout(&provider, &typed("secevent+jwt"), &seen)
+                .await
+                .unwrap_err()
+                .contains("not logout+jwt")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_logout_token_whose_keys_cannot_be_fetched_is_unchecked_rather_than_invalid() {
+        let provider = StubProvider::start().await;
+        provider.set_jwks(json!("not a key set"));
+        let token = crate::auth::oidc::test_support::sign_logout(&crate::auth::oidc::test_support::logout_claims(
+            &provider.issuer,
+            "s1",
+        ));
+
+        let failure = verify_logout_failure(&provider, &token, &SeenLogoutTokens::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(failure, TokenFailure::KeysUnavailable(_)), "{failure:?}");
     }
 
     #[test]
