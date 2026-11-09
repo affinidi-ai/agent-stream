@@ -103,7 +103,9 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
 
 OIDC mode signs people in with one OpenID provider, configured in `oidc.json`
 ([`src/auth/oidc/`](../src/auth/oidc/)), using the authorization code flow with PKCE. Its
-fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson).
+fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson). The file
+must bind sign-in to a tenant at the provider: startup stops unless `required_claims` has an
+entry or `allow_any_account` is `true`.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
@@ -150,8 +152,6 @@ The flow:
     audiences needs `azp` equal to `client_id`.
   - `exp` has not passed and `iat` is not more than 60 seconds ahead (60 seconds of leeway each).
   - `nonce` is the one this sign-in sent, and `sub` is 1 to 255 characters.
-- `oidc.json` must bind sign-in to a tenant: startup stops unless `required_claims` has an
-  entry or `allow_any_account` is `true`.
 - Each `required_claims` entry must be met: the claim, or an element of it when it is an
   array, equals one of the listed strings or booleans, with the type matching too, or matches
   one of its `regex:` patterns. Then `role_mapping` gives the role: each value of

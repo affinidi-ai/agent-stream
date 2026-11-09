@@ -12,7 +12,8 @@ changes:
         mapping (role_mapping, a string or array claim) sets each user's role at every
         sign-in, raising or lowering it, and refuses unmapped accounts by default;
         required_claims binds the deployment to one tenant at the provider, matching string
-        or boolean claims such as email_verified. Values in both may be regex: patterns, for
+        or boolean claims such as email_verified, and startup stops without it unless
+        allow_any_account is set to true. Values in both may be regex: patterns, for
         example every address at one email domain, and an exact entry overrides a pattern.
         The client secret is a secret reference and is never written into the file. Sign-in
         keeps working on the cached discovery document while the provider cannot be reached.

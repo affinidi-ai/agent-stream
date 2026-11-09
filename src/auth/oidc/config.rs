@@ -398,6 +398,12 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
             issuer = %file.issuer,
             "oidc.json sets allow_any_account without required_claims: every account at the OpenID provider can sign in"
         );
+    } else if !names_exact_values(&required_claims) {
+        warn!(
+            issuer = %file.issuer,
+            "no required_claims entry lists only exact values, so it may not tie sign-in to your tenant: \
+             a boolean or a pattern can match accounts of every tenant at the OpenID provider"
+        );
     }
     let role_mapping = role_mapping(file.role_mapping)?;
     Ok(CheckedFile {
@@ -436,6 +442,19 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
             Ok((claim, allowed))
         })
         .collect()
+}
+
+/// Whether some `required_claims` entry allows only exact string values, the
+/// shape that can name one tenant. A boolean or a `regex:` pattern in every
+/// entry can match accounts of any tenant.
+fn names_exact_values(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+    required
+        .values()
+        .any(|allowed| {
+            allowed
+                .iter()
+                .all(|value| matches!(value, ValueMatcher::Exact(_)))
+        })
 }
 
 fn non_empty(
@@ -792,6 +811,28 @@ mod tests {
                 .required_claims
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn only_an_entry_of_exact_values_can_name_a_tenant() {
+        let exact = |text: &str| ValueMatcher::Exact(text.to_string());
+        let pattern = |text: &str| ValueMatcher::from_text("required_claims.x", text).unwrap();
+        let claims = |entries: &[(&str, Vec<ValueMatcher>)]| {
+            entries
+                .iter()
+                .cloned()
+                .map(|(claim, allowed)| (claim.to_string(), allowed))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        assert!(names_exact_values(&claims(&[("org_id", vec![exact("org_123")])])));
+        assert!(names_exact_values(&claims(&[
+            ("email_verified", vec![ValueMatcher::Bool(true)]),
+            ("org_id", vec![exact("org_1"), exact("org_2")]),
+        ])));
+        assert!(!names_exact_values(&claims(&[("email_verified", vec![ValueMatcher::Bool(true)])])));
+        assert!(!names_exact_values(&claims(&[("org_id", vec![pattern("regex:.*")])])));
+        assert!(!names_exact_values(&claims(&[("org_id", vec![exact("org_123"), pattern("regex:.*")])])));
     }
 
     #[tokio::test]
