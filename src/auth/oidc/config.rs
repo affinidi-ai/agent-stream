@@ -52,6 +52,8 @@ struct OidcFile {
     claims: ClaimNames,
     #[serde(default)]
     required_claims: BTreeMap<String, Vec<RawClaimValue>>,
+    #[serde(default)]
+    allow_any_account: bool,
     role_mapping: RoleMappingFile,
     #[serde(default)]
     logout: LogoutSettings,
@@ -296,15 +298,6 @@ impl OidcConfig {
         let checked = check(file)?;
         let client_id = resolve_client_id(&checked.client_id).await?;
         let client_secret = resolve_client_secret(&checked.client_secret_reference).await?;
-        if checked
-            .required_claims
-            .is_empty()
-        {
-            warn!(
-                issuer = %checked.issuer,
-                "oidc.json has no required_claims: every account at the OpenID provider can sign in"
-            );
-        }
         Ok(Self {
             label: checked.label,
             issuer: checked.issuer,
@@ -395,6 +388,17 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
         return Err("logout.post_logout_redirect_uri must be on the same origin as redirect_uri".to_string());
     }
     let required_claims = required_claims(file.required_claims)?;
+    if required_claims.is_empty() {
+        if !file.allow_any_account {
+            return Err("required_claims must name at least one claim that binds sign-in to your tenant at the \
+                 provider, or set allow_any_account to true to let every account at the provider sign in"
+                .to_string());
+        }
+        warn!(
+            issuer = %file.issuer,
+            "oidc.json sets allow_any_account without required_claims: every account at the OpenID provider can sign in"
+        );
+    }
     let role_mapping = role_mapping(file.role_mapping)?;
     Ok(CheckedFile {
         label,
@@ -764,6 +768,38 @@ mod tests {
                 .unwrap_err();
             assert!(refused.contains(expected), "{field}={value}: {refused}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_file_without_a_tenant_binding_is_refused_unless_it_opts_out() {
+        let mut unbound = valid_file();
+        unbound
+            .as_object_mut()
+            .unwrap()
+            .remove("required_claims");
+
+        for file in [unbound.clone(), with(valid_file(), &["required_claims"], json!({}))] {
+            let refused = load(file).await.unwrap_err();
+            assert!(refused.contains("required_claims"), "{refused}");
+            assert!(refused.contains("allow_any_account"), "{refused}");
+        }
+
+        let config = load(with(unbound, &["allow_any_account"], json!(true)))
+            .await
+            .unwrap();
+        assert!(
+            config
+                .required_claims
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn opting_out_while_binding_claims_still_requires_them() {
+        let config = load(with(valid_file(), &["allow_any_account"], json!(true)))
+            .await
+            .unwrap();
+        assert_eq!(config.required_claims["org_id"], [ValueMatcher::Exact("org_123".to_string())]);
     }
 
     #[test]

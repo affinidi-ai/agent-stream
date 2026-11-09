@@ -150,6 +150,8 @@ The flow:
     audiences needs `azp` equal to `client_id`.
   - `exp` has not passed and `iat` is not more than 60 seconds ahead (60 seconds of leeway each).
   - `nonce` is the one this sign-in sent, and `sub` is 1 to 255 characters.
+- `oidc.json` must bind sign-in to a tenant: startup stops unless `required_claims` has an
+  entry or `allow_any_account` is `true`.
 - Each `required_claims` entry must be met: the claim, or an element of it when it is an
   array, equals one of the listed strings or booleans, with the type matching too, or matches
   one of its `regex:` patterns. Then `role_mapping` gives the role: each value of
