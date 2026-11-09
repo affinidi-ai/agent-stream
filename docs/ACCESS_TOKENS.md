@@ -28,7 +28,7 @@ callers on a Surface (see [`SOURCE_AUTH.md`](SOURCE_AUTH.md)).
 | Scopes | `scopes`: an allow-list of RBAC permission names. Empty means the bound user's full role. |
 | Resource restriction | Optional `resource_pattern` and `required_headers`; see [Resource patterns](#resource-patterns). |
 | Expiry | Optional `expires_at`, fixed at creation. |
-| `last_used_at` | Updated on use; writes are coalesced to at most one per 60 seconds. |
+| `last_used_at` | Updated on use; writes are coalesced to at most one per 60 seconds, and only on the Active instance once it is ready, so a Standby never overwrites a revocation. Tokens are re-read on promotion ([what promotion does](CONFIGURATION_RELOAD.md#what-promotion-does)), so a revocation is guaranteed once `GET /api/v1/health` returns `200`, not for a request that reaches the instance directly while it is activating. |
 
 The caller sends the secret as `Authorization: Bearer aspat_...`. When no valid session
 matches the bearer, `require_session_auth` tries it as an access token. Authentication

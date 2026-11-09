@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::fs;
 use tokio::time::{Duration, interval};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::errors::{ApiKeyError, ApiKeyResult};
 use super::generator::{constant_time_compare, hash_secret};
@@ -143,7 +143,11 @@ impl FsApiKeyStore {
                         self.index_secret_hash(&record);
                     }
                     Err(e) => {
-                        warn!("Failed to load key file {:?}: {}", path, e);
+                        error!("Failed to load key file {:?}: {}", path, e);
+                        crate::metrics::backends::prometheus::track_storage_load_error(
+                            "api_key",
+                            e.load_failure_reason(),
+                        );
                     }
                 }
             }
@@ -263,7 +267,11 @@ impl FsApiKeyStore {
                         keys_for_agent.insert(record.key_id.clone(), record);
                     }
                     Err(e) => {
-                        warn!("Failed to load key file {:?}: {}", key_path, e);
+                        error!("Failed to load key file {:?}: {}", key_path, e);
+                        crate::metrics::backends::prometheus::track_storage_load_error(
+                            "api_key",
+                            e.load_failure_reason(),
+                        );
                     }
                 }
             }

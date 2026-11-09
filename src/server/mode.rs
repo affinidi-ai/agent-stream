@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -34,6 +34,7 @@ const STATE_ACTIVATING: u64 = 1;
 const STATE_ACTIVE: u64 = 2;
 static SERVE_STATE: AtomicU64 = AtomicU64::new(STATE_ACTIVE);
 static MODE_CHANGE_TX: OnceLock<broadcast::Sender<ModeChange>> = OnceLock::new();
+static READY: Notify = Notify::const_new();
 
 /// Serializes tests that change the process-wide mode.
 #[cfg(test)]
@@ -103,14 +104,18 @@ pub fn set_server_mode(mode: ServerMode) {
 /// starting listeners).
 #[must_use]
 pub fn mark_activation_ready(observed_generation: u64) -> bool {
-    SERVE_STATE
+    let ready = SERVE_STATE
         .compare_exchange(
             pack(observed_generation, STATE_ACTIVATING),
             pack(observed_generation, STATE_ACTIVE),
             Ordering::SeqCst,
             Ordering::SeqCst,
         )
-        .is_ok()
+        .is_ok();
+    if ready {
+        READY.notify_waiters();
+    }
+    ready
 }
 
 pub fn current_activation_generation() -> u64 {
@@ -126,6 +131,40 @@ pub fn current_mode() -> ServerMode {
 
 pub fn is_ready_to_serve() -> bool {
     state(SERVE_STATE.load(Ordering::SeqCst)) == STATE_ACTIVE
+}
+
+/// Wait until the instance is Active and ready to serve.
+pub async fn wait_until_ready() {
+    loop {
+        let notified = READY.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if is_ready_to_serve() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Wait for the next tick of `interval` at which the instance is ready, or for
+/// the instance to become ready again, whichever comes first. A tick that finds
+/// it not ready waits for readiness instead, and becoming ready restarts the
+/// interval, so a periodic job that only the Active may run runs as soon as the
+/// instance is ready, after every promotion, and then once per period.
+pub async fn tick_when_ready(interval: &mut tokio::time::Interval) {
+    let became_ready = READY.notified();
+    tokio::pin!(became_ready);
+    became_ready.as_mut().enable();
+    tokio::select! {
+        _ = interval.tick() => {
+            if is_ready_to_serve() {
+                return;
+            }
+        }
+        () = &mut became_ready => {}
+    }
+    wait_until_ready().await;
+    interval.reset();
 }
 
 /// Whether the instance is still ready in `generation`. False once a later
@@ -257,6 +296,72 @@ mod tests {
         assert!(is_ready_to_serve());
         assert!(!is_serving_generation(activating), "a re-promotion starts a new generation");
         assert!(is_serving_generation(current_activation_generation()));
+    }
+
+    #[test]
+    fn tick_when_ready_waits_for_readiness_then_restarts_the_period() {
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_server_mode(ServerMode::Standby);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let period = std::time::Duration::from_millis(400);
+                let mut interval = tokio::time::interval(period);
+                let first = tokio::spawn(async move {
+                    tick_when_ready(&mut interval).await;
+                    interval
+                });
+                tokio::time::sleep(period / 4).await;
+                assert!(!first.is_finished(), "waits while Standby");
+
+                set_server_mode(ServerMode::Active);
+                assert!(mark_activation_ready(current_activation_generation()));
+                let mut interval = tokio::time::timeout(period, first)
+                    .await
+                    .expect("returns once ready")
+                    .unwrap();
+
+                let next = tokio::spawn(async move { tick_when_ready(&mut interval).await });
+                tokio::time::sleep(period / 4).await;
+                assert!(!next.is_finished(), "the period restarts at readiness");
+                tokio::time::timeout(period * 2, next)
+                    .await
+                    .expect("ticks one period after readiness")
+                    .unwrap();
+            });
+    }
+
+    #[test]
+    fn tick_when_ready_returns_at_once_on_a_repromotion_within_the_period() {
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_server_mode(ServerMode::Active);
+        assert!(mark_activation_ready(current_activation_generation()));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let period = std::time::Duration::from_secs(60);
+                let mut interval = tokio::time::interval(period);
+                tick_when_ready(&mut interval).await;
+                let next = tokio::spawn(async move { tick_when_ready(&mut interval).await });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                assert!(!next.is_finished(), "waits for the period while Active");
+
+                set_server_mode(ServerMode::Standby);
+                set_server_mode(ServerMode::Active);
+                assert!(mark_activation_ready(current_activation_generation()));
+                tokio::time::timeout(std::time::Duration::from_secs(5), next)
+                    .await
+                    .expect("a re-promotion runs the job at once")
+                    .unwrap();
+            });
     }
 
     #[test]

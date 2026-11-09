@@ -328,7 +328,8 @@ tiers roll up correctly. The drift namespace is disjoint from the usage, operati
 and rejection series, and drift series are served only by `/v1/drift/series`, never by
 the main telemetry routes. Count and age limits are enforced on write
 ([`src/drift/retention.rs`](../src/drift/retention.rs)) and, when an age limit is set,
-by a sweep every six hours so idle Surfaces are pruned too. Series hold aggregate
+by a sweep that runs when the instance becomes Active and every six hours after, so idle
+Surfaces are pruned too. Series hold aggregate
 values only, never bodies.
 
 ## API

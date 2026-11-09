@@ -1640,6 +1640,7 @@ pub async fn run_axum_proxy(
             pipe_store: None,              // Will be set after pipe_store is initialized
             policy_definition_store: None, // Will be set after policy_definition_store is initialized
             global_policy_store: None,     // Will be set after global_policy_store is initialized
+            policy_engine_stores: None,
             budget_tracker: Arc::new(crate::pipes::budget_tracker::BudgetTracker::new()), // Will be updated with alert service
             pipe_route_manager: None, // Will be set after pipe_route_manager is initialized
             pipe_task_manager: None,  // Will be set after pipe_task_manager is initialized
@@ -2587,6 +2588,31 @@ pub async fn run_axum_proxy(
             .await,
         );
         crate::teams::set_global_team_usage_tracker(team_usage_tracker.clone());
+        // Management access tokens (service-account PATs): one filesystem store
+        // shared by the identity + vault auth guards (token validation) and the
+        // access-token admin router (mint/list/revoke).
+        let access_tokens_storage_path = std::path::PathBuf::from(
+            &bootstrap_config
+                .storage_paths
+                .secrets,
+        )
+        .parent()
+        .map(|p| p.join("access_tokens"))
+        .unwrap_or_else(|| std::path::PathBuf::from("_storage/access_tokens"));
+        let access_tokens_storage_path_str = access_tokens_storage_path
+            .to_string_lossy()
+            .to_string();
+        let access_token_store =
+            match crate::access_tokens::FsAccessTokenStore::new(&access_tokens_storage_path_str).await {
+                Ok(store) => {
+                    info!("Access tokens store initialized at {}", access_tokens_storage_path_str);
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize access tokens store at {}: {}", access_tokens_storage_path_str, e);
+                    None
+                }
+            };
         let mut promotion_reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> = Vec::new();
         if let Some(store) = &identity_state.member_store {
             promotion_reloads.push(store.clone());
@@ -2624,23 +2650,39 @@ pub async fn run_axum_proxy(
         if let Some(store) = crate::governance::store() {
             promotion_reloads.push(Arc::new(store.clone()));
         }
+        if let Some(store) = &access_token_store {
+            promotion_reloads.push(store.clone());
+        }
         let activation_policy_stores = Arc::new(ActivationPolicyStores {
             definitions: policy_definition_store.clone(),
             global: global_policy_store.clone(),
             gateways: gateway_store.clone(),
         });
+        let engine_surface_store = match crate::surfaces::FileSystemAgentSurfaceStore::new(PathBuf::from(
+            &bootstrap_config
+                .storage_paths
+                .agent_surfaces,
+        ))
+        .await
+        {
+            Ok(store) => Some(Arc::new(store)),
+            Err(error) => {
+                warn!("Failed to initialize agent surface store: {}", error);
+                None
+            }
+        };
         let activation_policy_engines = Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
             pipe_store: pipe_store.clone(),
             global_policy_store: global_policy_store.clone(),
-            agent_surfaces_path: bootstrap_config
-                .storage_paths
-                .agent_surfaces
-                .clone(),
-            gateways_path: bootstrap_config
-                .storage_paths
-                .gateways
-                .clone(),
+            agent_surface_store: engine_surface_store.clone(),
+            agent_surfaces_path: PathBuf::from(
+                &bootstrap_config
+                    .storage_paths
+                    .agent_surfaces,
+            ),
+            gateway_store: gateway_store.clone(),
         });
+        identity_state.policy_engine_stores = Some(activation_policy_engines.clone());
         identity_state.team_usage_tracker = Some(team_usage_tracker);
         info!("✓ Team usage tracker initialized");
 
@@ -3313,20 +3355,9 @@ pub async fn run_axum_proxy(
             })
             .map(|storage| crate::auth_manager::middleware::RbacGuard::new(storage, rbac_config.clone()))
             .ok_or_else(|| anyhow::anyhow!("RBAC guard unavailable after authentication initialization"))?;
-        let agent_surface_store: Option<Arc<dyn crate::surfaces::AgentSurfaceStore>> =
-            match crate::surfaces::FileSystemAgentSurfaceStore::new(std::path::PathBuf::from(
-                &bootstrap_config
-                    .storage_paths
-                    .agent_surfaces,
-            ))
-            .await
-            {
-                Ok(store) => Some(Arc::new(store)),
-                Err(error) => {
-                    warn!("Failed to initialize Agent Surface ownership store: {}", error);
-                    None
-                }
-            };
+        let agent_surface_store: Option<Arc<dyn crate::surfaces::AgentSurfaceStore>> = engine_surface_store
+            .clone()
+            .map(|store| store as Arc<dyn crate::surfaces::AgentSurfaceStore>);
         let (api_keys_router, api_key_validator, api_key_management_store) =
             match crate::api_keys::FsApiKeyStore::new(&api_keys_storage_path_str).await {
                 Ok(store) => {
@@ -3360,43 +3391,23 @@ pub async fn run_axum_proxy(
                 }
             };
 
-        // Management access tokens (service-account PATs): one filesystem store
-        // shared by the identity + vault auth guards (token validation) and the
-        // access-token admin router (mint/list/revoke).
-        let access_tokens_storage_path = std::path::PathBuf::from(
-            &bootstrap_config
-                .storage_paths
-                .secrets,
-        )
-        .parent()
-        .map(|p| p.join("access_tokens"))
-        .unwrap_or_else(|| std::path::PathBuf::from("_storage/access_tokens"));
-        let access_tokens_storage_path_str = access_tokens_storage_path
-            .to_string_lossy()
-            .to_string();
-        let (access_tokens_router, pat_authenticator) =
-            match crate::access_tokens::FsAccessTokenStore::new(&access_tokens_storage_path_str).await {
-                Ok(store) => {
-                    info!("Access tokens store initialized at {}", access_tokens_storage_path_str);
-                    let store_arc = std::sync::Arc::new(store);
-                    let router = crate::access_tokens::router::create_access_tokens_router(
-                        store_arc.clone(),
-                        rbac_config.clone(),
-                        Arc::new(
-                            bootstrap_config
-                                .tenancy
-                                .clone(),
-                        ),
-                        vault_rbac_guard.clone(),
-                    );
-                    let authenticator: std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator> = store_arc;
-                    (Some(router), Some(authenticator))
-                }
-                Err(e) => {
-                    warn!("Failed to initialize access tokens store at {}: {}", access_tokens_storage_path_str, e);
-                    (None, None)
-                }
-            };
+        let (access_tokens_router, pat_authenticator) = match &access_token_store {
+            Some(store) => {
+                let router = crate::access_tokens::router::create_access_tokens_router(
+                    store.clone(),
+                    rbac_config.clone(),
+                    Arc::new(
+                        bootstrap_config
+                            .tenancy
+                            .clone(),
+                    ),
+                    vault_rbac_guard.clone(),
+                );
+                let authenticator: std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator> = store.clone();
+                (Some(router), Some(authenticator))
+            }
+            None => (None, None),
+        };
 
         let secrets_cache: crate::secrets::SecretsCache = std::sync::Arc::new(dashmap::DashMap::new());
 
@@ -4350,8 +4361,17 @@ mod tests {
                 Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
                     pipe_store: Some(pipes),
                     global_policy_store: None,
-                    agent_surfaces_path: path("agent_surfaces"),
-                    gateways_path: path("gateways"),
+                    agent_surface_store: Some(Arc::new(
+                        crate::surfaces::FileSystemAgentSurfaceStore::new(PathBuf::from(path("agent_surfaces")))
+                            .await
+                            .unwrap(),
+                    )),
+                    agent_surfaces_path: PathBuf::from(path("agent_surfaces")),
+                    gateway_store: Some(Arc::new(
+                        crate::gateways::FileSystemGatewayStore::new(PathBuf::from(path("gateways")), None)
+                            .await
+                            .unwrap(),
+                    )),
                 }),
             );
             assert!(

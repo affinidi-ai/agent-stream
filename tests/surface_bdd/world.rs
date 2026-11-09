@@ -223,6 +223,13 @@ impl SurfaceWorld {
     ) -> Option<ApplianceProcess> {
         self.admin_client =
             Some(AdminClient::login(appliance.base_url(), appliance.test_token(), appliance.test_username()).await);
+        for client in self
+            .human_clients
+            .values_mut()
+            .flatten()
+        {
+            *client = client.with_base_url(appliance.base_url());
+        }
         self.infra
             .replace(ScenarioInfra { _appliance: appliance })
             .map(|infra| infra._appliance)

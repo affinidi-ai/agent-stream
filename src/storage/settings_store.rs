@@ -261,12 +261,12 @@ impl crate::server::mode::ReloadOnPromotion for SettingsStore {
     /// keeps the current settings.
     async fn reload_from_storage(&self) -> std::io::Result<()> {
         let _persist = self.persist_lock.lock().await;
-        let content = match fs::read_to_string(&self.storage_path).await {
+        let content = match fs::read(&self.storage_path).await {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
-        match serde_json::from_str::<DashboardSettings>(&content) {
+        match serde_json::from_slice::<DashboardSettings>(&content) {
             Ok(settings) => {
                 *self
                     .settings
@@ -835,6 +835,41 @@ mod tests {
             7
         );
         assert!(!path.exists(), "a reload never writes defaults");
+    }
+
+    #[tokio::test]
+    async fn reload_treats_a_file_that_is_not_utf8_as_unparseable() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(temp_dir.path());
+        store
+            .persist(DashboardSettings {
+                badge_threshold_minutes: 7,
+                ..DashboardSettings::default()
+            })
+            .await
+            .unwrap();
+        tokio::fs::write(
+            temp_dir
+                .path()
+                .join("settings.json"),
+            [0xff, 0xfe, 0xfd],
+        )
+        .await
+        .unwrap();
+
+        store
+            .reload_from_storage()
+            .await
+            .expect("an unparseable file does not hold readiness back");
+
+        assert_eq!(
+            store
+                .get()
+                .badge_threshold_minutes,
+            7
+        );
     }
 
     #[test]

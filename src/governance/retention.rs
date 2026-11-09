@@ -17,17 +17,15 @@ use crate::pipes::{FileSystemPipeStore, PipeConfig};
 /// removed within about two hours of leaving its window.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// Prune every governance log with a retention window, now and then hourly. A
-/// surface's failure is logged and does not stop the others.
+/// Prune every governance log with a retention window as soon as the instance
+/// is Active and ready, then hourly. A surface's failure is logged and does not
+/// stop the others.
 pub async fn periodic_retention_sweep(pipe_store: Arc<FileSystemPipeStore>) {
     let mut interval = tokio::time::interval(SWEEP_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        interval.tick().await;
         // Pruning rewrites the shared logs, which only the Active instance may do.
-        if !crate::server::mode::is_ready_to_serve() {
-            continue;
-        }
+        crate::server::mode::tick_when_ready(&mut interval).await;
         let Some(store) = super::capture::store() else {
             continue;
         };

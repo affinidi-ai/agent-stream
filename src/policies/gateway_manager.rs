@@ -423,6 +423,27 @@ impl GatewayPolicyManager {
             .contains(gateway_id)
     }
 
+    /// Drop the engine and enforcement of every gateway not in `stored`.
+    /// Returns how many were dropped.
+    pub fn retain_gateways(
+        &self,
+        stored: &HashSet<String>,
+    ) -> usize {
+        let mut engines = self
+            .engines
+            .write()
+            .expect("engines lock poisoned");
+        let before = engines.len();
+        engines.retain(|gateway_id, _| stored.contains(gateway_id));
+        let dropped = before - engines.len();
+        drop(engines);
+        self.enforced
+            .write()
+            .expect("enforced lock poisoned")
+            .retain(|gateway_id| stored.contains(gateway_id));
+        dropped
+    }
+
     /// Remove policy for a gateway
     #[allow(dead_code)]
     pub fn remove_gateway(

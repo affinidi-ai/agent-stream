@@ -64,8 +64,8 @@ impl MetricsBackend for FileMetricsBackend {
             });
         }
 
-        let contents = tokio::fs::read_to_string(&self.path).await?;
-        let metrics_data: crate::metrics::MetricsData = serde_json::from_str(&contents)?;
+        let contents = tokio::fs::read(&self.path).await?;
+        let metrics_data: crate::metrics::MetricsData = serde_json::from_slice(&contents)?;
 
         // Flatten hierarchical format back to flat metrics
         let (connections, rule_validation_events) = crate::metrics::flatten_hierarchical_metrics(&metrics_data);

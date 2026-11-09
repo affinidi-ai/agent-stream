@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::types::{DidDocument, KeyPair};
@@ -411,7 +411,11 @@ impl FileSystemDidWebVhIdentityStore {
                         count += 1;
                     }
                     Err(e) => {
-                        warn!("Failed to load identity from {:?}: {}", path, e);
+                        error!("Failed to load identity from {:?}: {}", path, e);
+                        crate::metrics::backends::prometheus::track_storage_load_error(
+                            "didwebvh_identity",
+                            identity_load_failure_reason(&e),
+                        );
                     }
                 }
             }
@@ -718,10 +722,45 @@ impl DidWebVhIdentityStore for FileSystemDidWebVhIdentityStore {
     }
 }
 
+/// The `agent_stream_storage_load_errors_total` reason for an identity file
+/// that failed to load with `error`: reading, parsing, or else decrypting it.
+fn identity_load_failure_reason(error: &anyhow::Error) -> &'static str {
+    match error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+    {
+        Some(io) if io.kind() == std::io::ErrorKind::InvalidData => "parse_failed",
+        Some(_) => "read_failed",
+        None if error
+            .chain()
+            .any(|cause| cause.is::<serde_json::Error>()) =>
+        {
+            "parse_failed"
+        }
+        None => "decrypt_failed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_identity_load_failure_reason_classifies_the_cause() {
+        let read = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("Failed to read identity file");
+        let parse = anyhow::Error::from(serde_json::from_str::<DidWebVhIdentity>("not json").unwrap_err())
+            .context("Failed to parse identity JSON");
+        let decrypt = anyhow::anyhow!("bad ciphertext").context("Failed to decrypt identity file");
+
+        assert_eq!(identity_load_failure_reason(&read), "read_failed");
+        assert_eq!(identity_load_failure_reason(&parse), "parse_failed");
+        assert_eq!(identity_load_failure_reason(&decrypt), "decrypt_failed");
+        let not_utf8 = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::InvalidData))
+            .context("Failed to read identity file");
+        assert_eq!(identity_load_failure_reason(&not_utf8), "parse_failed");
+    }
 
     #[test]
     fn test_didwebvh_fix_create_request_accepts_legacy_path_alias() {
