@@ -716,6 +716,34 @@ async fn a_disabled_user_is_refused_even_with_a_valid_token_and_signed_out_every
 }
 
 #[tokio::test]
+async fn a_deleted_user_is_refused_at_the_next_sign_in_and_not_created_again() {
+    let flow = Flow::new().await;
+    flow.sign_in(|_| {}).await;
+    let user = flow.user().await.unwrap();
+
+    flow.oidc
+        .storage
+        .delete_user(&user.username)
+        .await
+        .unwrap();
+    let response = flow.sign_in(|_| {}).await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let kept = flow.user().await.unwrap();
+    assert_eq!(kept.user_id, user.user_id, "no second user was created");
+    assert_eq!(kept.status, UserStatus::Disabled);
+    assert_eq!(
+        flow.oidc
+            .storage
+            .list_users()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn an_unreachable_provider_shows_a_readable_page() {
     let flow = Flow::with_config(|config| config.issuer = "http://127.0.0.1:9".to_string()).await;
 

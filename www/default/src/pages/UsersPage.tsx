@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
+import { DELETE_USER_TITLE } from '../utils/userDelete';
 import { usePermissions } from '../context/PermissionsContext';
 import SearchInput from '../components/shared/SearchInput';
 
@@ -352,7 +353,7 @@ const UsersPage: React.FC = () => {
                               <DeleteButton
                                 onDelete={() => handleDelete(user)}
                                 className="btn-sm"
-                                title="Delete user permanently"
+                                title={DELETE_USER_TITLE}
                               />
                             )}
                         </td>
@@ -490,6 +491,7 @@ const UsersPage: React.FC = () => {
                       setSelectedUser(null);
                     }}
                     variant="danger"
+                    title={DELETE_USER_TITLE}
                   >
                     Delete User
                   </DeleteButton>

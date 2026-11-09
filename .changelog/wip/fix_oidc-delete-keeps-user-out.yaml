@@ -1,0 +1,16 @@
+branch: fix/oidc-delete-keeps-user-out
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-09T12:00:00.000Z'
+      title: Keep a deleted OpenID Connect user out instead of creating them again
+      description: >-
+        Deleting a user who signs in with OpenID Connect used to remove the record, so their
+        next sign-in created a new approved user with their mapped role. Delete now clears
+        the user's profile data and passkeys and keeps a disabled record under their provider
+        account, so the next sign-in is refused until an administrator approves them. The
+        Users and Edit User delete buttons and docs/DASHBOARD_SIGN_IN.md say so. A user deleted before this change has no record left, so disable them again if they signed in anew.
+  removed: []
+  security: []
+  breaking: []

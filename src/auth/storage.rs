@@ -299,15 +299,36 @@ impl PasskeyStorage {
             .collect())
     }
 
-    /// Delete a user permanently by username
+    /// Delete a user by username. A user who signs in through an OpenID
+    /// provider is not removed: the record is scrubbed of profile data and kept
+    /// `Disabled` under the provider account, so the next sign-in is refused
+    /// instead of creating a new approved user.
     pub async fn delete_user(
         &self,
         username: &str,
     ) -> Result<()> {
-        let user_data = self
+        let _user_write_guard = self.user_write_guard().await;
+        let mut user_data = self
             .load_user(username)
             .await?
             .ok_or_else(|| anyhow::anyhow!("User not found: {}", username))?;
+
+        if user_data.oidc.is_some() {
+            user_data.username = user_data.user_id.clone();
+            user_data.status = UserStatus::Disabled;
+            user_data.passkeys = Vec::new();
+            user_data.first_name = None;
+            user_data.last_name = None;
+            user_data.email = None;
+            user_data.department = None;
+            user_data.job_title = None;
+            user_data.avatar_path = None;
+            user_data.updated_at = chrono::Utc::now();
+            self.save_user(&user_data)
+                .await?;
+            tracing::info!(user_id = %user_data.user_id, "Disabled the record of a deleted OIDC user");
+            return Ok(());
+        }
 
         self.storage
             .delete(&user_data.user_id)
@@ -361,7 +382,7 @@ impl ReloadOnPromotion for PasskeyStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{PasskeyStorage, UserData, UserRole, UserStatus};
+    use super::{OidcIdentity, PasskeyStorage, UserData, UserRole, UserStatus};
     use crate::server::mode::ReloadOnPromotion;
     use tempfile::tempdir;
 
@@ -399,6 +420,77 @@ mod tests {
             saml_id: None,
             oidc: None,
         }
+    }
+
+    fn oidc_user(id: &str) -> UserData {
+        let mut data = user(id);
+        data.status = UserStatus::Approved;
+        data.email = Some("a@example.com".to_string());
+        data.first_name = Some("Ada".to_string());
+        data.department = Some("Ops".to_string());
+        data.oidc = Some(OidcIdentity {
+            issuer: "https://idp.example.com".to_string(),
+            subject: "sub-1".to_string(),
+        });
+        data
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_without_an_oidc_account_removes_the_record() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&user("plain"))
+            .await
+            .unwrap();
+
+        storage
+            .delete_user("plain")
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .load_user_by_id("plain")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_an_oidc_user_keeps_a_disabled_record_for_the_provider_account() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        let kept = storage
+            .load_user_by_oidc_identity(&OidcIdentity {
+                issuer: "https://idp.example.com".to_string(),
+                subject: "sub-1".to_string(),
+            })
+            .await
+            .unwrap()
+            .expect("the provider account keeps a record");
+        assert_eq!(kept.user_id, "oidc-1");
+        assert_eq!(kept.status, UserStatus::Disabled);
+        assert_eq!(kept.username, "oidc-1", "the username is released for other users");
+        assert!(kept.email.is_none() && kept.first_name.is_none() && kept.department.is_none());
+        assert!(
+            storage
+                .load_user("a@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -178,6 +178,14 @@ Users:
 - A user who is not approved (an administrator disabled them) is refused even with a valid ID
   token, and all their sessions end. When creating a user would pass the appliance user limit, the callback answers `403`
   with a readable page.
+- Deleting an OIDC user (`DELETE /v1/users/{user_id}`) does not remove the record: it ends the
+  user's sessions, clears their name, email, department, job title, avatar link (not the image file) and passkeys, sets the
+  username to the user id, and keeps the user `Disabled` under their provider account (issuer
+  and `sub`). The next sign-in with that account is refused like any disabled user, instead of
+  creating a new approved user. The user stays in the list, counts toward the user limit, and
+  signs in again only when an administrator approves them. Users who do not sign in with OIDC
+  are removed by delete. A user deleted before this behaviour has no record left, so their next
+  sign-in creates a new user; disable that user to keep them out.
 
 Outcomes:
 

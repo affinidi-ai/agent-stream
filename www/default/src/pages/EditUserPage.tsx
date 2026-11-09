@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
+import { DELETE_USER_TITLE } from '../utils/userDelete';
 
 interface User {
   username: string;
@@ -349,7 +350,12 @@ const EditUserPage: React.FC = () => {
                 )}
               </button>
               {form.role !== 'administrator' && !user?.is_primary && (
-                <DeleteButton onDelete={handleDelete} disabled={saving} variant="danger">
+                <DeleteButton
+                  onDelete={handleDelete}
+                  disabled={saving}
+                  variant="danger"
+                  title={DELETE_USER_TITLE}
+                >
                   Delete User
                 </DeleteButton>
               )}
