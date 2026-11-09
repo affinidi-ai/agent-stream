@@ -204,8 +204,10 @@ On `SIGUSR1` the instance reports `503` at once, then:
    Every Surface, internal surface record and gateway is visited, so an engine whose policy
    the previous Active removed is dropped. The internal surface records are re-read from
    storage first; the engine of one stored as disabled, and of a gateway no longer stored,
-   is dropped. A surface store that could not be opened at startup is opened again on each
-   retry, and the promotion holds at `503` until it opens. A gateway store that could not be
+   is dropped. A gateway missing from the listing, including one whose record could not be
+   read, stays enforced, so Fabric traffic to it is denied rather than skipping policy. A
+   surface store that could not be opened at startup is opened on the first retry that
+   needs it and kept, and the promotion holds at `503` until it opens. A gateway store that could not be
    opened at startup has no engines to refresh and is skipped. An internal surface record
    deleted on the previous Active keeps the engine it had, because engines are compiled at
    startup from `config.surfaces`, which is not the filesystem store when
@@ -335,8 +337,8 @@ scheduler, the request log save, system metrics persistence and the shutdown flu
 time-series stores do nothing; a Standby keeps its own system metrics samples in memory. The
 retention sweeps and the session cleanup run as soon as an instance becomes ready, at startup
 and after every promotion, then on their interval. A management access token used on a
-Standby authenticates from the Standby's startup copy and does not update its last-used time
-in storage. The startup cleanup of pending gateway handshakes and the removal of sessions
+Standby authenticates from the Standby's own copy, which is its last promotion's plus its own
+writes, and does not update its last-used time in storage. The startup cleanup of pending gateway handshakes and the removal of sessions
 already expired on disk when the session store loads still run in every mode.
 
 A Standby still runs its HTTP server and management API, and a write made through it (a

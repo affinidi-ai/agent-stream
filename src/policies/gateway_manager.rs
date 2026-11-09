@@ -423,8 +423,10 @@ impl GatewayPolicyManager {
             .contains(gateway_id)
     }
 
-    /// Drop the engine and enforcement of every gateway not in `stored`.
-    /// Returns how many were dropped.
+    /// Drop the engine of every gateway not in `stored`. Enforcement is kept: a
+    /// gateway missing from the listing may be one whose record could not be
+    /// read, and an enforced gateway with no engine denies rather than skipping
+    /// policy. Returns how many engines were dropped.
     pub fn retain_gateways(
         &self,
         stored: &HashSet<String>,
@@ -435,13 +437,7 @@ impl GatewayPolicyManager {
             .expect("engines lock poisoned");
         let before = engines.len();
         engines.retain(|gateway_id, _| stored.contains(gateway_id));
-        let dropped = before - engines.len();
-        drop(engines);
-        self.enforced
-            .write()
-            .expect("enforced lock poisoned")
-            .retain(|gateway_id| stored.contains(gateway_id));
-        dropped
+        before - engines.len()
     }
 
     /// Remove policy for a gateway
@@ -621,6 +617,62 @@ allow if {
             .await
             .unwrap();
         assert!(!manager.is_enforced("gw-cleared"), "a removed policy is no longer enforced");
+    }
+
+    #[tokio::test]
+    async fn retaining_gateways_drops_the_engine_but_keeps_enforcement_so_it_denies() {
+        let manager = GatewayPolicyManager::new();
+        let gateway = create_test_gateway(
+            "gw-unreadable",
+            GatewayType::SelfGateway,
+            Some(GatewayOpaPolicyConfig {
+                enabled: true,
+                policy: "package agentstream.policy\ndefault allow = true".to_string(),
+                policy_definition_id: None,
+                policy_definition_ids: Vec::new(),
+            }),
+        );
+        manager
+            .update_gateway_policy(&gateway)
+            .await
+            .unwrap();
+
+        let dropped = manager.retain_gateways(&HashSet::new());
+
+        assert_eq!(dropped, 1);
+        assert!(manager.is_enforced("gw-unreadable"), "enforcement outlives the engine");
+        let allowed = manager
+            .evaluate_policy("gw-unreadable", serde_json::json!({}))
+            .unwrap();
+        assert!(!allowed, "an enforced gateway with no engine denies");
+    }
+
+    #[tokio::test]
+    async fn retaining_gateways_keeps_the_engine_of_a_stored_gateway() {
+        let manager = GatewayPolicyManager::new();
+        let gateway = create_test_gateway(
+            "gw-stored",
+            GatewayType::SelfGateway,
+            Some(GatewayOpaPolicyConfig {
+                enabled: true,
+                policy: "package agentstream.policy\ndefault allow = true".to_string(),
+                policy_definition_id: None,
+                policy_definition_ids: Vec::new(),
+            }),
+        );
+        manager
+            .update_gateway_policy(&gateway)
+            .await
+            .unwrap();
+
+        let dropped = manager.retain_gateways(&HashSet::from(["gw-stored".to_string()]));
+
+        assert_eq!(dropped, 0);
+        assert!(
+            manager
+                .evaluate_policy("gw-stored", serde_json::json!({}))
+                .unwrap()
+        );
     }
 
     #[tokio::test]

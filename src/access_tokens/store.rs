@@ -449,8 +449,10 @@ impl FsAccessTokenStore {
     ) {
         // Only the Active writes token records: a Standby or an instance still
         // activating holds its startup copy, and persisting it could overwrite a
-        // revocation the Active made.
-        if !crate::server::mode::is_ready_to_serve() {
+        // revocation the Active made. The activation generation is captured so the
+        // check can be repeated once the write lock is held.
+        let generation = crate::server::mode::current_activation_generation();
+        if !crate::server::mode::is_serving_generation(generation) {
             return;
         }
         // Coalesce writes: a hot token must not rewrite its record on every
@@ -474,7 +476,7 @@ impl FsAccessTokenStore {
         let Some(mut token) = self.get(id) else {
             return;
         };
-        if !token.is_active(Utc::now()) {
+        if !token.is_active(Utc::now()) || !crate::server::mode::is_serving_generation(generation) {
             return;
         }
         token.last_used_at = Some(Utc::now());
@@ -1104,8 +1106,18 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_auth_does_not_restore_a_rotated_secret() {
+    #[test]
+    fn concurrent_auth_does_not_restore_a_rotated_secret() {
+        let _ready = crate::server::mode::ready_for_test();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(concurrent_auth_vs_rotation());
+    }
+
+    async fn concurrent_auth_vs_rotation() {
         // authenticate() bumps last_used via touch_last_used. Sharing the write
         // lock with rotation prevents a stale snapshot from restoring the old hash.
         //
@@ -1223,6 +1235,34 @@ mod tests {
         )
         .unwrap();
         assert!(on_disk.revoked_at.is_some(), "the revocation stays on disk");
+    }
+
+    #[test]
+    fn a_ready_active_writes_last_used_at() {
+        let _ready = crate::server::mode::ready_for_test();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let secret = "aspat_used_on_active";
+                let token = record(&hash_secret(secret), vec![]);
+                let id = token.id.clone();
+                let s = store().await;
+                s.create(token).await.unwrap();
+
+                s.authenticate(secret)
+                    .await
+                    .expect("authenticates");
+
+                let on_disk: AccessToken = serde_json::from_slice(
+                    &fs::read(s.path_for(&id))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(on_disk.last_used_at.is_some(), "a ready Active records the use");
+            });
     }
 
     #[test]

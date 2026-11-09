@@ -165,13 +165,14 @@ async fn refresh_referencing_engines(
 /// compiles. A full pass re-reads the surface store from disk first, so a
 /// promoted instance sees the records the previous Active stored; the gateway
 /// store is re-read by the promotion before it. A surface store that could not
-/// be opened at startup is opened again from `agent_surfaces_path` on each pass.
+/// be opened at startup is opened from `agent_surfaces_path` on the first pass that
+/// needs it, and that store is kept, so a refresh task is started at most once.
 /// A gateway store that could not be opened at startup means no gateway engine
 /// was ever compiled, so there is nothing to refresh.
 pub(crate) struct EngineStores {
     pub pipe_store: Option<Arc<crate::pipes::FileSystemPipeStore>>,
     pub global_policy_store: Option<Arc<crate::policies::FileSystemGlobalPolicyStore>>,
-    pub agent_surface_store: Option<Arc<crate::surfaces::FileSystemAgentSurfaceStore>>,
+    pub agent_surface_store: tokio::sync::OnceCell<Arc<crate::surfaces::FileSystemAgentSurfaceStore>>,
     pub agent_surfaces_path: std::path::PathBuf,
     pub gateway_store: Option<Arc<crate::gateways::FileSystemGatewayStore>>,
 }
@@ -330,17 +331,20 @@ async fn recompile_gateway_engines(
 async fn open_surface_store(
     stores: &EngineStores
 ) -> std::io::Result<Arc<crate::surfaces::FileSystemAgentSurfaceStore>> {
-    match &stores.agent_surface_store {
-        Some(store) => Ok(store.clone()),
-        None => crate::surfaces::FileSystemAgentSurfaceStore::new(
-            stores
-                .agent_surfaces_path
-                .clone(),
-        )
+    stores
+        .agent_surface_store
+        .get_or_try_init(|| async {
+            crate::surfaces::FileSystemAgentSurfaceStore::new(
+                stores
+                    .agent_surfaces_path
+                    .clone(),
+            )
+            .await
+            .map(Arc::new)
+            .map_err(|e| std::io::Error::other(format!("cannot open surface store: {e}")))
+        })
         .await
-        .map(Arc::new)
-        .map_err(|e| std::io::Error::other(format!("cannot open surface store: {e}"))),
-    }
+        .cloned()
 }
 
 /// Recompile the pipe, surface, gateway and appliance-wide policy engines in
@@ -1202,14 +1206,14 @@ mod tests {
         EngineStores {
             pipe_store: None,
             global_policy_store: None,
-            agent_surface_store: None,
+            agent_surface_store: tokio::sync::OnceCell::new(),
             agent_surfaces_path,
             gateway_store: None,
         }
     }
 
     #[tokio::test]
-    async fn surface_store_that_failed_at_startup_is_opened_again() {
+    async fn surface_store_that_failed_at_startup_is_opened_once_and_kept() {
         let dir = tempfile::tempdir().unwrap();
         let stores = stores_without_surface_store(
             dir.path()
@@ -1226,6 +1230,10 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let again = open_surface_store(&stores)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&store, &again), "the first successful open is reused");
     }
 
     #[tokio::test]
@@ -1648,7 +1656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_engine_recompile_drops_gateways_no_longer_stored() {
+    async fn full_engine_recompile_drops_the_engine_of_a_gateway_no_longer_stored_but_keeps_it_enforced() {
         use crate::gateways::store::GatewayStore as _;
         use crate::gateways::types::GatewayOpaPolicyConfig;
 
@@ -1682,7 +1690,15 @@ mod tests {
 
         let full = recompile_gateway_engines(&manager, &gateways, EngineScope::All).await;
         assert_eq!(full.unwrap(), (0, 0));
-        assert!(!manager.is_enforced(&deleted.id), "a gateway deleted elsewhere loses its engine");
+        assert!(
+            manager.is_enforced(&deleted.id),
+            "a gateway missing from the listing stays enforced, so it denies instead of skipping policy"
+        );
+        assert!(
+            !manager
+                .evaluate_policy(&deleted.id, serde_json::json!({}))
+                .unwrap()
+        );
     }
 
     #[tokio::test]

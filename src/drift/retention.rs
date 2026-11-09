@@ -61,11 +61,10 @@ const SWEEP_INTERVAL_SECS: u64 = 6 * 3600;
 /// write, so a sweep adds nothing without an age limit). It prunes as soon as
 /// the instance is Active and ready, at startup and after every promotion.
 pub async fn periodic_retention_sweep() {
-    let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticker = crate::server::mode::ReadyTicker::new(Duration::from_secs(SWEEP_INTERVAL_SECS));
     loop {
         // Pruning deletes shared files, which only the Active instance may do.
-        crate::server::mode::tick_when_ready(&mut interval).await;
+        ticker.tick().await;
         if let Some(runs) = global_drift_run_store() {
             runs.prune_all().await;
         }

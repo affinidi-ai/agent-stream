@@ -21,11 +21,10 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// is Active and ready, then hourly. A surface's failure is logged and does not
 /// stop the others.
 pub async fn periodic_retention_sweep(pipe_store: Arc<FileSystemPipeStore>) {
-    let mut interval = tokio::time::interval(SWEEP_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticker = crate::server::mode::ReadyTicker::new(SWEEP_INTERVAL);
     loop {
         // Pruning rewrites the shared logs, which only the Active instance may do.
-        crate::server::mode::tick_when_ready(&mut interval).await;
+        ticker.tick().await;
         let Some(store) = super::capture::store() else {
             continue;
         };

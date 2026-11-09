@@ -133,38 +133,45 @@ pub fn is_ready_to_serve() -> bool {
     state(SERVE_STATE.load(Ordering::SeqCst)) == STATE_ACTIVE
 }
 
-/// Wait until the instance is Active and ready to serve.
-pub async fn wait_until_ready() {
-    loop {
-        let notified = READY.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if is_ready_to_serve() {
-            return;
-        }
-        notified.await;
-    }
+/// Paces a periodic job that only the Active instance may run. [`Self::tick`]
+/// returns at once the first time it finds the instance ready in an activation
+/// generation it has not run for, so the job runs at startup and after every
+/// promotion, including one that happened while the job was running. Within a
+/// generation it returns on each tick of the period at which the instance is
+/// ready, and the period restarts after every run at readiness.
+pub struct ReadyTicker {
+    interval: tokio::time::Interval,
+    served: Option<u64>,
 }
 
-/// Wait for the next tick of `interval` at which the instance is ready, or for
-/// the instance to become ready again, whichever comes first. A tick that finds
-/// it not ready waits for readiness instead, and becoming ready restarts the
-/// interval, so a periodic job that only the Active may run runs as soon as the
-/// instance is ready, after every promotion, and then once per period.
-pub async fn tick_when_ready(interval: &mut tokio::time::Interval) {
-    let became_ready = READY.notified();
-    tokio::pin!(became_ready);
-    became_ready.as_mut().enable();
-    tokio::select! {
-        _ = interval.tick() => {
-            if is_ready_to_serve() {
+impl ReadyTicker {
+    pub fn new(period: std::time::Duration) -> Self {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self { interval, served: None }
+    }
+
+    pub async fn tick(&mut self) {
+        loop {
+            let became_ready = READY.notified();
+            tokio::pin!(became_ready);
+            became_ready.as_mut().enable();
+            let generation = current_activation_generation();
+            if is_serving_generation(generation) && self.served != Some(generation) {
+                self.served = Some(generation);
+                self.interval.reset();
                 return;
             }
+            tokio::select! {
+                _ = self.interval.tick() => {
+                    if is_ready_to_serve() {
+                        return;
+                    }
+                }
+                () = &mut became_ready => {}
+            }
         }
-        () = &mut became_ready => {}
     }
-    wait_until_ready().await;
-    interval.reset();
 }
 
 /// Whether the instance is still ready in `generation`. False once a later
@@ -298,70 +305,108 @@ mod tests {
         assert!(is_serving_generation(current_activation_generation()));
     }
 
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap()
+    }
+
+    fn promote() {
+        set_server_mode(ServerMode::Active);
+        assert!(mark_activation_ready(current_activation_generation()));
+    }
+
     #[test]
-    fn tick_when_ready_waits_for_readiness_then_restarts_the_period() {
+    fn ready_ticker_waits_for_readiness_then_restarts_the_period() {
         let _guard = MODE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         set_server_mode(ServerMode::Standby);
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let period = std::time::Duration::from_millis(400);
-                let mut interval = tokio::time::interval(period);
-                let first = tokio::spawn(async move {
-                    tick_when_ready(&mut interval).await;
-                    interval
-                });
-                tokio::time::sleep(period / 4).await;
-                assert!(!first.is_finished(), "waits while Standby");
-
-                set_server_mode(ServerMode::Active);
-                assert!(mark_activation_ready(current_activation_generation()));
-                let mut interval = tokio::time::timeout(period, first)
-                    .await
-                    .expect("returns once ready")
-                    .unwrap();
-
-                let next = tokio::spawn(async move { tick_when_ready(&mut interval).await });
-                tokio::time::sleep(period / 4).await;
-                assert!(!next.is_finished(), "the period restarts at readiness");
-                tokio::time::timeout(period * 2, next)
-                    .await
-                    .expect("ticks one period after readiness")
-                    .unwrap();
+        paused_runtime().block_on(async {
+            let period = std::time::Duration::from_secs(400);
+            let first = tokio::spawn(async move {
+                let mut ticker = ReadyTicker::new(period);
+                ticker.tick().await;
+                ticker
             });
+            tokio::time::sleep(period / 4).await;
+            assert!(!first.is_finished(), "waits while Standby");
+
+            promote();
+            let mut ticker = tokio::time::timeout(period, first)
+                .await
+                .expect("returns once ready")
+                .unwrap();
+
+            let next = tokio::spawn(async move { ticker.tick().await });
+            tokio::time::sleep(period / 4).await;
+            assert!(!next.is_finished(), "the period restarts at readiness");
+            tokio::time::timeout(period * 2, next)
+                .await
+                .expect("ticks one period after readiness")
+                .unwrap();
+        });
     }
 
     #[test]
-    fn tick_when_ready_returns_at_once_on_a_repromotion_within_the_period() {
+    fn ready_ticker_runs_at_once_on_a_repromotion_while_waiting() {
         let _guard = MODE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_server_mode(ServerMode::Active);
-        assert!(mark_activation_ready(current_activation_generation()));
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let period = std::time::Duration::from_secs(60);
-                let mut interval = tokio::time::interval(period);
-                tick_when_ready(&mut interval).await;
-                let next = tokio::spawn(async move { tick_when_ready(&mut interval).await });
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                assert!(!next.is_finished(), "waits for the period while Active");
+        promote();
+        paused_runtime().block_on(async {
+            let mut ticker = ReadyTicker::new(std::time::Duration::from_secs(3600));
+            ticker.tick().await;
+            let next = tokio::spawn(async move { ticker.tick().await });
+            tokio::time::sleep(std::time::Duration::from_secs(50)).await;
+            assert!(!next.is_finished(), "waits for the period while Active");
 
-                set_server_mode(ServerMode::Standby);
-                set_server_mode(ServerMode::Active);
-                assert!(mark_activation_ready(current_activation_generation()));
-                tokio::time::timeout(std::time::Duration::from_secs(5), next)
+            set_server_mode(ServerMode::Standby);
+            promote();
+            tokio::time::timeout(std::time::Duration::from_secs(5), next)
+                .await
+                .expect("a re-promotion runs the job at once")
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn ready_ticker_runs_at_once_on_a_repromotion_during_a_run() {
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        promote();
+        paused_runtime().block_on(async {
+            let mut ticker = ReadyTicker::new(std::time::Duration::from_secs(3600));
+            ticker.tick().await;
+
+            set_server_mode(ServerMode::Standby);
+            promote();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), ticker.tick())
+                .await
+                .expect("a promotion that happened during the run is not missed");
+        });
+    }
+
+    #[test]
+    fn ready_ticker_does_not_run_twice_in_one_generation_before_the_period() {
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        promote();
+        paused_runtime().block_on(async {
+            let mut ticker = ReadyTicker::new(std::time::Duration::from_secs(3600));
+            ticker.tick().await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(60), ticker.tick())
                     .await
-                    .expect("a re-promotion runs the job at once")
-                    .unwrap();
-            });
+                    .is_err(),
+                "no second run inside the period"
+            );
+        });
     }
 
     #[test]

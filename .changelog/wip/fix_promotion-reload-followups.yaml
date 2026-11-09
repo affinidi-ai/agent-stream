@@ -1,15 +1,21 @@
 branch: fix/promotion-reload-followups
 changes:
-  added: []
-  changed:
+  added:
+    - timestamp: '2026-11-05T12:00:00.000Z'
+      title: Count skipped access token, API key and identity records on load
+      description: >-
+        Management access tokens, API keys and DID:webvh identities that cannot be loaded are
+        now logged at ERROR and counted in agent_stream_storage_load_errors_total, labelled by
+        entity and reason. A file that is not valid UTF-8 counts as parse_failed.
+  changed: []
+  fixed:
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Run retention sweeps and session cleanup as soon as an instance is ready
       description: >-
         The governance and drift retention sweeps and the expired dashboard session cleanup
         now run once when an instance becomes Active and ready, at startup and after every
-        promotion, then on their interval. Previously the retention sweeps skipped their first
+        promotion (including one that happens while a run is in progress), then on their interval. Previously the retention sweeps skipped their first
         run, so nothing was pruned for up to six hours after each start or failover.
-  fixed:
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Reject management access tokens revoked on the previous Active after failover
       description: >-
@@ -17,13 +23,15 @@ changes:
         A token revoked on the previous Active is rejected instead of authenticating and
         writing its un-revoked record back to disk, and a token created or rotated there
         authenticates. A token used on a Standby no longer writes its last-used time, so it
-        cannot overwrite a revocation the Active made.
+        cannot overwrite a revocation the Active made. Upgrade step: after upgrading, list access
+        tokens and revoke again any that were revoked before a failover and now show as active;
+        records written by earlier versions are read as they are stored.
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Stop a Standby from deleting shared dashboard session files
       description: >-
         The periodic expired-session cleanup now runs only on the Active. A Standby used the
         expiry times it loaded at startup and deleted sessions the Active was still keeping
-        alive, which signed those users out after a failover.
+        alive, which signed those users out after a failover. In OIDC sign-in mode the dashboard users and sessions are now re-read on promotion, as they are in passkey and SAML modes.
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Stop a non-UTF-8 settings or metrics file from holding a promotion at 503
       description: >-
@@ -38,16 +46,11 @@ changes:
         started a refresh task that never stopped when cache_refresh_interval_secs is set, and
         an empty gateway listing saved a localhost self-gateway to shared storage. A promotion
         re-reads the internal surface records first, and drops the engine of a record stored
-        as disabled and of a gateway no longer stored. A surface store that failed to open at
-        startup is opened again on each promotion retry, and readiness is held at 503 until it
-        opens; a gateway store that failed to open has no engines to refresh. A policy edit that
+        as disabled and of a gateway no longer stored. A gateway whose record cannot be
+        read stays enforced and denies instead of skipping policy. A surface store that failed
+        to open at startup is opened on the first retry that needs it and kept, and readiness is
+        held at 503 until it opens; a gateway store that failed to open has no engines to refresh. A policy edit that
         cannot refresh engines because the engine stores are unavailable is now logged at ERROR.
-    - timestamp: '2026-11-05T12:00:00.000Z'
-      title: Count skipped access token, API key and identity records on load
-      description: >-
-        Management access tokens, API keys and DID:webvh identities that cannot be loaded are
-        now logged at ERROR and counted in agent_stream_storage_load_errors_total, labelled by
-        entity and reason. A file that is not valid UTF-8 counts as parse_failed.
   removed: []
   security: []
   breaking: []

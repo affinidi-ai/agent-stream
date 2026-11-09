@@ -436,6 +436,22 @@ impl crate::server::mode::ReloadOnPromotion for ActivationSurfaces {
     }
 }
 
+/// The dashboard users and sessions of the active sign-in mode, re-read on
+/// promotion so users the previous Active kept signed in stay so.
+fn sign_in_reloads(
+    stores: impl IntoIterator<Item = (Arc<crate::auth::storage::PasskeyStorage>, Arc<crate::auth::SessionManager>)>
+) -> Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> {
+    stores
+        .into_iter()
+        .flat_map(|(users, sessions)| {
+            [
+                users as Arc<dyn crate::server::mode::ReloadOnPromotion>,
+                sessions as Arc<dyn crate::server::mode::ReloadOnPromotion>,
+            ]
+        })
+        .collect()
+}
+
 /// Run `reload`, retrying with backoff until it succeeds. Returns `false` once
 /// a later mode change supersedes `generation`.
 async fn reload_until_done(
@@ -2627,14 +2643,21 @@ pub async fn run_axum_proxy(
             promotion_reloads.push(provisioner.clone());
         }
         promotion_reloads.push(terms_manager.clone());
-        if let Some(state) = &auth_state {
-            promotion_reloads.push(state.storage.clone());
-            promotion_reloads.push(state.session_manager.clone());
-        }
-        if let Some(state) = &saml_state {
-            promotion_reloads.push(state.storage.clone());
-            promotion_reloads.push(state.session_manager.clone());
-        }
+        promotion_reloads.extend(sign_in_reloads(
+            auth_state
+                .iter()
+                .map(|state| (state.storage.clone(), state.session_manager.clone()))
+                .chain(
+                    saml_state
+                        .iter()
+                        .map(|state| (state.storage.clone(), state.session_manager.clone())),
+                )
+                .chain(
+                    oidc_state
+                        .iter()
+                        .map(|state| (state.storage.clone(), state.session_manager.clone())),
+                ),
+        ));
         promotion_reloads.push(budget_tracker.clone());
         promotion_reloads.push(team_usage_tracker.clone());
         if let Some(store) = &metrics_store {
@@ -2674,7 +2697,7 @@ pub async fn run_axum_proxy(
         let activation_policy_engines = Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
             pipe_store: pipe_store.clone(),
             global_policy_store: global_policy_store.clone(),
-            agent_surface_store: engine_surface_store.clone(),
+            agent_surface_store: tokio::sync::OnceCell::new_with(engine_surface_store.clone()),
             agent_surfaces_path: PathBuf::from(
                 &bootstrap_config
                     .storage_paths
@@ -4246,6 +4269,70 @@ mod tests {
     }
 
     #[test]
+    fn promotion_keeps_a_session_the_previous_active_slid_forward() {
+        use crate::auth::session::Session;
+        use crate::storage::filesystem::rwlock_storage;
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let users = Arc::new(
+                crate::auth::storage::PasskeyStorage::new(
+                    dir.path()
+                        .join("users")
+                        .display()
+                        .to_string(),
+                    dir.path()
+                        .join("avatars")
+                        .display()
+                        .to_string(),
+                )
+                .await
+                .unwrap(),
+            );
+            let sessions_dir = dir.path().join("sessions");
+            let standby = Arc::new(
+                crate::auth::SessionManager::with_storage(0, sessions_dir.clone())
+                    .await
+                    .unwrap(),
+            );
+            let token = standby
+                .create_session("alice".into(), "user-a".into())
+                .await;
+
+            let shared = rwlock_storage::<Session>(sessions_dir, "session")
+                .await
+                .unwrap();
+            let mut slid = shared
+                .get(&token)
+                .await
+                .unwrap()
+                .unwrap();
+            slid.expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+            shared
+                .save(&slid)
+                .await
+                .unwrap();
+
+            for reload in sign_in_reloads([(users, standby.clone())]) {
+                reload
+                    .reload_from_storage()
+                    .await
+                    .unwrap();
+            }
+            standby
+                .cleanup_expired()
+                .await;
+
+            assert!(
+                standby
+                    .validate_session(&token)
+                    .await
+                    .is_some(),
+                "the slid session survives the first cleanup after promotion"
+            );
+        });
+    }
+
+    #[test]
     fn activation_marks_ready_without_fabric_listeners() {
         let _guard = mode::MODE_TEST_LOCK
             .lock()
@@ -4361,11 +4448,11 @@ mod tests {
                 Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
                     pipe_store: Some(pipes),
                     global_policy_store: None,
-                    agent_surface_store: Some(Arc::new(
+                    agent_surface_store: tokio::sync::OnceCell::new_with(Some(Arc::new(
                         crate::surfaces::FileSystemAgentSurfaceStore::new(PathBuf::from(path("agent_surfaces")))
                             .await
                             .unwrap(),
-                    )),
+                    ))),
                     agent_surfaces_path: PathBuf::from(path("agent_surfaces")),
                     gateway_store: Some(Arc::new(
                         crate::gateways::FileSystemGatewayStore::new(PathBuf::from(path("gateways")), None)
