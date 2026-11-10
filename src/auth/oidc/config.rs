@@ -389,10 +389,11 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
     }
     let required_claims = required_claims(file.required_claims)?;
     let role_mapping = role_mapping(file.role_mapping)?;
-    if required_claims.is_empty() {
+    if !binds_anything(&required_claims) {
         if !file.allow_any_account {
             return Err("required_claims must name at least one claim that binds sign-in to your tenant at the \
-                 provider, or set allow_any_account to true to let every account at the provider sign in"
+                 provider (iss, aud and azp are checked on every token and bind nothing), or set \
+                 allow_any_account to true to let every account at the provider sign in"
                 .to_string());
         }
         if role_mapping
@@ -404,8 +405,12 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
                 .to_string());
         }
         warn!(
+            target: "security_audit",
+            event = "oidc_tenant_binding_disabled",
             issuer = %file.issuer,
-            "oidc.json sets allow_any_account without required_claims: every account at the OpenID provider can sign in"
+            unmapped = "deny",
+            "oidc.json sets allow_any_account without a tenant binding: every account at the OpenID provider that \
+             role_mapping maps can sign in"
         );
     } else {
         let bound = exact_value_claims(&required_claims);
@@ -463,6 +468,19 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
         .collect()
 }
 
+/// Claims the ID token verifier already checks on every token: `iss` against
+/// the configured issuer, and `aud` and `azp` against `client_id`. An entry on
+/// one of them can never refuse a token that got this far, so it binds nothing.
+const SELF_CHECKED_CLAIMS: &[&str] = &["iss", "aud", "azp"];
+
+/// Whether some `required_claims` entry is on a claim the verifier does not
+/// already check, so it can refuse an account.
+fn binds_anything(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+    required
+        .keys()
+        .any(|claim| !SELF_CHECKED_CLAIMS.contains(&claim.as_str()))
+}
+
 /// Whether a value can name one tenant: an exact string. A boolean, the string
 /// `"true"` or `"false"` a provider may send in its place, or a `regex:`
 /// pattern can match accounts of any tenant.
@@ -475,10 +493,11 @@ fn is_exact_tenant_value(value: &ValueMatcher) -> bool {
 fn exact_value_claims(required: &BTreeMap<String, Vec<ValueMatcher>>) -> Vec<&str> {
     required
         .iter()
-        .filter(|(_, allowed)| {
-            allowed
-                .iter()
-                .all(is_exact_tenant_value)
+        .filter(|(claim, allowed)| {
+            !SELF_CHECKED_CLAIMS.contains(&claim.as_str())
+                && allowed
+                    .iter()
+                    .all(is_exact_tenant_value)
         })
         .map(|(claim, _)| claim.as_str())
         .collect()
@@ -487,8 +506,9 @@ fn exact_value_claims(required: &BTreeMap<String, Vec<ValueMatcher>>) -> Vec<&st
 /// Whether any `required_claims` entry allows at least one exact string value.
 fn holds_exact_value(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
     required
-        .values()
-        .flatten()
+        .iter()
+        .filter(|(claim, _)| !SELF_CHECKED_CLAIMS.contains(&claim.as_str()))
+        .flat_map(|(_, allowed)| allowed)
         .any(is_exact_tenant_value)
 }
 
@@ -888,6 +908,86 @@ mod tests {
         assert!(!holds_exact_value(&claims(vec![pattern("regex:.*")])));
         assert!(!holds_exact_value(&claims(vec![ValueMatcher::Bool(true)])));
         assert!(!holds_exact_value(&claims(vec![exact("true")])));
+    }
+
+    #[tokio::test]
+    async fn a_claim_the_token_verifier_already_checks_is_no_tenant_binding() {
+        let only_verified =
+            json!({ "iss": ["https://idp.example.com"], "aud": ["agent-stream"], "azp": ["agent-stream"] });
+        for claims in [json!({ "iss": ["https://idp.example.com"] }), only_verified] {
+            let refused = load(with(valid_file(), &["required_claims"], claims))
+                .await
+                .unwrap_err();
+            assert!(refused.contains("iss, aud and azp"), "{refused}");
+            assert!(refused.contains("allow_any_account"), "{refused}");
+        }
+
+        let config = load(with(
+            valid_file(),
+            &["required_claims"],
+            json!({ "iss": ["https://idp.example.com"], "org_id": ["org_123"] }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(config.required_claims.len(), 2, "an entry that binds keeps its verified neighbours");
+
+        let opted_out = with(valid_file(), &["required_claims"], json!({ "iss": ["https://idp.example.com"] }));
+        assert!(
+            load(with(opted_out, &["allow_any_account"], json!(true)))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_opt_out_is_logged_as_a_security_audit_event_and_a_bound_file_is_not() {
+        use crate::observability::log_capture::capture_logs;
+        let mut unbound = with(valid_file(), &["allow_any_account"], json!(true));
+        unbound
+            .as_object_mut()
+            .unwrap()
+            .remove("required_claims");
+
+        let (logs, config) = capture_logs(load(unbound)).await;
+        config.unwrap();
+        assert!(logs.contains("security_audit"), "{logs}");
+        assert!(logs.contains("oidc_tenant_binding_disabled"), "{logs}");
+        assert!(logs.contains("idp.example.com"), "{logs}");
+
+        let (logs, config) = capture_logs(load(valid_file())).await;
+        config.unwrap();
+        assert!(!logs.contains("oidc_tenant_binding_disabled"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn startup_says_how_far_required_claims_ties_sign_in_to_a_tenant() {
+        use crate::observability::log_capture::capture_logs;
+        let logs_for = |claims: Value| async move {
+            let (logs, config) = capture_logs(load(with(valid_file(), &["required_claims"], claims))).await;
+            config.unwrap();
+            logs
+        };
+
+        let exact = logs_for(json!({ "org_id": ["org_123"], "email_verified": [true] })).await;
+        assert!(exact.contains("ties sign-in to the tenant"), "{exact}");
+        assert!(exact.contains("org_id"), "{exact}");
+        assert!(!exact.contains("WARN"), "{exact}");
+
+        let mixed = logs_for(json!({ "org_id": ["org_1", "regex:org_1_.*"] })).await;
+        assert!(mixed.contains("mixes exact values"), "{mixed}");
+        assert!(!mixed.contains("WARN"), "{mixed}");
+
+        for weak in
+            [json!({ "email_verified": [true] }), json!({ "org_id": ["regex:.*"] }), json!({ "org_id": ["true"] })]
+        {
+            let weak = logs_for(weak).await;
+            assert!(weak.contains("WARN"), "{weak}");
+            assert!(weak.contains("boolean or a pattern"), "{weak}");
+        }
+
+        let verified_beside_a_boolean =
+            logs_for(json!({ "iss": ["https://idp.example.com"], "email_verified": [true] })).await;
+        assert!(verified_beside_a_boolean.contains("WARN"), "{verified_beside_a_boolean}");
     }
 
     #[tokio::test]
