@@ -1589,7 +1589,7 @@ async fn handle_chat_completions_with_stages(
     body: axum::body::Bytes,
     ingress_skin: crate::pipes::ingress::IngressSchema,
 ) -> Response {
-    use axum::response::sse::{Event, Sse};
+    use axum::response::sse::Event;
     use futures::StreamExt;
     use tracing::Instrument;
 
@@ -1714,9 +1714,26 @@ async fn handle_chat_completions_with_stages(
         }
     });
 
-    // Mark the SSE unbuffered so a reverse proxy / tunnel flushes each stage and
-    // token frame immediately instead of holding the whole response.
-    let mut response = Sse::new(tokio_stream::wrappers::ReceiverStream::new(out_rx)).into_response();
+    stage_stream_response(out_rx, STAGE_STREAM_KEEP_ALIVE)
+}
+
+/// How often the stage stream sends a keep-alive comment while no event is due.
+const STAGE_STREAM_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The stage stream's SSE response. A surface that answers whole sends nothing
+/// while the model writes, so a keep-alive comment every `keep_alive` stops a
+/// load balancer or proxy from closing the quiet connection; SSE readers ignore
+/// comments. `x-accel-buffering: no` makes a reverse proxy or tunnel flush each
+/// frame instead of holding the whole response.
+fn stage_stream_response(
+    out_rx: tokio::sync::mpsc::Receiver<Result<axum::response::sse::Event, std::convert::Infallible>>,
+    keep_alive: std::time::Duration,
+) -> Response {
+    use axum::response::sse::{KeepAlive, Sse};
+
+    let mut response = Sse::new(tokio_stream::wrappers::ReceiverStream::new(out_rx))
+        .keep_alive(KeepAlive::new().interval(keep_alive))
+        .into_response();
     response
         .headers_mut()
         .insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));
@@ -7494,5 +7511,81 @@ mod billing_header_tests {
                 })
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod stage_stream_keep_alive_tests {
+    use std::time::Duration;
+
+    use axum::response::sse::Event;
+    use http_body_util::BodyExt;
+
+    use super::*;
+
+    type Sent = Result<Event, std::convert::Infallible>;
+
+    async fn next_frame(body: &mut axum::body::Body) -> Option<String> {
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("a frame or the end within five seconds")?
+            .expect("a readable frame");
+        frame
+            .into_data()
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    #[tokio::test]
+    async fn a_quiet_stage_stream_sends_keep_alive_comments() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Sent>(4);
+        let response = stage_stream_response(rx, Duration::from_millis(20));
+        assert_eq!(
+            response
+                .headers()
+                .get("x-accel-buffering")
+                .and_then(|v| v.to_str().ok()),
+            Some("no")
+        );
+        let mut body = response.into_body();
+        for _ in 0..2 {
+            let frame = next_frame(&mut body)
+                .await
+                .expect("a keep-alive while no event is due");
+            assert!(frame.starts_with(':'), "{frame:?}");
+        }
+        tx.send(Ok(Event::default()
+            .event("result")
+            .data("{}")))
+            .await
+            .unwrap();
+        let event = loop {
+            let frame = next_frame(&mut body)
+                .await
+                .expect("the event");
+            if !frame.starts_with(':') {
+                break frame;
+            }
+        };
+        assert_eq!(event, "event: result\ndata: {}\n\n");
+    }
+
+    #[tokio::test]
+    async fn a_stage_stream_sends_no_comment_before_its_interval_and_ends_with_its_events() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Sent>(4);
+        let mut body = stage_stream_response(rx, Duration::from_secs(3600)).into_body();
+        tx.send(Ok(Event::default()
+            .event("stage")
+            .data("{}")))
+            .await
+            .unwrap();
+        drop(tx);
+        assert_eq!(
+            next_frame(&mut body)
+                .await
+                .as_deref(),
+            Some("event: stage\ndata: {}\n\n")
+        );
+        assert_eq!(next_frame(&mut body).await, None, "the keep-alive never holds a finished stream open");
     }
 }
