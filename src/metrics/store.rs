@@ -3791,6 +3791,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reload_from_a_log_that_is_not_utf8_starts_empty() {
+        use crate::server::mode::ReloadOnPromotion;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        record_channel_round_trip(&store, "ch-dropped", "t1", 10, 20, ConnectionStatus::Success).await;
+        recorded_connections(&store, 2).await;
+        std::fs::write(
+            dir.path()
+                .join("metrics.json"),
+            [0xff, 0xfe, 0xfd],
+        )
+        .unwrap();
+
+        store
+            .reload_from_storage()
+            .await
+            .expect("an unparseable log does not hold readiness back");
+
+        assert!(
+            store
+                .connections
+                .read()
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn reload_without_a_backend_is_a_no_op() {
         use crate::server::mode::ReloadOnPromotion;
 

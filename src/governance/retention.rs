@@ -17,17 +17,14 @@ use crate::pipes::{FileSystemPipeStore, PipeConfig};
 /// removed within about two hours of leaving its window.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// Prune every governance log with a retention window, now and then hourly. A
-/// surface's failure is logged and does not stop the others.
+/// Prune every governance log with a retention window as soon as the instance
+/// is Active and ready, then hourly. A surface's failure is logged and does not
+/// stop the others.
 pub async fn periodic_retention_sweep(pipe_store: Arc<FileSystemPipeStore>) {
-    let mut interval = tokio::time::interval(SWEEP_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticker = crate::server::mode::ReadyTicker::new(SWEEP_INTERVAL);
     loop {
-        interval.tick().await;
         // Pruning rewrites the shared logs, which only the Active instance may do.
-        if !crate::server::mode::is_ready_to_serve() {
-            continue;
-        }
+        ticker.tick().await;
         let Some(store) = super::capture::store() else {
             continue;
         };
@@ -167,5 +164,79 @@ mod tests {
             "a live surface's own window wins, a 0 that differs from the kept window is passed on to be kept, and \
              a deleted surface's log keeps the window it last had"
         );
+    }
+
+    #[test]
+    fn the_sweep_prunes_as_soon_as_the_instance_is_ready_not_after_the_period() {
+        use crate::governance::store::tests::{draft_at, signer};
+        use crate::governance::{GovernanceStore, RecordQuery};
+        use crate::server::mode::{
+            MODE_TEST_LOCK, ServerMode, current_activation_generation, mark_activation_ready, set_server_mode,
+        };
+
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let dir = tempfile::tempdir().unwrap();
+                crate::governance::init_store(GovernanceStore::new(dir.path().join("governance"), signer(), None));
+                let store = crate::governance::capture::store().expect("the global store is installed");
+                let surface = "sweep-surface";
+                let now = chrono::Utc::now().to_rfc3339();
+                for (prompt, at) in [("old", "2020-01-01T00:00:00Z"), ("new", now.as_str())] {
+                    store
+                        .record(draft_at(surface, prompt, at, None), 0)
+                        .await
+                        .unwrap();
+                }
+                let pipes = Arc::new(
+                    FileSystemPipeStore::new(
+                        dir.path()
+                            .join("pipes")
+                            .display()
+                            .to_string(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                pipes
+                    .save(pipe(
+                        surface,
+                        Some(GovernanceRecordingConfig {
+                            retention_days: 30,
+                            ..Default::default()
+                        }),
+                    ))
+                    .await
+                    .unwrap();
+                let recorded = || async {
+                    store
+                        .query(surface, RecordQuery::default())
+                        .await
+                        .unwrap()
+                        .records
+                        .len()
+                };
+
+                set_server_mode(ServerMode::Standby);
+                let task = tokio::spawn(periodic_retention_sweep(pipes));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert_eq!(recorded().await, 2, "a Standby leaves the shared logs alone");
+
+                set_server_mode(ServerMode::Active);
+                assert!(mark_activation_ready(current_activation_generation()));
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while recorded().await != 1 {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("the expired record is pruned once ready, well before the hourly period");
+                task.abort();
+            });
     }
 }

@@ -47,7 +47,9 @@ promotion is skipped, logged at `ERROR` and counted in
 `agent_stream_storage_load_errors_total`, favouring availability. A layer that references a
 skipped definition still denies, but a skipped assignments document leaves no appliance-wide
 set enforced; alert on that counter
-([CONFIGURATION_RELOAD.md](CONFIGURATION_RELOAD.md#what-promotion-does)).
+([CONFIGURATION_RELOAD.md](CONFIGURATION_RELOAD.md#what-promotion-does)). A gateway this
+instance already enforces keeps its enforcement when its record cannot be read on promotion,
+so Fabric traffic to it is denied rather than skipping policy.
 
 The layers each path runs, in order:
 
@@ -547,6 +549,12 @@ Authoring (`policies.edit`) and fleet-wide enforcement (`policies.publish`) are 
 permissions, so they can be granted to different roles. Updating a definition that an
 appliance-wide assignment references also requires the caller's role to hold
 `policies.publish`; otherwise the update answers `403`.
+
+An update or delete saves the definition first, then recompiles the engines that reference
+it. If those engines cannot be refreshed, because the engine stores are unavailable or
+cannot be read, the request answers `500` with a message naming the definition: it is saved,
+but the live engines may still enforce the previous version. Save or delete it again to
+retry.
 
 ### Dry run
 

@@ -2420,7 +2420,7 @@ fn write_head(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::governance::record::{RecordMetrics, StageEntry, StageOutcome};
     use crate::identity::ssi::vc_issuer::{VcSigner, sign_eddsa_jcs_2022};
@@ -2448,7 +2448,7 @@ mod tests {
     }
 
     /// The appliance signer of these tests: key 9 of `did:web:example.com`.
-    fn signer() -> GovernanceSigner {
+    pub(in crate::governance) fn signer() -> GovernanceSigner {
         signer_with(9, "did:web:example.com")
     }
 
@@ -2473,7 +2473,7 @@ mod tests {
     }
 
     /// A draft at `timestamp`; `blocked_by` names the stage that blocked it.
-    fn draft_at(
+    pub(in crate::governance) fn draft_at(
         surface: &str,
         prompt: &str,
         timestamp: &str,

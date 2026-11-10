@@ -28,7 +28,7 @@ callers on a Surface (see [`SOURCE_AUTH.md`](SOURCE_AUTH.md)).
 | Scopes | `scopes`: an allow-list of RBAC permission names. Empty means the bound user's full role. |
 | Resource restriction | Optional `resource_pattern` and `required_headers`; see [Resource patterns](#resource-patterns). |
 | Expiry | Optional `expires_at`, fixed at creation. |
-| `last_used_at` | Updated on use; writes are coalesced to at most one per 60 seconds. |
+| `last_used_at` | Updated on use; writes are coalesced to at most one per 60 seconds. Using a token on a Standby never writes it back, and only the ready Active instance records the use, so a Standby cannot overwrite a revocation. Tokens are re-read on promotion ([what promotion does](CONFIGURATION_RELOAD.md#what-promotion-does)), so a revocation is guaranteed once `GET /api/v1/health` returns `200`, not for a request that reaches the instance directly while it is activating. A management write made through a Standby (update, rotate) still goes to shared storage from the Standby's copy; see [server mode](CONFIGURATION_RELOAD.md#server-mode). |
 
 The caller sends the secret as `Authorization: Bearer aspat_...`. When no valid session
 matches the bearer, `require_session_auth` tries it as an access token. Authentication
@@ -115,8 +115,10 @@ revoked token answers `409`.
 Rotate replaces the secret on the same record. The id, subject, scopes, expiry, resource
 restriction, and delegation lineage are unchanged, so descendants keep working.
 `rotation_generation` increments and `rotated_at` and `rotated_by` are stamped. The old
-secret stops authenticating immediately. A revoked or expired token, an inactive lineage,
-or a rotation that lost a concurrent race answers `409`.
+secret stops authenticating immediately on the instance that rotated it. A Standby keeps
+authenticating the old secret from its own copy until it is promoted
+([server mode](CONFIGURATION_RELOAD.md#server-mode)). A revoked or expired token, an inactive
+lineage, or a rotation that lost a concurrent race answers `409`.
 
 Rotation is not a zero-downtime roll. To roll without an outage, create a second token,
 deploy and verify it, then revoke the first. On a suspected leak, revoke rather than
@@ -297,6 +299,9 @@ policy compilation, and hot reload are shared.
 
 - Present tokens only over TLS.
 - Keep `access_tokens.edit` administrator-only.
+- After upgrading from a release that did not re-read tokens on promotion, list the access
+  tokens and revoke again any that were revoked before a failover and now show as active. The
+  upgrade reads token records as they are stored and does not change records written earlier.
 - The test-support login (`AS_TEST_MODE` with a non-empty `AS_TEST_TOKEN`) exists for
   test rigs only; services use access tokens.
 

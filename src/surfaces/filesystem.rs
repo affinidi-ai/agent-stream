@@ -32,6 +32,13 @@ impl FileSystemAgentSurfaceStore {
     ) -> Option<tokio::sync::broadcast::Receiver<crate::storage::filesystem::StorageEvent<AgentSurface>>> {
         self.storage.subscribe()
     }
+
+    /// Re-read every agent surface from disk.
+    pub async fn refresh_from_disk(&self) -> Result<()> {
+        self.storage
+            .refresh_from_disk()
+            .await
+    }
 }
 
 #[async_trait]

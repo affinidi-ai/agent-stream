@@ -58,17 +58,13 @@ const SWEEP_INTERVAL_SECS: u64 = 6 * 3600;
 /// Periodically re-apply the count + age retention policy to every surface, so
 /// age-based expiry also reaches surfaces that have gone idle. Spawned by the
 /// orchestrator only when an age limit is configured (count is enforced on
-/// write, so a sweep adds nothing without an age limit). The first tick fires
-/// immediately, so it also prunes once at startup.
+/// write, so a sweep adds nothing without an age limit). It prunes as soon as
+/// the instance is Active and ready, at startup and after every promotion.
 pub async fn periodic_retention_sweep() {
-    let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticker = crate::server::mode::ReadyTicker::new(Duration::from_secs(SWEEP_INTERVAL_SECS));
     loop {
-        interval.tick().await;
         // Pruning deletes shared files, which only the Active instance may do.
-        if !crate::server::mode::is_ready_to_serve() {
-            continue;
-        }
+        ticker.tick().await;
         if let Some(runs) = global_drift_run_store() {
             runs.prune_all().await;
         }
@@ -125,5 +121,107 @@ mod tests {
         }
         .age_cutoff();
         assert!(!DriftRetention::is_expired("not-a-date", cutoff));
+    }
+
+    use crate::drift::run::{DriftRun, DriftRunStore, set_global_drift_run_store};
+    use crate::server::mode::{
+        MODE_TEST_LOCK, ServerMode, current_activation_generation, mark_activation_ready, set_server_mode,
+    };
+    use std::sync::Arc;
+
+    fn run_at(
+        id: &str,
+        ran_at: &str,
+    ) -> DriftRun {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "suite_id": "sweep-suite",
+            "suite_name": "sweep-suite",
+            "surface_id": "sweep-surface",
+            "ran_at": ran_at,
+            "trigger": "manual",
+            "total": 0,
+            "passed": 0,
+            "errors": 0,
+            "quality": 0.0,
+            "samples": [],
+        }))
+        .expect("drift run fixture")
+    }
+
+    #[test]
+    fn the_sweep_prunes_as_soon_as_the_instance_is_ready_not_after_the_period() {
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir
+                    .path()
+                    .display()
+                    .to_string();
+                let writer = DriftRunStore::new(
+                    path.clone(),
+                    DriftRetention {
+                        max_per_surface: 10,
+                        max_age_days: None,
+                    },
+                )
+                .await
+                .unwrap();
+                writer
+                    .save(&run_at("old", "2020-01-01T00:00:00Z"))
+                    .await
+                    .unwrap();
+                writer
+                    .save(&run_at("new", &Utc::now().to_rfc3339()))
+                    .await
+                    .unwrap();
+                let swept = Arc::new(
+                    DriftRunStore::new(
+                        path,
+                        DriftRetention {
+                            max_per_surface: 10,
+                            max_age_days: Some(30),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+                );
+                set_global_drift_run_store(swept.clone());
+                let stored = global_drift_run_store().expect("the global run store is installed");
+
+                set_server_mode(ServerMode::Standby);
+                let task = tokio::spawn(periodic_retention_sweep());
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert_eq!(
+                    stored
+                        .list_recent(10)
+                        .await
+                        .len(),
+                    2,
+                    "a Standby leaves the shared runs alone"
+                );
+
+                set_server_mode(ServerMode::Active);
+                assert!(mark_activation_ready(current_activation_generation()));
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while stored
+                        .list_recent(10)
+                        .await
+                        .len()
+                        != 1
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("the expired run is pruned once ready, well before the six hour period");
+                task.abort();
+            });
     }
 }

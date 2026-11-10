@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
 use tokio::fs;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::auth_manager::pat::{PatAuthenticator, PatPrincipal};
 use crate::auth_manager::resource_scope::{self, CompiledCanonicalResourceScope, RequiredHeader};
@@ -47,6 +47,9 @@ fn constant_time_eq(
 /// window.
 const LAST_USED_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Entity label for skipped token records in `agent_stream_storage_load_errors_total`.
+const STORAGE_ENTITY: &str = "access_token";
+
 /// Deterministic fingerprint of the scope-defining fields of a token. Used as
 /// part of the `compiled_scopes` cache key (alongside the token id) so a
 /// concurrent `authenticate()` can never pair a compiled scope with a token
@@ -73,12 +76,12 @@ pub struct FsAccessTokenStore {
     cache: Arc<DashMap<String, AccessToken>>,
     /// token_hash -> id, for constant-work validation lookups.
     hash_index: Arc<DashMap<String, String>>,
-    /// Serializes read-modify-write mutations (revoke / update / rotate) so two
-    /// concurrent operations cannot interleave — e.g. child creation racing a
-    /// parent revocation or two rotations replacing the same secret (CWE-362).
-    /// Store-wide rather than per-id: token management is admin-gated and
-    /// low-volume, so the simpler lock is worth more than the lost parallelism.
-    /// Reads and create() (which writes a fresh, unique id) do not take it.
+    /// Serializes mutations (create / revoke / update / rotate / last-used
+    /// bump) and the promotion reload so two cannot interleave — e.g. child
+    /// creation racing a parent revocation or two rotations replacing the same
+    /// secret (CWE-362). Store-wide rather than per-id: token management is
+    /// admin-gated and low-volume, so the simpler lock is worth more than the
+    /// lost parallelism. Reads do not take it.
     write_lock: Arc<tokio::sync::Mutex<()>>,
     /// (id, scope_fingerprint) -> compiled resource scope, built lazily on
     /// first authenticate. Avoids recompiling header validators per request.
@@ -91,13 +94,29 @@ impl FsAccessTokenStore {
     pub async fn new(dir: impl AsRef<Path>) -> std::io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir).await?;
-        let cache: Arc<DashMap<String, AccessToken>> = Arc::new(DashMap::new());
-        let hash_index: Arc<DashMap<String, String>> = Arc::new(DashMap::new());
-        let compiled_scopes: Arc<DashMap<(String, u64), Arc<CompiledCanonicalResourceScope>>> =
-            Arc::new(DashMap::new());
-        let last_persist: Arc<DashMap<String, std::time::Instant>> = Arc::new(DashMap::new());
+        let store = Self {
+            dir,
+            cache: Arc::new(DashMap::new()),
+            hash_index: Arc::new(DashMap::new()),
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            compiled_scopes: Arc::new(DashMap::new()),
+            last_persist: Arc::new(DashMap::new()),
+        };
+        let (tokens, _) = store.read_records().await?;
+        for token in tokens {
+            store.insert_cached(token);
+        }
+        Ok(store)
+    }
 
-        let mut entries = fs::read_dir(&dir).await?;
+    /// Read every token record in the store directory. A record that cannot be
+    /// read or parsed is skipped and counted in the storage load-error metric;
+    /// the second value is how many could not be read, which a retry can cure,
+    /// unlike a record that cannot be parsed.
+    async fn read_records(&self) -> std::io::Result<(Vec<AccessToken>, usize)> {
+        let mut tokens = Vec::new();
+        let mut read_failed = 0;
+        let mut entries = fs::read_dir(&self.dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path
@@ -109,24 +128,30 @@ impl FsAccessTokenStore {
             }
             match fs::read(&path).await {
                 Ok(bytes) => match serde_json::from_slice::<AccessToken>(&bytes) {
-                    Ok(token) => {
-                        hash_index.insert(token.token_hash.clone(), token.id.clone());
-                        cache.insert(token.id.clone(), token);
+                    Ok(token) => tokens.push(token),
+                    Err(e) => {
+                        error!("access_tokens: skipping unreadable record {:?}: {}", path, e);
+                        crate::metrics::backends::prometheus::track_storage_load_error(STORAGE_ENTITY, "parse_failed");
                     }
-                    Err(e) => warn!("access_tokens: skipping unreadable record {:?}: {}", path, e),
                 },
-                Err(e) => warn!("access_tokens: failed reading {:?}: {}", path, e),
+                Err(e) => {
+                    error!("access_tokens: failed reading {:?}: {}", path, e);
+                    crate::metrics::backends::prometheus::track_storage_load_error(STORAGE_ENTITY, "read_failed");
+                    read_failed += 1;
+                }
             }
         }
+        Ok((tokens, read_failed))
+    }
 
-        Ok(Self {
-            dir,
-            cache,
-            hash_index,
-            write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            compiled_scopes,
-            last_persist,
-        })
+    fn insert_cached(
+        &self,
+        token: AccessToken,
+    ) {
+        self.hash_index
+            .insert(token.token_hash.clone(), token.id.clone());
+        self.cache
+            .insert(token.id.clone(), token);
     }
 
     fn path_for(
@@ -153,10 +178,7 @@ impl FsAccessTokenStore {
         let _guard = self.write_lock.lock().await;
         self.validate_new_token(&token, Utc::now())?;
         self.persist(&token).await?;
-        self.hash_index
-            .insert(token.token_hash.clone(), token.id.clone());
-        self.cache
-            .insert(token.id.clone(), token);
+        self.insert_cached(token);
         Ok(())
     }
 
@@ -430,6 +452,14 @@ impl FsAccessTokenStore {
         &self,
         id: &str,
     ) {
+        // Only the Active writes token records: a Standby or an instance still
+        // activating holds its startup copy, and persisting it could overwrite a
+        // revocation the Active made. The activation generation is captured so the
+        // check can be repeated once the write lock is held.
+        let generation = crate::server::mode::current_activation_generation();
+        if !crate::server::mode::is_serving_generation(generation) {
+            return;
+        }
         // Coalesce writes: a hot token must not rewrite its record on every
         // request. Within the window, skip entirely — no clone, no disk I/O, and
         // no need to take the write lock below.
@@ -449,14 +479,17 @@ impl FsAccessTokenStore {
         // that is still active gets bumped; a revoked or expired one is left as-is.
         let _guard = self.write_lock.lock().await;
         let Some(mut token) = self.get(id) else {
+            self.last_persist.remove(id);
             return;
         };
-        if !token.is_active(Utc::now()) {
+        if !token.is_active(Utc::now()) || !crate::server::mode::is_serving_generation(generation) {
+            self.last_persist.remove(id);
             return;
         }
         token.last_used_at = Some(Utc::now());
         if let Err(e) = self.persist(&token).await {
             debug!("access_tokens: failed to persist last_used for {}: {}", id, e);
+            self.last_persist.remove(id);
             return;
         }
         self.cache
@@ -563,6 +596,40 @@ impl PatAuthenticator for FsAccessTokenStore {
             resource_scoped,
             resource_scope,
         })
+    }
+}
+
+/// Re-read the tokens the previous Active wrote, so a token it revoked is
+/// rejected and one it created or rotated authenticates. A record that cannot
+/// be read fails the reload before the cache changes, so the promotion retries
+/// instead of dropping a valid token. Records no longer on disk leave the cache, and compiled scopes and last-used coalescing restart
+/// from the reloaded records.
+#[async_trait]
+impl crate::server::mode::ReloadOnPromotion for FsAccessTokenStore {
+    async fn reload_from_storage(&self) -> std::io::Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let (tokens, read_failed) = self.read_records().await?;
+        if read_failed > 0 {
+            return Err(std::io::Error::other(format!("{read_failed} access token record(s) could not be read")));
+        }
+        let ids: std::collections::HashSet<String> = tokens
+            .iter()
+            .map(|token| token.id.clone())
+            .collect();
+        let hashes: std::collections::HashSet<String> = tokens
+            .iter()
+            .map(|token| token.token_hash.clone())
+            .collect();
+        for token in tokens {
+            self.insert_cached(token);
+        }
+        self.cache
+            .retain(|id, _| ids.contains(id));
+        self.hash_index
+            .retain(|hash, _| hashes.contains(hash));
+        self.compiled_scopes.clear();
+        self.last_persist.clear();
+        Ok(())
     }
 }
 
@@ -1051,8 +1118,18 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_auth_does_not_restore_a_rotated_secret() {
+    #[test]
+    fn concurrent_auth_does_not_restore_a_rotated_secret() {
+        let _ready = crate::server::mode::ready_for_test();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(concurrent_auth_vs_rotation());
+    }
+
+    async fn concurrent_auth_vs_rotation() {
         // authenticate() bumps last_used via touch_last_used. Sharing the write
         // lock with rotation prevents a stale snapshot from restoring the old hash.
         //
@@ -1117,6 +1194,306 @@ mod tests {
             .await
             .expect("reloaded token authenticates");
         assert_eq!(principal.scopes, Some(vec!["secrets.edit".to_string()]));
+    }
+
+    async fn active_and_standby() -> (FsAccessTokenStore, FsAccessTokenStore) {
+        let dir = std::env::temp_dir().join(format!("agent-stream-access-tokens-{}", uuid::Uuid::new_v4()));
+        let active = FsAccessTokenStore::new(&dir)
+            .await
+            .unwrap();
+        let standby = FsAccessTokenStore::new(&dir)
+            .await
+            .unwrap();
+        (active, standby)
+    }
+
+    #[tokio::test]
+    async fn promotion_reload_rejects_a_token_the_previous_active_revoked() {
+        use crate::server::mode::ReloadOnPromotion;
+        let secret = "aspat_revoked_elsewhere";
+        let token = record(&hash_secret(secret), vec![]);
+        let id = token.id.clone();
+        let (active, standby) = active_and_standby().await;
+        active
+            .create(token)
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        assert!(standby.get(&id).is_some());
+        active
+            .revoke(&id)
+            .await
+            .unwrap()
+            .expect("token exists");
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        assert!(
+            standby
+                .authenticate(secret)
+                .await
+                .is_none()
+        );
+        let on_disk: AccessToken = serde_json::from_slice(
+            &fs::read(standby.path_for(&id))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(on_disk.revoked_at.is_some(), "the revocation stays on disk");
+    }
+
+    #[test]
+    fn a_ready_active_writes_last_used_at() {
+        let _ready = crate::server::mode::ready_for_test();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let secret = "aspat_used_on_active";
+                let token = record(&hash_secret(secret), vec![]);
+                let id = token.id.clone();
+                let s = store().await;
+                s.create(token).await.unwrap();
+
+                s.authenticate(secret)
+                    .await
+                    .expect("authenticates");
+
+                let on_disk: AccessToken = serde_json::from_slice(
+                    &fs::read(s.path_for(&id))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(on_disk.last_used_at.is_some(), "a ready Active records the use");
+            });
+    }
+
+    #[test]
+    fn a_standby_using_a_stale_token_does_not_write_it_back() {
+        use crate::server::mode::{self, ServerMode};
+        let _guard = mode::MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let secret = "aspat_stale_on_standby";
+                let token = record(&hash_secret(secret), vec![]);
+                let id = token.id.clone();
+                let dir = std::env::temp_dir().join(format!("agent-stream-access-tokens-{}", uuid::Uuid::new_v4()));
+                let active = FsAccessTokenStore::new(&dir)
+                    .await
+                    .unwrap();
+                active
+                    .create(token)
+                    .await
+                    .unwrap();
+                let standby = FsAccessTokenStore::new(&dir)
+                    .await
+                    .unwrap();
+                active
+                    .revoke(&id)
+                    .await
+                    .unwrap()
+                    .expect("token exists");
+
+                mode::set_server_mode(ServerMode::Standby);
+                standby
+                    .authenticate(secret)
+                    .await;
+                mode::set_server_mode(ServerMode::Active);
+                assert!(mode::mark_activation_ready(mode::current_activation_generation()));
+
+                let on_disk: AccessToken = serde_json::from_slice(
+                    &fs::read(standby.path_for(&id))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(on_disk.revoked_at.is_some(), "the revocation stays on disk");
+                assert!(on_disk.last_used_at.is_none());
+            });
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_token_record_is_skipped_and_counted() {
+        let parse_failures = || {
+            crate::metrics::backends::prometheus::STORAGE_LOAD_ERRORS
+                .with_label_values(&[STORAGE_ENTITY, "parse_failed"])
+                .get()
+        };
+        let dir = std::env::temp_dir().join(format!("agent-stream-access-tokens-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir)
+            .await
+            .unwrap();
+        fs::write(dir.join("asat_corrupt.json"), [0xff, 0xfe])
+            .await
+            .unwrap();
+        let before = parse_failures();
+
+        let store = FsAccessTokenStore::new(&dir)
+            .await
+            .unwrap();
+
+        assert!(store.list().is_empty());
+        assert!(parse_failures() > before);
+    }
+
+    #[tokio::test]
+    async fn promotion_reload_picks_up_created_rotated_and_deleted_tokens() {
+        use crate::server::mode::ReloadOnPromotion;
+        let (active, standby) = active_and_standby().await;
+        let rotated = record(&hash_secret("aspat_before_rotation"), vec![]);
+        let rotated_id = rotated.id.clone();
+        let deleted = record(&hash_secret("aspat_deleted"), vec![]);
+        let deleted_id = deleted.id.clone();
+        active
+            .create(rotated)
+            .await
+            .unwrap();
+        active
+            .create(deleted)
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        let created_secret = "aspat_created_elsewhere";
+        active
+            .create(record(&hash_secret(created_secret), vec!["secrets.view".into()]))
+            .await
+            .unwrap();
+        let (_, new_secret) = active
+            .rotate(&rotated_id, "user-1", 0)
+            .await
+            .unwrap()
+            .expect("token rotates");
+        fs::remove_file(active.path_for(&deleted_id))
+            .await
+            .unwrap();
+
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+
+        let created = standby
+            .authenticate(created_secret)
+            .await
+            .expect("token created on the previous Active authenticates");
+        assert_eq!(created.scopes, Some(vec!["secrets.view".to_string()]));
+        assert!(
+            standby
+                .authenticate("aspat_before_rotation")
+                .await
+                .is_none()
+        );
+        assert!(
+            standby
+                .authenticate(&new_secret)
+                .await
+                .is_some()
+        );
+        assert!(
+            standby
+                .authenticate("aspat_deleted")
+                .await
+                .is_none()
+        );
+        assert!(
+            standby
+                .get(&deleted_id)
+                .is_none()
+        );
+        assert_eq!(standby.list().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn promotion_reload_that_cannot_list_the_directory_keeps_the_cache() {
+        use crate::server::mode::ReloadOnPromotion;
+        let (active, standby) = active_and_standby().await;
+        let secret = "aspat_kept";
+        active
+            .create(record(&hash_secret(secret), vec![]))
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        fs::remove_dir_all(&active.dir)
+            .await
+            .unwrap();
+
+        assert!(
+            standby
+                .reload_from_storage()
+                .await
+                .is_err()
+        );
+
+        assert!(
+            standby
+                .authenticate(secret)
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_reload_with_an_unreadable_record_fails_and_keeps_the_cache() {
+        use crate::server::mode::ReloadOnPromotion;
+        let (active, standby) = active_and_standby().await;
+        let secret = "aspat_kept_on_read_error";
+        active
+            .create(record(&hash_secret(secret), vec![]))
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        let unreadable = active
+            .dir
+            .join("asat_unreadable.json");
+        fs::create_dir(&unreadable)
+            .await
+            .unwrap();
+
+        assert!(
+            standby
+                .reload_from_storage()
+                .await
+                .is_err(),
+            "a record that cannot be read holds the reload for a retry"
+        );
+        assert!(
+            standby
+                .authenticate(secret)
+                .await
+                .is_some(),
+            "the cached token is not dropped"
+        );
+
+        fs::remove_dir(&unreadable)
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .expect("the retry succeeds once the record reads");
     }
 
     #[tokio::test]

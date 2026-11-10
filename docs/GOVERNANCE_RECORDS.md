@@ -185,7 +185,7 @@ proof does not depend on it.
 | [`store.rs`](../src/governance/store.rs) | The append-only per-Surface store and its workers (`list_surfaces`, `query`, `get`, `latest_record`, `verify_chain`, `prune`). |
 | [`index.rs`](../src/governance/index.rs) | The plaintext fixed-width record index. |
 | [`anchor.rs`](../src/governance/anchor.rs) | The signed retention anchor. |
-| [`retention.rs`](../src/governance/retention.rs) | The hourly retention sweep. |
+| [`retention.rs`](../src/governance/retention.rs) | The retention sweep: at readiness, then hourly. |
 | [`multimedia_store.rs`](../src/governance/multimedia_store.rs) | Content-addressed store for binary attachments a record references. |
 | [`capture.rs`](../src/governance/capture.rs) | The global store and the `capture` / `capture_with_id` entry points. |
 | [`sink.rs`](../src/governance/sink.rs) | Export to OpenTelemetry and integrations. |
@@ -285,9 +285,8 @@ checked too, dropping records without a signed anchor, editing the anchor,
 substituting another Surface's anchor, or replacing the kept records is detected.
 Each prune replaces the anchor.
 
-Pruning runs on write and from an hourly sweep (on the Active instance only), once a
-Surface's oldest record is
-more than an hour past the window; it removes the leading records older than the
+Pruning runs on write and from a sweep (on the Active instance only, as soon as it is ready
+and then hourly), once a Surface's oldest record is more than an hour past the window; it removes the leading records older than the
 window, so a record goes within about two hours of leaving it. The kept log, its
 rebased index, and the new anchor are written beside the live files and renamed in,
 the anchor first, with the directory synced after the anchor and again after the log

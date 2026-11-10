@@ -436,6 +436,22 @@ impl crate::server::mode::ReloadOnPromotion for ActivationSurfaces {
     }
 }
 
+/// The dashboard users and sessions of the active sign-in mode, re-read on
+/// promotion so users the previous Active kept signed in stay so.
+fn sign_in_reloads(
+    stores: impl IntoIterator<Item = (Arc<crate::auth::storage::PasskeyStorage>, Arc<crate::auth::SessionManager>)>
+) -> Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> {
+    stores
+        .into_iter()
+        .flat_map(|(users, sessions)| {
+            [
+                users as Arc<dyn crate::server::mode::ReloadOnPromotion>,
+                sessions as Arc<dyn crate::server::mode::ReloadOnPromotion>,
+            ]
+        })
+        .collect()
+}
+
 /// Run `reload`, retrying with backoff until it succeeds. Returns `false` once
 /// a later mode change supersedes `generation`.
 async fn reload_until_done(
@@ -1640,6 +1656,7 @@ pub async fn run_axum_proxy(
             pipe_store: None,              // Will be set after pipe_store is initialized
             policy_definition_store: None, // Will be set after policy_definition_store is initialized
             global_policy_store: None,     // Will be set after global_policy_store is initialized
+            policy_engine_stores: None,
             budget_tracker: Arc::new(crate::pipes::budget_tracker::BudgetTracker::new()), // Will be updated with alert service
             pipe_route_manager: None, // Will be set after pipe_route_manager is initialized
             pipe_task_manager: None,  // Will be set after pipe_task_manager is initialized
@@ -2587,7 +2604,37 @@ pub async fn run_axum_proxy(
             .await,
         );
         crate::teams::set_global_team_usage_tracker(team_usage_tracker.clone());
+        // Management access tokens (service-account PATs): one filesystem store
+        // shared by the identity + vault auth guards (token validation) and the
+        // access-token admin router (mint/list/revoke).
+        let access_tokens_storage_path = std::path::PathBuf::from(
+            &bootstrap_config
+                .storage_paths
+                .secrets,
+        )
+        .parent()
+        .map(|p| p.join("access_tokens"))
+        .unwrap_or_else(|| std::path::PathBuf::from("_storage/access_tokens"));
+        let access_tokens_storage_path_str = access_tokens_storage_path
+            .to_string_lossy()
+            .to_string();
+        let access_token_store =
+            match crate::access_tokens::FsAccessTokenStore::new(&access_tokens_storage_path_str).await {
+                Ok(store) => {
+                    info!("Access tokens store initialized at {}", access_tokens_storage_path_str);
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize access tokens store at {}: {}", access_tokens_storage_path_str, e);
+                    None
+                }
+            };
         let mut promotion_reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> = Vec::new();
+        // First, so the window in which a revoked token still authenticates is bounded by
+        // this store's own I/O rather than by every other reload.
+        if let Some(store) = &access_token_store {
+            promotion_reloads.push(store.clone());
+        }
         if let Some(store) = &identity_state.member_store {
             promotion_reloads.push(store.clone());
         }
@@ -2601,14 +2648,21 @@ pub async fn run_axum_proxy(
             promotion_reloads.push(provisioner.clone());
         }
         promotion_reloads.push(terms_manager.clone());
-        if let Some(state) = &auth_state {
-            promotion_reloads.push(state.storage.clone());
-            promotion_reloads.push(state.session_manager.clone());
-        }
-        if let Some(state) = &saml_state {
-            promotion_reloads.push(state.storage.clone());
-            promotion_reloads.push(state.session_manager.clone());
-        }
+        promotion_reloads.extend(sign_in_reloads(
+            auth_state
+                .iter()
+                .map(|state| (state.storage.clone(), state.session_manager.clone()))
+                .chain(
+                    saml_state
+                        .iter()
+                        .map(|state| (state.storage.clone(), state.session_manager.clone())),
+                )
+                .chain(
+                    oidc_state
+                        .iter()
+                        .map(|state| (state.storage.clone(), state.session_manager.clone())),
+                ),
+        ));
         promotion_reloads.push(budget_tracker.clone());
         promotion_reloads.push(team_usage_tracker.clone());
         if let Some(store) = &metrics_store {
@@ -2629,18 +2683,31 @@ pub async fn run_axum_proxy(
             global: global_policy_store.clone(),
             gateways: gateway_store.clone(),
         });
+        let engine_surface_store = match crate::surfaces::FileSystemAgentSurfaceStore::new(PathBuf::from(
+            &bootstrap_config
+                .storage_paths
+                .agent_surfaces,
+        ))
+        .await
+        {
+            Ok(store) => Some(Arc::new(store)),
+            Err(error) => {
+                warn!("Failed to initialize agent surface store: {}", error);
+                None
+            }
+        };
         let activation_policy_engines = Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
             pipe_store: pipe_store.clone(),
             global_policy_store: global_policy_store.clone(),
-            agent_surfaces_path: bootstrap_config
-                .storage_paths
-                .agent_surfaces
-                .clone(),
-            gateways_path: bootstrap_config
-                .storage_paths
-                .gateways
-                .clone(),
+            agent_surface_store: tokio::sync::OnceCell::new_with(engine_surface_store.clone()),
+            agent_surfaces_path: PathBuf::from(
+                &bootstrap_config
+                    .storage_paths
+                    .agent_surfaces,
+            ),
+            gateway_store: gateway_store.clone(),
         });
+        identity_state.policy_engine_stores = Some(activation_policy_engines.clone());
         identity_state.team_usage_tracker = Some(team_usage_tracker);
         info!("✓ Team usage tracker initialized");
 
@@ -3313,20 +3380,9 @@ pub async fn run_axum_proxy(
             })
             .map(|storage| crate::auth_manager::middleware::RbacGuard::new(storage, rbac_config.clone()))
             .ok_or_else(|| anyhow::anyhow!("RBAC guard unavailable after authentication initialization"))?;
-        let agent_surface_store: Option<Arc<dyn crate::surfaces::AgentSurfaceStore>> =
-            match crate::surfaces::FileSystemAgentSurfaceStore::new(std::path::PathBuf::from(
-                &bootstrap_config
-                    .storage_paths
-                    .agent_surfaces,
-            ))
-            .await
-            {
-                Ok(store) => Some(Arc::new(store)),
-                Err(error) => {
-                    warn!("Failed to initialize Agent Surface ownership store: {}", error);
-                    None
-                }
-            };
+        let agent_surface_store: Option<Arc<dyn crate::surfaces::AgentSurfaceStore>> = engine_surface_store
+            .clone()
+            .map(|store| store as Arc<dyn crate::surfaces::AgentSurfaceStore>);
         let (api_keys_router, api_key_validator, api_key_management_store) =
             match crate::api_keys::FsApiKeyStore::new(&api_keys_storage_path_str).await {
                 Ok(store) => {
@@ -3360,43 +3416,23 @@ pub async fn run_axum_proxy(
                 }
             };
 
-        // Management access tokens (service-account PATs): one filesystem store
-        // shared by the identity + vault auth guards (token validation) and the
-        // access-token admin router (mint/list/revoke).
-        let access_tokens_storage_path = std::path::PathBuf::from(
-            &bootstrap_config
-                .storage_paths
-                .secrets,
-        )
-        .parent()
-        .map(|p| p.join("access_tokens"))
-        .unwrap_or_else(|| std::path::PathBuf::from("_storage/access_tokens"));
-        let access_tokens_storage_path_str = access_tokens_storage_path
-            .to_string_lossy()
-            .to_string();
-        let (access_tokens_router, pat_authenticator) =
-            match crate::access_tokens::FsAccessTokenStore::new(&access_tokens_storage_path_str).await {
-                Ok(store) => {
-                    info!("Access tokens store initialized at {}", access_tokens_storage_path_str);
-                    let store_arc = std::sync::Arc::new(store);
-                    let router = crate::access_tokens::router::create_access_tokens_router(
-                        store_arc.clone(),
-                        rbac_config.clone(),
-                        Arc::new(
-                            bootstrap_config
-                                .tenancy
-                                .clone(),
-                        ),
-                        vault_rbac_guard.clone(),
-                    );
-                    let authenticator: std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator> = store_arc;
-                    (Some(router), Some(authenticator))
-                }
-                Err(e) => {
-                    warn!("Failed to initialize access tokens store at {}: {}", access_tokens_storage_path_str, e);
-                    (None, None)
-                }
-            };
+        let (access_tokens_router, pat_authenticator) = match &access_token_store {
+            Some(store) => {
+                let router = crate::access_tokens::router::create_access_tokens_router(
+                    store.clone(),
+                    rbac_config.clone(),
+                    Arc::new(
+                        bootstrap_config
+                            .tenancy
+                            .clone(),
+                    ),
+                    vault_rbac_guard.clone(),
+                );
+                let authenticator: std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator> = store.clone();
+                (Some(router), Some(authenticator))
+            }
+            None => (None, None),
+        };
 
         let secrets_cache: crate::secrets::SecretsCache = std::sync::Arc::new(dashmap::DashMap::new());
 
@@ -4235,6 +4271,104 @@ mod tests {
     }
 
     #[test]
+    fn promotion_holds_when_the_gateway_store_cannot_be_read() {
+        use crate::server::mode::ReloadOnPromotion;
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("gateways");
+            let gateways = Arc::new(
+                crate::gateways::FileSystemGatewayStore::new(path.clone(), None)
+                    .await
+                    .unwrap(),
+            );
+            let stores = ActivationPolicyStores {
+                definitions: None,
+                global: None,
+                gateways: Some(gateways),
+            };
+            stores
+                .reload_from_storage()
+                .await
+                .expect("a readable store reloads");
+
+            std::fs::remove_dir_all(&path).unwrap();
+            std::fs::write(&path, "x").unwrap();
+
+            assert!(
+                stores
+                    .reload_from_storage()
+                    .await
+                    .is_err(),
+                "an unreadable gateway store holds readiness for a retry"
+            );
+        });
+    }
+
+    #[test]
+    fn promotion_keeps_a_session_the_previous_active_slid_forward() {
+        use crate::auth::session::Session;
+        use crate::storage::filesystem::rwlock_storage;
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let users = Arc::new(
+                crate::auth::storage::PasskeyStorage::new(
+                    dir.path()
+                        .join("users")
+                        .display()
+                        .to_string(),
+                    dir.path()
+                        .join("avatars")
+                        .display()
+                        .to_string(),
+                )
+                .await
+                .unwrap(),
+            );
+            let sessions_dir = dir.path().join("sessions");
+            let standby = Arc::new(
+                crate::auth::SessionManager::with_storage(0, sessions_dir.clone())
+                    .await
+                    .unwrap(),
+            );
+            let token = standby
+                .create_session("alice".into(), "user-a".into())
+                .await;
+
+            let shared = rwlock_storage::<Session>(sessions_dir, "session")
+                .await
+                .unwrap();
+            let mut slid = shared
+                .get(&token)
+                .await
+                .unwrap()
+                .unwrap();
+            slid.expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+            shared
+                .save(&slid)
+                .await
+                .unwrap();
+
+            for reload in sign_in_reloads([(users, standby.clone())]) {
+                reload
+                    .reload_from_storage()
+                    .await
+                    .unwrap();
+            }
+            standby
+                .cleanup_expired()
+                .await;
+
+            assert!(
+                standby
+                    .validate_session(&token)
+                    .await
+                    .is_some(),
+                "the slid session survives the first cleanup after promotion"
+            );
+        });
+    }
+
+    #[test]
     fn activation_marks_ready_without_fabric_listeners() {
         let _guard = mode::MODE_TEST_LOCK
             .lock()
@@ -4350,8 +4484,17 @@ mod tests {
                 Arc::new(crate::identity::handlers::policy_definitions::EngineStores {
                     pipe_store: Some(pipes),
                     global_policy_store: None,
-                    agent_surfaces_path: path("agent_surfaces"),
-                    gateways_path: path("gateways"),
+                    agent_surface_store: tokio::sync::OnceCell::new_with(Some(Arc::new(
+                        crate::surfaces::FileSystemAgentSurfaceStore::new(PathBuf::from(path("agent_surfaces")))
+                            .await
+                            .unwrap(),
+                    ))),
+                    agent_surfaces_path: PathBuf::from(path("agent_surfaces")),
+                    gateway_store: Some(Arc::new(
+                        crate::gateways::FileSystemGatewayStore::new(PathBuf::from(path("gateways")), None)
+                            .await
+                            .unwrap(),
+                    )),
                 }),
             );
             assert!(

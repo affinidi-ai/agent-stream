@@ -31,6 +31,8 @@ pub struct IdentityApiState {
     /// Appliance-wide (global) policy assignments store — which reusable
     /// policies are enforced on every surface of a type.
     pub global_policy_store: Option<Arc<crate::policies::FileSystemGlobalPolicyStore>>,
+    /// Stores the policy engines referencing an edited definition are recompiled from.
+    pub policy_engine_stores: Option<Arc<crate::identity::handlers::policy_definitions::EngineStores>>,
     /// Team store (groups of members, by UUID). Authoritative for team CRUD.
     pub team_store: Option<Arc<crate::teams::FileSystemTeamStore>>,
     /// Member store (appliance clients, the LLM consumers). Authoritative for
