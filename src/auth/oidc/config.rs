@@ -392,7 +392,7 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
     if !binds_anything(&required_claims) {
         if !file.allow_any_account {
             return Err("required_claims must name at least one claim that binds sign-in to your tenant at the \
-                 provider (iss, aud and azp are checked on every token and bind nothing), or set \
+                 provider (iss, aud and azp are tied to the issuer and client_id and cannot name a tenant), or set \
                  allow_any_account to true to let every account at the provider sign in"
                 .to_string());
         }
@@ -459,6 +459,9 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
             let allowed = allowed
                 .into_iter()
                 .map(|value| match value {
+                    RawClaimValue::String(text) if text.trim().is_empty() => {
+                        Err(format!("{field} must not list a blank value"))
+                    }
                     RawClaimValue::String(text) => ValueMatcher::from_text(&field, &text),
                     RawClaimValue::Bool(value) => Ok(ValueMatcher::Bool(value)),
                 })
@@ -468,17 +471,26 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
         .collect()
 }
 
-/// Claims the ID token verifier already checks on every token: `iss` against
-/// the configured issuer, and `aud` and `azp` against `client_id`. An entry on
-/// one of them can never refuse a token that got this far, so it binds nothing.
-const SELF_CHECKED_CLAIMS: &[&str] = &["iss", "aud", "azp"];
+/// Claims tied to the issuer and to this client, not to a tenant: `iss` is the
+/// configured issuer, and `aud` and `azp` name `client_id`. An entry on one of
+/// them cannot tell one tenant's accounts from another's, so it binds nothing.
+const NON_TENANT_CLAIMS: &[&str] = &["iss", "aud", "azp"];
 
-/// Whether some `required_claims` entry is on a claim the verifier does not
-/// already check, so it can refuse an account.
-fn binds_anything(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+/// The `required_claims` entries that can name a tenant: every entry but those
+/// on [`NON_TENANT_CLAIMS`].
+fn bindable_entries(
+    required: &BTreeMap<String, Vec<ValueMatcher>>
+) -> impl Iterator<Item = (&String, &Vec<ValueMatcher>)> {
     required
-        .keys()
-        .any(|claim| !SELF_CHECKED_CLAIMS.contains(&claim.as_str()))
+        .iter()
+        .filter(|(claim, _)| !NON_TENANT_CLAIMS.contains(&claim.as_str()))
+}
+
+/// Whether some `required_claims` entry is on a claim that can name a tenant.
+fn binds_anything(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+    bindable_entries(required)
+        .next()
+        .is_some()
 }
 
 /// Whether a value can name one tenant: an exact string. A boolean, the string
@@ -491,13 +503,11 @@ fn is_exact_tenant_value(value: &ValueMatcher) -> bool {
 /// The `required_claims` entries that allow only exact string values, the
 /// shape that can name one tenant.
 fn exact_value_claims(required: &BTreeMap<String, Vec<ValueMatcher>>) -> Vec<&str> {
-    required
-        .iter()
-        .filter(|(claim, allowed)| {
-            !SELF_CHECKED_CLAIMS.contains(&claim.as_str())
-                && allowed
-                    .iter()
-                    .all(is_exact_tenant_value)
+    bindable_entries(required)
+        .filter(|(_, allowed)| {
+            allowed
+                .iter()
+                .all(is_exact_tenant_value)
         })
         .map(|(claim, _)| claim.as_str())
         .collect()
@@ -505,9 +515,7 @@ fn exact_value_claims(required: &BTreeMap<String, Vec<ValueMatcher>>) -> Vec<&st
 
 /// Whether any `required_claims` entry allows at least one exact string value.
 fn holds_exact_value(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
-    required
-        .iter()
-        .filter(|(claim, _)| !SELF_CHECKED_CLAIMS.contains(&claim.as_str()))
+    bindable_entries(required)
         .flat_map(|(_, allowed)| allowed)
         .any(is_exact_tenant_value)
 }
@@ -911,7 +919,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_claim_the_token_verifier_already_checks_is_no_tenant_binding() {
+    async fn a_blank_required_claim_value_is_refused_like_a_blank_claim_name() {
+        for blank in ["", "  "] {
+            let refused = load(with(valid_file(), &["required_claims"], json!({ "org_id": [blank] })))
+                .await
+                .unwrap_err();
+            assert!(refused.contains("required_claims.org_id"), "{refused}");
+            assert!(refused.contains("blank"), "{refused}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claim_tied_to_the_issuer_or_client_is_no_tenant_binding() {
         let only_verified =
             json!({ "iss": ["https://idp.example.com"], "aud": ["agent-stream"], "azp": ["agent-stream"] });
         for claims in [json!({ "iss": ["https://idp.example.com"] }), only_verified] {
