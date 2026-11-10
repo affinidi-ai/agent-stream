@@ -2630,6 +2630,11 @@ pub async fn run_axum_proxy(
                 }
             };
         let mut promotion_reloads: Vec<Arc<dyn crate::server::mode::ReloadOnPromotion>> = Vec::new();
+        // First, so the window in which a revoked token still authenticates is bounded by
+        // this store's own I/O rather than by every other reload.
+        if let Some(store) = &access_token_store {
+            promotion_reloads.push(store.clone());
+        }
         if let Some(store) = &identity_state.member_store {
             promotion_reloads.push(store.clone());
         }
@@ -2672,9 +2677,6 @@ pub async fn run_axum_proxy(
         }
         if let Some(store) = crate::governance::store() {
             promotion_reloads.push(Arc::new(store.clone()));
-        }
-        if let Some(store) = &access_token_store {
-            promotion_reloads.push(store.clone());
         }
         let activation_policy_stores = Arc::new(ActivationPolicyStores {
             definitions: policy_definition_store.clone(),
@@ -4266,6 +4268,40 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn promotion_holds_when_the_gateway_store_cannot_be_read() {
+        use crate::server::mode::ReloadOnPromotion;
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("gateways");
+            let gateways = Arc::new(
+                crate::gateways::FileSystemGatewayStore::new(path.clone(), None)
+                    .await
+                    .unwrap(),
+            );
+            let stores = ActivationPolicyStores {
+                definitions: None,
+                global: None,
+                gateways: Some(gateways),
+            };
+            stores
+                .reload_from_storage()
+                .await
+                .expect("a readable store reloads");
+
+            std::fs::remove_dir_all(&path).unwrap();
+            std::fs::write(&path, "x").unwrap();
+
+            assert!(
+                stores
+                    .reload_from_storage()
+                    .await
+                    .is_err(),
+                "an unreadable gateway store holds readiness for a retry"
+            );
+        });
     }
 
     #[test]

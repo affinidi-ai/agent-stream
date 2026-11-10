@@ -4,9 +4,10 @@ changes:
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Count skipped access token, API key and identity records on load
       description: >-
-        Management access tokens, API keys and DID:webvh identities that cannot be loaded are
-        now logged at ERROR and counted in agent_stream_storage_load_errors_total, labelled by
-        entity and reason. A file that is not valid UTF-8 counts as parse_failed.
+        Management access tokens, API keys, DID:webvh identities and an unparseable dashboard
+        settings file on promotion are now logged at ERROR and counted in
+        agent_stream_storage_load_errors_total, labelled by entity and reason. A file that is
+        not valid UTF-8 counts as parse_failed.
   changed: []
   fixed:
     - timestamp: '2026-11-05T12:00:00.000Z'
@@ -14,8 +15,9 @@ changes:
       description: >-
         The governance and drift retention sweeps and the expired dashboard session cleanup
         now run once when an instance becomes Active and ready, at startup and after every
-        promotion (including one that happens while a run is in progress), then on their interval. Previously the retention sweeps skipped their first
-        run, so nothing was pruned for up to six hours after each start or failover.
+        promotion (including one that happens while a run is in progress), then on their
+        interval. Previously the retention sweeps skipped their first run, so nothing was
+        pruned for up to six hours after each start or failover.
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Reject management access tokens revoked on the previous Active after failover
       description: >-
@@ -23,15 +25,24 @@ changes:
         A token revoked on the previous Active is rejected instead of authenticating and
         writing its un-revoked record back to disk, and a token created or rotated there
         authenticates. A token used on a Standby no longer writes its last-used time, so it
-        cannot overwrite a revocation the Active made. Upgrade step: after upgrading, list access
-        tokens and revoke again any that were revoked before a failover and now show as active;
-        records written by earlier versions are read as they are stored.
+        cannot overwrite a revocation the Active made. A token record that cannot be read
+        holds the reload for a retry instead of dropping a valid token. Upgrade step: after
+        upgrading, list access tokens and revoke again any that were revoked before a
+        failover and now show as active; records written by earlier versions are read as
+        they are stored.
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Stop a Standby from deleting shared dashboard session files
       description: >-
         The periodic expired-session cleanup now runs only on the Active. A Standby used the
         expiry times it loaded at startup and deleted sessions the Active was still keeping
-        alive, which signed those users out after a failover. In OIDC sign-in mode the dashboard users and sessions are now re-read on promotion, as they are in passkey and SAML modes.
+        alive, which signed those users out after a failover.
+    - timestamp: '2026-11-10T09:00:00.000Z'
+      title: Keep OIDC dashboard users and sessions across failover
+      description: >-
+        In OIDC sign-in mode a promoted instance now re-reads the dashboard users and sessions
+        the previous Active stored, as it does in passkey and SAML modes. Previously the
+        first session cleanup after a failover deleted sessions the previous Active had kept
+        alive, which signed those users out.
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Stop a non-UTF-8 settings or metrics file from holding a promotion at 503
       description: >-
@@ -41,16 +52,22 @@ changes:
     - timestamp: '2026-11-05T12:00:00.000Z'
       title: Recompile policy engines from the existing stores and drop stale engines
       description: >-
-        Policy engine recompiles on promotion and on policy edits now use the existing
-        internal surface record and gateway stores instead of opening new ones. Each new store
-        started a refresh task that never stopped when cache_refresh_interval_secs is set, and
-        an empty gateway listing saved a localhost self-gateway to shared storage. A promotion
-        re-reads the internal surface records first, and drops the engine of a record stored
-        as disabled and of a gateway no longer stored. A gateway whose record cannot be
-        read stays enforced and denies instead of skipping policy. A surface store that failed
-        to open at startup is opened on the first retry that needs it and kept, and readiness is
-        held at 503 until it opens; a gateway store that failed to open has no engines to refresh. A policy edit that
-        cannot refresh engines because the engine stores are unavailable is now logged at ERROR.
+        Policy engine recompiles and the policy impact count on promotion and on policy edits
+        now use the existing internal surface record and gateway stores instead of opening new
+        ones. Each new store started a refresh task that never stopped when
+        cache_refresh_interval_secs is set, and an empty gateway listing saved a localhost
+        self-gateway to shared storage. A promotion re-reads the internal surface records
+        first, and drops the engine of a record stored as disabled and of a gateway no longer
+        stored. A gateway this instance already enforces stays enforced when its record cannot
+        be read and denies instead of skipping policy. A surface store that failed to open at
+        startup is opened on the first retry that needs it and kept, and readiness is held at
+        503 until it opens; a gateway store that failed to open has no engines to refresh.
+    - timestamp: '2026-11-10T09:00:00.000Z'
+      title: Log a policy edit that cannot refresh engines at ERROR
+      description: >-
+        A policy definition edit or delete whose engines cannot be refreshed because the
+        engine stores are unavailable is now logged at ERROR instead of WARN, so a policy
+        change that did not take effect is visible.
   removed: []
   security: []
   breaking: []

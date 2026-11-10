@@ -102,16 +102,20 @@ impl FsAccessTokenStore {
             compiled_scopes: Arc::new(DashMap::new()),
             last_persist: Arc::new(DashMap::new()),
         };
-        for token in store.read_records().await? {
+        let (tokens, _) = store.read_records().await?;
+        for token in tokens {
             store.insert_cached(token);
         }
         Ok(store)
     }
 
     /// Read every token record in the store directory. A record that cannot be
-    /// read or parsed is skipped and counted in the storage load-error metric.
-    async fn read_records(&self) -> std::io::Result<Vec<AccessToken>> {
+    /// read or parsed is skipped and counted in the storage load-error metric;
+    /// the second value is how many could not be read, which a retry can cure,
+    /// unlike a record that cannot be parsed.
+    async fn read_records(&self) -> std::io::Result<(Vec<AccessToken>, usize)> {
         let mut tokens = Vec::new();
+        let mut read_failed = 0;
         let mut entries = fs::read_dir(&self.dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -133,10 +137,11 @@ impl FsAccessTokenStore {
                 Err(e) => {
                     error!("access_tokens: failed reading {:?}: {}", path, e);
                     crate::metrics::backends::prometheus::track_storage_load_error(STORAGE_ENTITY, "read_failed");
+                    read_failed += 1;
                 }
             }
         }
-        Ok(tokens)
+        Ok((tokens, read_failed))
     }
 
     fn insert_cached(
@@ -474,14 +479,17 @@ impl FsAccessTokenStore {
         // that is still active gets bumped; a revoked or expired one is left as-is.
         let _guard = self.write_lock.lock().await;
         let Some(mut token) = self.get(id) else {
+            self.last_persist.remove(id);
             return;
         };
         if !token.is_active(Utc::now()) || !crate::server::mode::is_serving_generation(generation) {
+            self.last_persist.remove(id);
             return;
         }
         token.last_used_at = Some(Utc::now());
         if let Err(e) = self.persist(&token).await {
             debug!("access_tokens: failed to persist last_used for {}: {}", id, e);
+            self.last_persist.remove(id);
             return;
         }
         self.cache
@@ -592,14 +600,18 @@ impl PatAuthenticator for FsAccessTokenStore {
 }
 
 /// Re-read the tokens the previous Active wrote, so a token it revoked is
-/// rejected and one it created or rotated authenticates. Records no longer on
-/// disk leave the cache, and compiled scopes and last-used coalescing restart
+/// rejected and one it created or rotated authenticates. A record that cannot
+/// be read fails the reload before the cache changes, so the promotion retries
+/// instead of dropping a valid token. Records no longer on disk leave the cache, and compiled scopes and last-used coalescing restart
 /// from the reloaded records.
 #[async_trait]
 impl crate::server::mode::ReloadOnPromotion for FsAccessTokenStore {
     async fn reload_from_storage(&self) -> std::io::Result<()> {
         let _guard = self.write_lock.lock().await;
-        let tokens = self.read_records().await?;
+        let (tokens, read_failed) = self.read_records().await?;
+        if read_failed > 0 {
+            return Err(std::io::Error::other(format!("{read_failed} access token record(s) could not be read")));
+        }
         let ids: std::collections::HashSet<String> = tokens
             .iter()
             .map(|token| token.id.clone())
@@ -1438,6 +1450,50 @@ mod tests {
                 .await
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn promotion_reload_with_an_unreadable_record_fails_and_keeps_the_cache() {
+        use crate::server::mode::ReloadOnPromotion;
+        let (active, standby) = active_and_standby().await;
+        let secret = "aspat_kept_on_read_error";
+        active
+            .create(record(&hash_secret(secret), vec![]))
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .unwrap();
+        let unreadable = active
+            .dir
+            .join("asat_unreadable.json");
+        fs::create_dir(&unreadable)
+            .await
+            .unwrap();
+
+        assert!(
+            standby
+                .reload_from_storage()
+                .await
+                .is_err(),
+            "a record that cannot be read holds the reload for a retry"
+        );
+        assert!(
+            standby
+                .authenticate(secret)
+                .await
+                .is_some(),
+            "the cached token is not dropped"
+        );
+
+        fs::remove_dir(&unreadable)
+            .await
+            .unwrap();
+        standby
+            .reload_from_storage()
+            .await
+            .expect("the retry succeeds once the record reads");
     }
 
     #[tokio::test]

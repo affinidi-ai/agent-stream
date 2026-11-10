@@ -316,10 +316,23 @@ async fn recompile_gateway_engines(
         }
     }
     if matches!(scope, EngineScope::All) {
-        let stored: std::collections::HashSet<String> = gateways
+        // List again so a gateway stored and given a policy while this pass ran
+        // keeps its engine.
+        let mut stored: std::collections::HashSet<String> = gateways
             .into_iter()
             .map(|gateway| gateway.id)
             .collect();
+        match store.list_all().await {
+            Ok(latest) => stored.extend(
+                latest
+                    .into_iter()
+                    .map(|gateway| gateway.id),
+            ),
+            Err(e) => {
+                warn!(error = %e, "Gateway engines not pruned: cannot list gateways again");
+                return Ok((ok, failed));
+            }
+        }
         let dropped = gw_manager.retain_gateways(&stored);
         if dropped > 0 {
             info!(dropped, "Dropped OPA engines of gateways no longer stored");
@@ -996,14 +1009,11 @@ pub async fn policy_definition_impact(
         }
     };
     let surfaces_fut = async {
-        match crate::surfaces::FileSystemAgentSurfaceStore::new(std::path::PathBuf::from(
-            &state
-                .bootstrap_config
-                .storage_paths
-                .agent_surfaces,
-        ))
-        .await
-        {
+        let Some(stores) = &state.policy_engine_stores else {
+            warn!(policy_id = %policy_id, "Policy engine stores unavailable; surfaces not counted for policy impact");
+            return 0;
+        };
+        match open_surface_store(stores).await {
             Ok(surface_store) => match surface_store.list_all().await {
                 Ok(list) => list
                     .iter()
@@ -1022,37 +1032,29 @@ pub async fn policy_definition_impact(
     };
     let gateways_fut = async {
         use crate::gateways::store::GatewayStore as _;
-        match crate::gateways::FileSystemGatewayStore::new(
-            std::path::PathBuf::from(
-                &state
-                    .bootstrap_config
-                    .storage_paths
-                    .gateways,
-            ),
-            None,
-        )
-        .await
-        {
-            Ok(gw_store) => match gw_store.list_all().await {
-                Ok(list) => list
-                    .iter()
-                    .filter(|g| {
-                        g.opa_policy_config
-                            .as_ref()
-                            .is_some_and(|c| {
-                                c.all_policy_definition_ids()
-                                    .iter()
-                                    .any(|id| id == policy_id.as_str())
-                            })
-                    })
-                    .count(),
-                Err(e) => {
-                    warn!(policy_id = %policy_id, error = %e, "Failed to list gateways for policy impact");
-                    0
-                }
-            },
+        let Some(gw_store) = state
+            .policy_engine_stores
+            .as_ref()
+            .and_then(|stores| stores.gateway_store.as_ref())
+        else {
+            warn!(policy_id = %policy_id, "Gateway store unavailable; gateways not counted for policy impact");
+            return 0;
+        };
+        match gw_store.list_all().await {
+            Ok(list) => list
+                .iter()
+                .filter(|g| {
+                    g.opa_policy_config
+                        .as_ref()
+                        .is_some_and(|c| {
+                            c.all_policy_definition_ids()
+                                .iter()
+                                .any(|id| id == policy_id.as_str())
+                        })
+                })
+                .count(),
             Err(e) => {
-                warn!(policy_id = %policy_id, error = %e, "Failed to open gateway store for policy impact");
+                warn!(policy_id = %policy_id, error = %e, "Failed to list gateways for policy impact");
                 0
             }
         }
@@ -1611,6 +1613,23 @@ mod tests {
         }));
         let targeted = recompile_surface_engines(&manager, &surfaces, EngineScope::Referencing("def")).await;
         assert_eq!(targeted.unwrap(), (0, 0), "a policy edit recompiles from the cached records");
+    }
+
+    #[tokio::test]
+    async fn recompile_without_a_gateway_store_is_not_an_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stores = stores_without_surface_store(
+            temp_dir
+                .path()
+                .join("agent_surfaces"),
+        );
+
+        assert!(
+            recompile_policy_engines(&stores, EngineScope::All)
+                .await
+                .is_ok(),
+            "a gateway store that never opened has no engines to refresh"
+        );
     }
 
     #[tokio::test]

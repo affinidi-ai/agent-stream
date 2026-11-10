@@ -204,11 +204,12 @@ On `SIGUSR1` the instance reports `503` at once, then:
    Every Surface, internal surface record and gateway is visited, so an engine whose policy
    the previous Active removed is dropped. The internal surface records are re-read from
    storage first; the engine of one stored as disabled, and of a gateway no longer stored,
-   is dropped. A gateway missing from the listing, including one whose record could not be
-   read, stays enforced, so Fabric traffic to it is denied rather than skipping policy. A
-   surface store that could not be opened at startup is opened on the first retry that
-   needs it and kept, and the promotion holds at `503` until it opens. A gateway store that could not be
-   opened at startup has no engines to refresh and is skipped. An internal surface record
+   is dropped. A gateway this instance already enforces keeps its enforcement when it is
+   missing from the listing, including one whose record could not be read, so Fabric traffic
+   to it is denied rather than skipping policy; a gateway the instance never loaded is not
+   enforced. A surface store that could not be opened at startup is opened on the first
+   retry that needs it and kept, and the promotion holds at `503` until it opens. A gateway
+   store that could not be opened at startup has no engines to refresh and is skipped. An internal surface record
    deleted on the previous Active keeps the engine it had, because engines are compiled at
    startup from `config.surfaces`, which is not the filesystem store when
    `channel_config_source` is DynamoDB,
@@ -227,8 +228,10 @@ On `SIGUSR1` the instance reports `503` at once, then:
      system metrics history.
    - Dashboard settings and the revocation status list, so revocations made on the previous
      Active stay in force.
-   - Management access tokens: a token the previous Active revoked is rejected, and one it
-     created or rotated authenticates.
+   - Management access tokens, read first: a token the previous Active revoked is rejected,
+     and one it created or rotated authenticates. A token record that cannot be read holds
+     the reload for a retry, so a valid token is never dropped; one that cannot be parsed is
+     skipped as below.
    - The head of every governance chain, so the next record links to the last one on disk.
 
    A read in steps 1, 2 or 4 that fails with a storage error, or a Surface or gateway
@@ -236,9 +239,12 @@ On `SIGUSR1` the instance reports `503` at once, then:
    backoff of up to 30 seconds, until it succeeds or the instance is demoted. A request log,
    time series file, system metrics history, settings file or member provisioning config
    that cannot be parsed, including one that is not valid UTF-8, is logged and does not
-   hold readiness back. A single stored
-   record, such as a policy definition, the appliance-wide assignments or a gateway, that
-   cannot be read, decrypted or parsed is skipped: the instance goes ready without it,
+   hold readiness back: an unparseable request log starts empty, as at startup, and an
+   unparseable settings file keeps the settings the instance already has, logged at `ERROR`
+   and counted in `agent_stream_storage_load_errors_total`. A single stored
+   record, such as a policy definition or the appliance-wide assignments, that
+   cannot be read, decrypted or parsed is skipped (a gateway engine is the exception in
+   step 3): the instance goes ready without it,
    logs the file at `ERROR` and counts it in `agent_stream_storage_load_errors_total`.
    This matches Agent Gateway and favours availability, so a skipped policy record is
    not enforced; alert on that counter,

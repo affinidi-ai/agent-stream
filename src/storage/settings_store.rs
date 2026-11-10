@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::fs;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Process-global settings store, registered once at boot by the orchestrator.
 /// Lets subsystems that don't hold an `Arc<SettingsStore>` (e.g. the policy
@@ -273,7 +273,10 @@ impl crate::server::mode::ReloadOnPromotion for SettingsStore {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
             }
-            Err(e) => warn!("Failed to parse settings file on promotion, keeping current settings: {}", e),
+            Err(e) => {
+                error!("Failed to parse settings file on promotion, keeping current settings: {}", e);
+                crate::metrics::backends::prometheus::track_storage_load_error("settings", "parse_failed");
+            }
         }
         Ok(())
     }

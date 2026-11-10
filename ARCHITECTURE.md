@@ -307,8 +307,11 @@ cannot be read, decrypted or parsed at startup or promotion is skipped, logged a
 counted in `agent_stream_storage_load_errors_total`, favouring availability as Agent Gateway
 does. A Surface or appliance-wide set that references a skipped policy definition still
 denies, but a skipped appliance-wide assignments document leaves no appliance-wide policy
-enforced, so alert on that counter. A store that cannot be read at all holds readiness back
-([what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does)).
+enforced, so alert on that counter. A gateway this instance already enforces keeps its
+enforcement when its record cannot be read on promotion, so Fabric traffic to it is denied
+([what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does)). A store that
+cannot be read at all holds readiness back, as does an access token record that cannot be
+read.
 | Governance Records never embed raw media bytes, only digests. | Recorded media would bypass the multimedia store and its encryption at rest. |
 | An outbound client that checks addresses at connect time follows no redirects and ignores `HTTP_PROXY` and `HTTPS_PROXY` ([`src/http_client.rs`](src/http_client.rs)). | A redirect or a proxy that resolves the host itself would bypass the address check. |
 

@@ -185,7 +185,7 @@ proof does not depend on it.
 | [`store.rs`](../src/governance/store.rs) | The append-only per-Surface store and its workers (`list_surfaces`, `query`, `get`, `latest_record`, `verify_chain`, `prune`). |
 | [`index.rs`](../src/governance/index.rs) | The plaintext fixed-width record index. |
 | [`anchor.rs`](../src/governance/anchor.rs) | The signed retention anchor. |
-| [`retention.rs`](../src/governance/retention.rs) | The hourly retention sweep. |
+| [`retention.rs`](../src/governance/retention.rs) | The retention sweep: at readiness, then hourly. |
 | [`multimedia_store.rs`](../src/governance/multimedia_store.rs) | Content-addressed store for binary attachments a record references. |
 | [`capture.rs`](../src/governance/capture.rs) | The global store and the `capture` / `capture_with_id` entry points. |
 | [`sink.rs`](../src/governance/sink.rs) | Export to OpenTelemetry and integrations. |

@@ -164,7 +164,10 @@ impl ReadyTicker {
             }
             tokio::select! {
                 _ = self.interval.tick() => {
-                    if is_ready_to_serve() {
+                    let generation = current_activation_generation();
+                    if is_serving_generation(generation) {
+                        self.served = Some(generation);
+                        self.interval.reset();
                         return;
                     }
                 }

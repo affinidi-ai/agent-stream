@@ -47,7 +47,9 @@ promotion is skipped, logged at `ERROR` and counted in
 `agent_stream_storage_load_errors_total`, favouring availability. A layer that references a
 skipped definition still denies, but a skipped assignments document leaves no appliance-wide
 set enforced; alert on that counter
-([CONFIGURATION_RELOAD.md](CONFIGURATION_RELOAD.md#what-promotion-does)).
+([CONFIGURATION_RELOAD.md](CONFIGURATION_RELOAD.md#what-promotion-does)). A gateway this
+instance already enforces keeps its enforcement when its record cannot be read on promotion,
+so Fabric traffic to it is denied rather than skipping policy.
 
 The layers each path runs, in order:
 
