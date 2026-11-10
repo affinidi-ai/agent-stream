@@ -698,6 +698,32 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn an_unreadable_key_record_is_skipped_and_counted() {
+        let load_errors = |reason: &str| {
+            crate::metrics::backends::prometheus::STORAGE_LOAD_ERRORS
+                .with_label_values(&["api_key", reason])
+                .get()
+        };
+        let dir = TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent-1");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("broken.json"), "not json").unwrap();
+        let before = load_errors("parse_failed");
+
+        let store = FsApiKeyStore::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .cache
+                .get("agent-1")
+                .is_none_or(|keys| keys.is_empty())
+        );
+        assert!(load_errors("parse_failed") > before);
+    }
+
     async fn create_test_store() -> (FsApiKeyStore, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let store = FsApiKeyStore::new(

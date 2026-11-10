@@ -550,6 +550,12 @@ permissions, so they can be granted to different roles. Updating a definition th
 appliance-wide assignment references also requires the caller's role to hold
 `policies.publish`; otherwise the update answers `403`.
 
+An update or delete saves the definition first, then recompiles the engines that reference
+it. If those engines cannot be refreshed, because the engine stores are unavailable or
+cannot be read, the request answers `500` with a message naming the definition: it is saved,
+but the live engines may still enforce the previous version. Save or delete it again to
+retry.
+
 ### Dry run
 
 `simulate` evaluates a sample `input` in a throwaway engine. Nothing is enforced and no

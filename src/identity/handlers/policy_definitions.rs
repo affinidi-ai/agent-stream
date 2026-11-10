@@ -147,18 +147,30 @@ fn validate_scope(policy: &PolicyDefinition) -> Result<(), AppError> {
 ///
 /// Reporting is via structured logs — one line per refreshed/failed object
 /// plus a summary — surfaced in the dashboard Logs tab. Failures never
-/// preserve a stale permissive engine (a failed recompile evicts → deny).
+/// preserve a stale permissive engine (a failed recompile evicts → deny). When
+/// the engines could not be refreshed at all, because the engine stores are
+/// unavailable or cannot be read, the caller gets an error: the definition is
+/// saved, but the live engines may still enforce the previous one.
 async fn refresh_referencing_engines(
-    state: &IdentityApiState,
+    stores: Option<&EngineStores>,
     policy_id: &str,
-) {
-    let Some(stores) = &state.policy_engine_stores else {
+) -> Result<(), AppError> {
+    let Some(stores) = stores else {
         error!(policy_id = %policy_id, "Policy engine stores unavailable; engines referencing the changed definition not refreshed");
-        return;
+        return Err(AppError::InternalError(format!(
+            "Policy definition {policy_id} was saved, but the engines that reference it were not refreshed: \
+             the policy engine stores are unavailable. Save it again once they are."
+        )));
     };
-    if let Err(e) = recompile_policy_engines(stores, EngineScope::Referencing(policy_id)).await {
-        error!(policy_id = %policy_id, error = %e, "Policy engines referencing the changed definition were not all refreshed");
-    }
+    recompile_policy_engines(stores, EngineScope::Referencing(policy_id))
+        .await
+        .map_err(|e| {
+            error!(policy_id = %policy_id, error = %e, "Policy engines referencing the changed definition were not all refreshed");
+            AppError::InternalError(format!(
+                "Policy definition {policy_id} was saved, but the engines that reference it were not all refreshed: {e}. \
+                 Save it again to retry."
+            ))
+        })
 }
 
 /// Where [`recompile_policy_engines`] reads the objects whose engines it
@@ -682,12 +694,19 @@ pub async fn update_policy_definition(
 
     // Recompile every runtime engine that references this definition so the new
     // enforcement logic takes effect on live traffic immediately.
-    refresh_referencing_engines(&state, &policy_id).await;
+    let refreshed = refresh_referencing_engines(
+        state
+            .policy_engine_stores
+            .as_deref(),
+        &policy_id,
+    )
+    .await;
 
     state
         .ws_state
         .broadcast(crate::server::WsUpdate::RefreshDashboard);
 
+    refreshed?;
     Ok(Json(response))
 }
 
@@ -722,12 +741,19 @@ pub async fn delete_policy_definition(
     // Fan out AFTER the delete: the recompiler now finds the definition gone
     // and evicts each referencing engine, so an old compiled allow policy can
     // never remain active (fail closed).
-    refresh_referencing_engines(&state, &policy_id).await;
+    let refreshed = refresh_referencing_engines(
+        state
+            .policy_engine_stores
+            .as_deref(),
+        &policy_id,
+    )
+    .await;
 
     state
         .ws_state
         .broadcast(crate::server::WsUpdate::RefreshDashboard);
 
+    refreshed?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1613,6 +1639,46 @@ mod tests {
         }));
         let targeted = recompile_surface_engines(&manager, &surfaces, EngineScope::Referencing("def")).await;
         assert_eq!(targeted.unwrap(), (0, 0), "a policy edit recompiles from the cached records");
+    }
+
+    #[tokio::test]
+    async fn a_policy_edit_without_engine_stores_reports_that_engines_were_not_refreshed() {
+        let err = refresh_referencing_engines(None, "def")
+            .await
+            .expect_err("the caller must learn the engines were not refreshed");
+        assert!(
+            matches!(&err, AppError::InternalError(message) if message.contains("were not refreshed") && message.contains("def"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_policy_edit_whose_stores_cannot_be_read_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        crate::gateways::init_policy_manager(Arc::new(crate::policies::SurfacePolicyManager::new())).await;
+        let stores = stores_without_surface_store(blocker.join("agent_surfaces"));
+
+        let err = refresh_referencing_engines(Some(&stores), "def")
+            .await
+            .expect_err("an unreadable surface store is reported");
+
+        assert!(matches!(&err, AppError::InternalError(message) if message.contains("not all refreshed")));
+    }
+
+    #[tokio::test]
+    async fn a_policy_edit_with_readable_stores_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let stores = stores_without_surface_store(
+            dir.path()
+                .join("agent_surfaces"),
+        );
+
+        assert!(
+            refresh_referencing_engines(Some(&stores), "def")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

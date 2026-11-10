@@ -747,7 +747,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_identity_load_failure_reason_classifies_the_cause() {
+    fn identity_load_failure_reason_classifies_the_cause() {
         let read = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
             .context("Failed to read identity file");
         let parse = anyhow::Error::from(serde_json::from_str::<DidWebVhIdentity>("not json").unwrap_err())
@@ -760,6 +760,25 @@ mod tests {
         let not_utf8 = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::InvalidData))
             .context("Failed to read identity file");
         assert_eq!(identity_load_failure_reason(&not_utf8), "parse_failed");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_identity_file_is_skipped_and_counted() {
+        let load_errors = |reason: &str| {
+            crate::metrics::backends::prometheus::STORAGE_LOAD_ERRORS
+                .with_label_values(&["didwebvh_identity", reason])
+                .get()
+        };
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("broken.json"), "not json").unwrap();
+        let before = load_errors("parse_failed");
+
+        let manager = FileSystemDidWebVhIdentityStore::new_with_encryption(dir.path(), None)
+            .await
+            .unwrap();
+
+        assert!(load_errors("parse_failed") > before);
+        drop(manager);
     }
 
     #[test]

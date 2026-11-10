@@ -413,6 +413,40 @@ mod tests {
     }
 
     #[test]
+    fn ready_ticker_does_not_run_twice_when_a_period_tick_finds_a_new_generation() {
+        let _guard = MODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        promote();
+        paused_runtime().block_on(async {
+            let period = std::time::Duration::from_secs(3600);
+            let mut ticker = ReadyTicker::new(period);
+            ticker.tick().await;
+
+            let waiting = tokio::spawn(async move {
+                ticker.tick().await;
+                ticker
+            });
+            tokio::time::sleep(period / 4).await;
+            let next = current_activation_generation().wrapping_add(1);
+            SERVE_STATE.store(pack(next, STATE_ACTIVE), Ordering::SeqCst);
+            tokio::time::sleep(period).await;
+            let mut ticker = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+                .await
+                .expect("the period tick runs the job in the new generation")
+                .unwrap();
+
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(60), ticker.tick())
+                    .await
+                    .is_err(),
+                "the generation was recorded, so the job does not run a second time at once"
+            );
+        });
+        promote();
+    }
+
+    #[test]
     fn mode_controls_readiness() {
         let _guard = MODE_TEST_LOCK
             .lock()

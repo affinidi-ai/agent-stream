@@ -75,7 +75,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_load_failure_reason_separates_parse_from_read_failures() {
+    fn load_failure_reason_separates_parse_from_read_failures() {
         let parse = ApiKeyError::from(serde_json::from_str::<serde_json::Value>("not json").unwrap_err());
         let read = ApiKeyError::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
         let not_utf8 = ApiKeyError::from(std::io::Error::from(std::io::ErrorKind::InvalidData));

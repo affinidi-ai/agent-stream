@@ -186,7 +186,7 @@ only; elsewhere the process stays in its configured mode. A `[failover]` block w
 
 | Endpoint | Meaning |
 | --- | --- |
-| `GET /api/v1/health` | Readiness. `200` once the instance is Active, has re-read its policies and Surfaces and recompiled every policy engine, has reloaded the other shared state listed under [What promotion does](#what-promotion-does), and has migrated inline integration credentials and pinned integration destinations. A Surface route conflict, policy compile, migration or pin that fails is logged as a warning and does not hold readiness back; a policy that fails to compile denies. A shared-state, Surface or gateway read that fails with a storage error holds readiness at `503` and is retried until it succeeds. `503` while starting, activating, or Standby. Readiness does not wait for connection-point listeners or any other external dependency. |
+| `GET /api/v1/health` | Readiness. `200` once the instance is Active, has re-read its policies and Surfaces and recompiled every policy engine, has reloaded the other shared state listed under [What promotion does](#what-promotion-does), and has migrated inline integration credentials and pinned integration destinations. A Surface route conflict, policy compile, migration or pin that fails is logged as a warning and does not hold readiness back; a policy that fails to compile denies. A shared-state, Surface or gateway read that fails with a storage error, an access token record that cannot be read, or a settings file that cannot be parsed holds readiness at `503` and is retried until it succeeds. `503` while starting, activating, or Standby. Readiness does not wait for connection-point listeners or any other external dependency. |
 | `GET /api/v1/alive` | Liveness. `200` whenever the process is running, in either mode. |
 
 Route client traffic on `/api/v1/health`. Restart a process only on `/api/v1/alive` failures;
@@ -234,14 +234,18 @@ On `SIGUSR1` the instance reports `503` at once, then:
      skipped as below.
    - The head of every governance chain, so the next record links to the last one on disk.
 
-   A read in steps 1, 2 or 4 that fails with a storage error, or a Surface or gateway
-   store that cannot be read for step 3, is logged and retried, with a
-   backoff of up to 30 seconds, until it succeeds or the instance is demoted. A request log,
-   time series file, system metrics history, settings file or member provisioning config
-   that cannot be parsed, including one that is not valid UTF-8, is logged and does not
-   hold readiness back: an unparseable request log starts empty, as at startup, and an
-   unparseable settings file keeps the settings the instance already has, logged at `ERROR`
-   and counted in `agent_stream_storage_load_errors_total`. A single stored
+   A read in steps 1, 2 or 4 that fails with a storage error, a Surface or gateway store
+   that cannot be read for step 3, an access token record that cannot be read, or a
+   dashboard settings file that cannot be parsed, is logged and retried, with a backoff of up
+   to 30 seconds, until it succeeds or the instance is demoted. The settings file is held
+   because it carries the metrics endpoint's authentication and the audit switch, which the
+   instance must not serve from its own stale copy: fix or restore `settings.json` and the
+   promotion finishes. Each failed attempt is logged at `ERROR` and counted in
+   `agent_stream_storage_load_errors_total` with entity `settings`. A request log, time
+   series file, system metrics history or member provisioning config that cannot be parsed,
+   including one that is not valid UTF-8, is logged and does not hold readiness back: an
+   unparseable request log starts empty, as at startup, while the system metrics history
+   and the provisioning config keep what the instance already has. A single stored
    record, such as a policy definition or the appliance-wide assignments, that
    cannot be read, decrypted or parsed is skipped (a gateway engine is the exception in
    step 3): the instance goes ready without it,
@@ -344,8 +348,9 @@ time-series stores do nothing; a Standby keeps its own system metrics samples in
 retention sweeps and the session cleanup run as soon as an instance becomes ready, at startup
 and after every promotion, then on their interval. A management access token used on a
 Standby authenticates from the Standby's own copy, which is its last promotion's plus its own
-writes, and does not update its last-used time in storage. The startup cleanup of pending gateway handshakes and the removal of sessions
-already expired on disk when the session store loads still run in every mode.
+writes, and does not update its last-used time in storage. The startup cleanup of pending
+gateway handshakes and the removal of sessions already expired on disk when the session
+store loads still run in every mode.
 
 A Standby still runs its HTTP server and management API, and a write made through it (a
 settings save, an agent revocation, a policy edit) goes to shared storage from the Standby's

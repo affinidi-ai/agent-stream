@@ -8,9 +8,24 @@ changes:
         settings file on promotion are now logged at ERROR and counted in
         agent_stream_storage_load_errors_total, labelled by entity and reason. A file that is
         not valid UTF-8 counts as parse_failed.
-  changed: []
+  changed:
+    - timestamp: '2026-11-10T09:00:00.000Z'
+      title: Hold a promotion at 503 when the dashboard settings file cannot be parsed
+      description: >-
+        A promoted instance now retries a settings file that cannot be parsed, including one
+        that is not valid UTF-8, and stays at 503 until the file is fixed or restored. It
+        logs each attempt at ERROR and counts it in agent_stream_storage_load_errors_total.
+        Previously it went ready with its own startup copy, so the metrics endpoint's
+        authentication and the audit switch could be served stale after a failover.
+    - timestamp: '2026-11-10T09:01:00.000Z'
+      title: Report a policy edit whose engines could not be refreshed
+      description: >-
+        Updating or deleting a policy definition now answers 500, naming the definition, when
+        the engines that reference it cannot be refreshed because the engine stores are
+        unavailable or cannot be read. The definition is saved, but the live engines may
+        still enforce the previous version; saving or deleting it again retries.
   fixed:
-    - timestamp: '2026-11-05T12:00:00.000Z'
+    - timestamp: '2026-11-05T12:01:00.000Z'
       title: Run retention sweeps and session cleanup as soon as an instance is ready
       description: >-
         The governance and drift retention sweeps and the expired dashboard session cleanup
@@ -18,7 +33,7 @@ changes:
         promotion (including one that happens while a run is in progress), then on their
         interval. Previously the retention sweeps skipped their first run, so nothing was
         pruned for up to six hours after each start or failover.
-    - timestamp: '2026-11-05T12:00:00.000Z'
+    - timestamp: '2026-11-05T12:02:00.000Z'
       title: Reject management access tokens revoked on the previous Active after failover
       description: >-
         A promoted Standby now re-reads management access tokens before it reports ready.
@@ -30,26 +45,26 @@ changes:
         upgrading, list access tokens and revoke again any that were revoked before a
         failover and now show as active; records written by earlier versions are read as
         they are stored.
-    - timestamp: '2026-11-05T12:00:00.000Z'
+    - timestamp: '2026-11-05T12:03:00.000Z'
       title: Stop a Standby from deleting shared dashboard session files
       description: >-
         The periodic expired-session cleanup now runs only on the Active. A Standby used the
         expiry times it loaded at startup and deleted sessions the Active was still keeping
         alive, which signed those users out after a failover.
-    - timestamp: '2026-11-10T09:00:00.000Z'
+    - timestamp: '2026-11-10T09:02:00.000Z'
       title: Keep OIDC dashboard users and sessions across failover
       description: >-
         In OIDC sign-in mode a promoted instance now re-reads the dashboard users and sessions
         the previous Active stored, as it does in passkey and SAML modes. Previously the
         first session cleanup after a failover deleted sessions the previous Active had kept
         alive, which signed those users out.
-    - timestamp: '2026-11-05T12:00:00.000Z'
-      title: Stop a non-UTF-8 settings or metrics file from holding a promotion at 503
+    - timestamp: '2026-11-05T12:04:00.000Z'
+      title: Stop a non-UTF-8 metrics file from holding a promotion at 503
       description: >-
-        A settings file, request log or system metrics history that is not valid UTF-8 is now
-        treated like any other unparseable file: it is logged and does not hold readiness back.
+        A request log or system metrics history that is not valid UTF-8 is now treated like
+        any other unparseable file: it is logged and does not hold readiness back.
         Previously the promotion retried it forever and the instance stayed at 503.
-    - timestamp: '2026-11-05T12:00:00.000Z'
+    - timestamp: '2026-11-05T12:05:00.000Z'
       title: Recompile policy engines from the existing stores and drop stale engines
       description: >-
         Policy engine recompiles and the policy impact count on promotion and on policy edits
@@ -62,12 +77,6 @@ changes:
         be read and denies instead of skipping policy. A surface store that failed to open at
         startup is opened on the first retry that needs it and kept, and readiness is held at
         503 until it opens; a gateway store that failed to open has no engines to refresh.
-    - timestamp: '2026-11-10T09:00:00.000Z'
-      title: Log a policy edit that cannot refresh engines at ERROR
-      description: >-
-        A policy definition edit or delete whose engines cannot be refreshed because the
-        engine stores are unavailable is now logged at ERROR instead of WARN, so a policy
-        change that did not take effect is visible.
   removed: []
   security: []
   breaking: []

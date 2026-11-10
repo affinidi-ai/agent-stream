@@ -257,8 +257,11 @@ impl Default for DashboardSettings {
 impl crate::server::mode::ReloadOnPromotion for SettingsStore {
     /// Re-read the settings the previous Active saved, so a later partial
     /// update does not write this instance's startup copy back. Unlike
-    /// [`SettingsStore::load`], it never writes: a missing or unparsable file
-    /// keeps the current settings.
+    /// [`SettingsStore::load`], it never writes. A missing file keeps the
+    /// current settings. A file that cannot be parsed returns an error so the
+    /// promotion retries: the settings carry the metrics endpoint's
+    /// authentication and the audit switch, which must not be served from this
+    /// instance's stale copy.
     async fn reload_from_storage(&self) -> std::io::Result<()> {
         let _persist = self.persist_lock.lock().await;
         let content = match fs::read(&self.storage_path).await {
@@ -274,8 +277,9 @@ impl crate::server::mode::ReloadOnPromotion for SettingsStore {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
             }
             Err(e) => {
-                error!("Failed to parse settings file on promotion, keeping current settings: {}", e);
+                error!("Failed to parse settings file on promotion, holding readiness for a retry: {}", e);
                 crate::metrics::backends::prometheus::track_storage_load_error("settings", "parse_failed");
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
             }
         }
         Ok(())
@@ -800,7 +804,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_keeps_settings_and_file_when_the_file_is_unusable() {
+    async fn reload_keeps_settings_and_does_not_write_defaults_when_the_file_is_unusable() {
         use crate::server::mode::ReloadOnPromotion;
 
         let temp_dir = TempDir::new().unwrap();
@@ -822,7 +826,7 @@ mod tests {
         store
             .reload_from_storage()
             .await
-            .unwrap();
+            .expect_err("an unparseable file holds the reload");
         tokio::fs::remove_file(&path)
             .await
             .unwrap();
@@ -841,7 +845,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_treats_a_file_that_is_not_utf8_as_unparseable() {
+    async fn reload_of_a_file_that_cannot_be_parsed_fails_and_keeps_the_settings() {
         use crate::server::mode::ReloadOnPromotion;
 
         let temp_dir = TempDir::new().unwrap();
@@ -853,25 +857,53 @@ mod tests {
             })
             .await
             .unwrap();
+        let path = temp_dir
+            .path()
+            .join("settings.json");
+        let parse_failures = || {
+            crate::metrics::backends::prometheus::STORAGE_LOAD_ERRORS
+                .with_label_values(&["settings", "parse_failed"])
+                .get()
+        };
+        let before = parse_failures();
+
+        for damaged in [&[0xff, 0xfe, 0xfd][..], &b"{ not json"[..]] {
+            tokio::fs::write(&path, damaged)
+                .await
+                .unwrap();
+            let err = store
+                .reload_from_storage()
+                .await
+                .expect_err("an unparseable settings file holds the promotion for a retry");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(
+                store
+                    .get()
+                    .badge_threshold_minutes,
+                7
+            );
+        }
+        assert!(parse_failures() >= before + 2);
+
         tokio::fs::write(
-            temp_dir
-                .path()
-                .join("settings.json"),
-            [0xff, 0xfe, 0xfd],
+            &path,
+            serde_json::to_vec(&DashboardSettings {
+                badge_threshold_minutes: 9,
+                ..DashboardSettings::default()
+            })
+            .unwrap(),
         )
         .await
         .unwrap();
-
         store
             .reload_from_storage()
             .await
-            .expect("an unparseable file does not hold readiness back");
-
+            .expect("the retry succeeds once the file parses");
         assert_eq!(
             store
                 .get()
                 .badge_threshold_minutes,
-            7
+            9
         );
     }
 

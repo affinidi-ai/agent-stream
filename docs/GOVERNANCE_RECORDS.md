@@ -286,9 +286,7 @@ substituting another Surface's anchor, or replacing the kept records is detected
 Each prune replaces the anchor.
 
 Pruning runs on write and from a sweep (on the Active instance only, as soon as it is ready
-and then hourly), once a
-Surface's oldest record is
-more than an hour past the window; it removes the leading records older than the
+and then hourly), once a Surface's oldest record is more than an hour past the window; it removes the leading records older than the
 window, so a record goes within about two hours of leaving it. The kept log, its
 rebased index, and the new anchor are written beside the live files and renamed in,
 the anchor first, with the directory synced after the anchor and again after the log

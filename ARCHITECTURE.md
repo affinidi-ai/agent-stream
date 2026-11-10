@@ -301,6 +301,8 @@ Breaking one of these is a correctness bug, not a style question.
 | Every platform-key call is admitted against the budget just before it is sent, and only the default upstream's main call is offered the caller's key. | Spend could exceed budget, or a caller's key could reach the wrong upstream. |
 | Upstream headers go only to the upstream and origin they were configured for, and a secret a Surface references is sent only after its tenancy check passes. | Credentials could reach another origin or another tenant's secret could be spent. |
 | DashMap is authoritative at runtime; disk is written immediately. | Reads and writes would disagree after a reload. |
+| Governance Records never embed raw media bytes, only digests. | Recorded media would bypass the multimedia store and its encryption at rest. |
+| An outbound client that checks addresses at connect time follows no redirects and ignores `HTTP_PROXY` and `HTTPS_PROXY` ([`src/http_client.rs`](src/http_client.rs)). | A redirect or a proxy that resolves the host itself would bypass the address check. |
 
 Loading stored records is the one deliberate exception to failing closed. A record that
 cannot be read, decrypted or parsed at startup or promotion is skipped, logged at `ERROR` and
@@ -311,9 +313,8 @@ enforced, so alert on that counter. A gateway this instance already enforces kee
 enforcement when its record cannot be read on promotion, so Fabric traffic to it is denied
 ([what promotion does](docs/CONFIGURATION_RELOAD.md#what-promotion-does)). A store that
 cannot be read at all holds readiness back, as does an access token record that cannot be
-read.
-| Governance Records never embed raw media bytes, only digests. | Recorded media would bypass the multimedia store and its encryption at rest. |
-| An outbound client that checks addresses at connect time follows no redirects and ignores `HTTP_PROXY` and `HTTPS_PROXY` ([`src/http_client.rs`](src/http_client.rs)). | A redirect or a proxy that resolves the host itself would bypass the address check. |
+read or a dashboard settings file that cannot be parsed, since the settings carry the metrics
+endpoint's authentication.
 
 ## Module map
 
