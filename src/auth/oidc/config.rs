@@ -931,9 +931,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_claim_tied_to_the_issuer_or_client_is_no_tenant_binding() {
-        let only_verified =
+        let issuer_and_client_claims =
             json!({ "iss": ["https://idp.example.com"], "aud": ["agent-stream"], "azp": ["agent-stream"] });
-        for claims in [json!({ "iss": ["https://idp.example.com"] }), only_verified] {
+        for claims in [json!({ "iss": ["https://idp.example.com"] }), issuer_and_client_claims] {
             let refused = load(with(valid_file(), &["required_claims"], claims))
                 .await
                 .unwrap_err();
@@ -1004,9 +1004,9 @@ mod tests {
             assert!(weak.contains("boolean or a pattern"), "{weak}");
         }
 
-        let verified_beside_a_boolean =
+        let issuer_claim_beside_a_boolean =
             logs_for(json!({ "iss": ["https://idp.example.com"], "email_verified": [true] })).await;
-        assert!(verified_beside_a_boolean.contains("WARN"), "{verified_beside_a_boolean}");
+        assert!(issuer_claim_beside_a_boolean.contains("WARN"), "{issuer_claim_beside_a_boolean}");
     }
 
     #[tokio::test]
