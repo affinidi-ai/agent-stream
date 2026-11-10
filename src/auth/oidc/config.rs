@@ -9,7 +9,7 @@ use std::str::FromStr;
 use jsonwebtoken::Algorithm;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{info, warn};
 use url::Url;
 
 use crate::auth::types::UserRole;
@@ -407,12 +407,23 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
             issuer = %file.issuer,
             "oidc.json sets allow_any_account without required_claims: every account at the OpenID provider can sign in"
         );
-    } else if !names_exact_values(&required_claims) {
-        warn!(
-            issuer = %file.issuer,
-            "no required_claims entry lists only exact values, so it may not tie sign-in to your tenant: \
-             a boolean or a pattern can match accounts of every tenant at the OpenID provider"
-        );
+    } else {
+        let bound = exact_value_claims(&required_claims);
+        if !bound.is_empty() {
+            info!(issuer = %file.issuer, claims = %bound.join(", "), "required_claims ties sign-in to the tenant");
+        } else if holds_exact_value(&required_claims) {
+            info!(
+                issuer = %file.issuer,
+                "every required_claims entry mixes exact values with patterns or booleans: check that each allowed \
+                 value belongs to your tenant"
+            );
+        } else {
+            warn!(
+                issuer = %file.issuer,
+                "every required_claims entry is a boolean or a pattern, so it may not tie sign-in to your tenant: \
+                 either can match accounts of every tenant at the OpenID provider"
+            );
+        }
     }
     Ok(CheckedFile {
         label,
@@ -452,18 +463,33 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
         .collect()
 }
 
-/// Whether some `required_claims` entry allows only exact string values, the
-/// shape that can name one tenant. A boolean, the string `"true"` or `"false"`
-/// that a provider may send in its place, or a `regex:` pattern in every entry
-/// can match accounts of any tenant.
-fn names_exact_values(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+/// Whether a value can name one tenant: an exact string. A boolean, the string
+/// `"true"` or `"false"` a provider may send in its place, or a `regex:`
+/// pattern can match accounts of any tenant.
+fn is_exact_tenant_value(value: &ValueMatcher) -> bool {
+    matches!(value, ValueMatcher::Exact(text) if text != "true" && text != "false")
+}
+
+/// The `required_claims` entries that allow only exact string values, the
+/// shape that can name one tenant.
+fn exact_value_claims(required: &BTreeMap<String, Vec<ValueMatcher>>) -> Vec<&str> {
     required
-        .values()
-        .any(|allowed| {
+        .iter()
+        .filter(|(_, allowed)| {
             allowed
                 .iter()
-                .all(|value| matches!(value, ValueMatcher::Exact(text) if text != "true" && text != "false"))
+                .all(is_exact_tenant_value)
         })
+        .map(|(claim, _)| claim.as_str())
+        .collect()
+}
+
+/// Whether any `required_claims` entry allows at least one exact string value.
+fn holds_exact_value(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+    required
+        .values()
+        .flatten()
+        .any(is_exact_tenant_value)
 }
 
 fn non_empty(
@@ -834,15 +860,34 @@ mod tests {
                 .collect::<BTreeMap<_, _>>()
         };
 
-        assert!(names_exact_values(&claims(&[("org_id", vec![exact("org_123")])])));
-        assert!(names_exact_values(&claims(&[
-            ("email_verified", vec![ValueMatcher::Bool(true)]),
-            ("org_id", vec![exact("org_1"), exact("org_2")]),
-        ])));
-        assert!(!names_exact_values(&claims(&[("email_verified", vec![ValueMatcher::Bool(true)])])));
-        assert!(!names_exact_values(&claims(&[("email_verified", vec![exact("true")])])));
-        assert!(!names_exact_values(&claims(&[("org_id", vec![pattern("regex:.*")])])));
-        assert!(!names_exact_values(&claims(&[("org_id", vec![exact("org_123"), pattern("regex:.*")])])));
+        assert_eq!(exact_value_claims(&claims(&[("org_id", vec![exact("org_123")])])), ["org_id"]);
+        assert_eq!(
+            exact_value_claims(&claims(&[
+                ("email_verified", vec![ValueMatcher::Bool(true)]),
+                ("org_id", vec![exact("org_1"), exact("org_2")]),
+            ])),
+            ["org_id"]
+        );
+        for unbound in [
+            claims(&[("email_verified", vec![ValueMatcher::Bool(true)])]),
+            claims(&[("email_verified", vec![exact("true")])]),
+            claims(&[("org_id", vec![pattern("regex:.*")])]),
+            claims(&[("org_id", vec![exact("org_123"), pattern("regex:.*")])]),
+        ] {
+            assert!(exact_value_claims(&unbound).is_empty(), "{unbound:?}");
+        }
+    }
+
+    #[test]
+    fn a_mixed_entry_holds_an_exact_value_but_a_boolean_or_pattern_alone_does_not() {
+        let exact = |text: &str| ValueMatcher::Exact(text.to_string());
+        let pattern = |text: &str| ValueMatcher::from_text("required_claims.x", text).unwrap();
+        let claims = |allowed: Vec<ValueMatcher>| BTreeMap::from([("org_id".to_string(), allowed)]);
+
+        assert!(holds_exact_value(&claims(vec![exact("org_1"), pattern("regex:org_1_.*")])));
+        assert!(!holds_exact_value(&claims(vec![pattern("regex:.*")])));
+        assert!(!holds_exact_value(&claims(vec![ValueMatcher::Bool(true)])));
+        assert!(!holds_exact_value(&claims(vec![exact("true")])));
     }
 
     #[tokio::test]
