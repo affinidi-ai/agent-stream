@@ -607,7 +607,7 @@ async fn an_account_of_another_tenant_is_refused_before_any_user_is_created() {
 }
 
 #[tokio::test]
-async fn an_account_of_another_tenant_signs_in_when_the_file_opts_out_of_a_tenant_binding() {
+async fn an_account_of_another_tenant_signs_in_when_no_required_claims_are_configured() {
     let flow = Flow::with_config(|config| config.required_claims.clear()).await;
 
     let response = flow

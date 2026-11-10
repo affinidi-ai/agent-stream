@@ -388,10 +388,19 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
         return Err("logout.post_logout_redirect_uri must be on the same origin as redirect_uri".to_string());
     }
     let required_claims = required_claims(file.required_claims)?;
+    let role_mapping = role_mapping(file.role_mapping)?;
     if required_claims.is_empty() {
         if !file.allow_any_account {
             return Err("required_claims must name at least one claim that binds sign-in to your tenant at the \
                  provider, or set allow_any_account to true to let every account at the provider sign in"
+                .to_string());
+        }
+        if role_mapping
+            .unmapped
+            .is_some()
+        {
+            return Err("allow_any_account requires role_mapping.unmapped to be deny: with no tenant binding, an \
+                 unmapped role would go to every account at the provider"
                 .to_string());
         }
         warn!(
@@ -405,7 +414,6 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
              a boolean or a pattern can match accounts of every tenant at the OpenID provider"
         );
     }
-    let role_mapping = role_mapping(file.role_mapping)?;
     Ok(CheckedFile {
         label,
         issuer: file.issuer,
@@ -445,15 +453,16 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
 }
 
 /// Whether some `required_claims` entry allows only exact string values, the
-/// shape that can name one tenant. A boolean or a `regex:` pattern in every
-/// entry can match accounts of any tenant.
+/// shape that can name one tenant. A boolean, the string `"true"` or `"false"`
+/// that a provider may send in its place, or a `regex:` pattern in every entry
+/// can match accounts of any tenant.
 fn names_exact_values(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
     required
         .values()
         .any(|allowed| {
             allowed
                 .iter()
-                .all(|value| matches!(value, ValueMatcher::Exact(_)))
+                .all(|value| matches!(value, ValueMatcher::Exact(text) if text != "true" && text != "false"))
         })
 }
 
@@ -769,7 +778,7 @@ mod tests {
         file["required_claim"] = binding;
 
         let refused = load(file).await.unwrap_err();
-        assert!(refused.contains("required_claim"), "{refused}");
+        assert!(refused.contains("unknown field"), "{refused}");
     }
 
     #[tokio::test]
@@ -831,8 +840,32 @@ mod tests {
             ("org_id", vec![exact("org_1"), exact("org_2")]),
         ])));
         assert!(!names_exact_values(&claims(&[("email_verified", vec![ValueMatcher::Bool(true)])])));
+        assert!(!names_exact_values(&claims(&[("email_verified", vec![exact("true")])])));
         assert!(!names_exact_values(&claims(&[("org_id", vec![pattern("regex:.*")])])));
         assert!(!names_exact_values(&claims(&[("org_id", vec![exact("org_123"), pattern("regex:.*")])])));
+    }
+
+    #[tokio::test]
+    async fn opting_out_of_the_tenant_binding_needs_unmapped_accounts_denied() {
+        let mut unbound = with(valid_file(), &["allow_any_account"], json!(true));
+        unbound
+            .as_object_mut()
+            .unwrap()
+            .remove("required_claims");
+
+        for role in ["administrator", "poweruser", "user"] {
+            let refused = load(with(unbound.clone(), &["role_mapping", "unmapped"], json!(role)))
+                .await
+                .unwrap_err();
+            assert!(refused.contains("allow_any_account"), "{refused}");
+            assert!(refused.contains("role_mapping.unmapped"), "{refused}");
+        }
+
+        let bound = with(valid_file(), &["allow_any_account"], json!(true));
+        let config = load(with(bound, &["role_mapping", "unmapped"], json!("user")))
+            .await
+            .unwrap();
+        assert_eq!(config.role_mapping.unmapped, Some(UserRole::User), "a bound file may still grant a role");
     }
 
     #[tokio::test]
