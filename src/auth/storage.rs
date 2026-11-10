@@ -385,9 +385,11 @@ impl PasskeyStorage {
         Ok(())
     }
 
-    /// Remove the uploaded avatar file a record points at. Only a file directly
-    /// inside the avatars directory is removed, never the shared default, and a
-    /// file that is already gone is not an error.
+    /// Remove the uploaded avatar file a record points at. The stored name is
+    /// only compared with the names found in the avatars directory, so the
+    /// removed path never comes from the record. Only a file directly inside
+    /// that directory is removed, never the shared default, and a file that is
+    /// already gone is not an error.
     async fn remove_avatar_file(
         &self,
         avatar_path: Option<&str>,
@@ -402,11 +404,21 @@ impl PasskeyStorage {
         if file == DEFAULT_AVATAR_FILE {
             return Ok(());
         }
-        match tokio::fs::remove_file(std::path::Path::new(&self.avatars_path).join(file)).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+        let mut entries = match tokio::fs::read_dir(&self.avatars_path).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_name() == file {
+                return match tokio::fs::remove_file(entry.path()).await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                };
+            }
         }
+        Ok(())
     }
 
     /// Load user by SAML ID (scans in-memory cache)
@@ -790,6 +802,40 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_succeeds_when_the_avatars_directory_does_not_exist() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        let mut data = oidc_user("oidc-1");
+        data.avatar_path = Some("avatars/oidc-1.png".to_string());
+        storage
+            .save_user(&data)
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(
+            temp_dir
+                .path()
+                .join("avatars"),
+        )
+        .await
+        .unwrap();
+
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .load_user_by_id("oidc-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_some()
         );
     }
 
