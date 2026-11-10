@@ -1,18 +1,19 @@
 branch: fix/oidc-require-tenant-binding
 changes:
   added: []
-  changed:
-    - timestamp: '2026-11-10T09:00:00.000Z'
-      title: Stop startup without required_claims unless allow_any_account is set
-      description: >-
-        An oidc.json with no required_claims, or an empty one, now stops startup instead of
-        letting every account at the OpenID provider sign in, so one tenant's administrator
-        is no longer an administrator for all. Set required_claims to an exact tenant
-        identifier claim such as org_id, or set allow_any_account to true for a
-        single-tenant provider, which also needs role_mapping.unmapped to be deny. Startup
-        warns when every required_claims entry is a boolean or a pattern. A file with only iss, aud
-        or azp entries counts as having none.
+  changed: []
   fixed: []
   removed: []
   security: []
-  breaking: []
+  breaking:
+    - timestamp: '2026-11-10T09:00:00.000Z'
+      title: Refuse oidc.json without required_claims unless allow_any_account is set
+      description: >-
+        An oidc.json with no required_claims, or an empty one, now stops startup instead of
+        letting every account at the OpenID provider sign in, so one tenant's administrator
+        is no longer an administrator for all. An oidc.json from 1.0.1 without a tenant
+        binding must be updated before upgrading: set required_claims to an exact tenant
+        identifier claim such as org_id, or set allow_any_account to true for a
+        single-tenant provider, which also needs role_mapping.unmapped to be deny. Startup
+        warns when every required_claims entry is a boolean or a pattern. A file with only
+        iss, aud or azp entries counts as having none.
