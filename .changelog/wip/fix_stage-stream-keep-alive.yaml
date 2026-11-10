@@ -1,0 +1,20 @@
+branch: fix/stage-stream-keep-alive
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-11T09:00:00.000Z'
+      title: Keep live stage streams open while a buffered surface's model writes
+      description: >-
+        A caller that sends x-agent-stream-emit-stages: true to a surface that answers whole
+        (a Jury, a Decider, a Comparer or Summariser mode, or a response guard) received
+        nothing between the last pre-model stage and the final result event. When the model
+        took longer to write than the idle timeout of a load balancer or proxy in front of the
+        appliance (60 seconds on an AWS Application Load Balancer), the connection was closed
+        and the caller lost the answer. The stage stream now sends an SSE keep-alive comment
+        every 15 seconds while no event is due; SSE readers ignore comments, and the stream
+        still ends with its last event. Unit tests cover a quiet stream, no comment before the
+        interval, and the stream ending with its events.
+  removed: []
+  security: []
+  breaking: []

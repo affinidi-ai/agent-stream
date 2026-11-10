@@ -533,6 +533,12 @@ with an upstream stream and a provider rejects it on the buffered path.
 The response sets `x-accel-buffering: no`, so a reverse proxy or tunnel flushes each frame
 instead of holding the response until it completes.
 
+While no event is due, the stream sends an SSE keep-alive comment (`:`) every 15 seconds.
+A surface that answers whole sends nothing while the model writes, and a load balancer or
+proxy closes a connection that stays quiet past its idle timeout (60 seconds by default on
+an AWS Application Load Balancer), cutting the answer off. SSE readers ignore comments, and
+the keep-alive stops when the stream's own events end.
+
 ### Isolation and access
 
 Events are correlated with the caller's own request span, so a stream only ever carries
