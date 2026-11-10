@@ -119,11 +119,11 @@ pub async fn register_start(
         .is_some();
 
     // Enforce the appliance user limit before registering a new user.
-    if let Ok(users) = auth_state
+    if let Ok(user_count) = auth_state
         .storage
-        .list_users()
+        .count_toward_user_limit()
         .await
-        && let Err(e) = crate::config::global_limits().check_can_add("users", users.len())
+        && let Err(e) = crate::config::global_limits().check_can_add("users", user_count)
     {
         error!("{}", e.message());
         return Err((StatusCode::FORBIDDEN, e.message()));
@@ -648,6 +648,7 @@ mod tests {
                 last_logged_in: None,
                 saml_id: None,
                 oidc: None,
+                deleted_at: None,
             })
             .await
             .unwrap();

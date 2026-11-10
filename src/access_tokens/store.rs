@@ -597,6 +597,29 @@ impl PatAuthenticator for FsAccessTokenStore {
             resource_scope,
         })
     }
+
+    async fn revoke_for_user(
+        &self,
+        user_id: &str,
+    ) -> std::io::Result<usize> {
+        let token_ids: Vec<String> = self
+            .cache
+            .iter()
+            .filter(|entry| entry.user_id == user_id && entry.revoked_at.is_none())
+            .map(|entry| entry.key().clone())
+            .collect();
+        let mut revoked = 0;
+        for token_id in token_ids {
+            if self
+                .revoke(&token_id)
+                .await?
+                .is_some()
+            {
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
+    }
 }
 
 /// Re-read the tokens the previous Active wrote, so a token it revoked is
@@ -761,6 +784,45 @@ mod tests {
                 .await
                 .is_none(),
             "revoked token"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_for_a_user_revokes_every_token_bound_to_them_and_no_other() {
+        let s = store().await;
+        for (secret, user) in [("aspat_one", "svc"), ("aspat_two", "svc"), ("aspat_other", "someone-else")] {
+            let mut rec = record(&hash_secret(secret), vec![]);
+            rec.user_id = user.into();
+            s.create(rec).await.unwrap();
+        }
+
+        let revoked = s
+            .revoke_for_user("svc")
+            .await
+            .unwrap();
+
+        assert_eq!(revoked, 2);
+        assert!(
+            s.authenticate("aspat_one")
+                .await
+                .is_none()
+        );
+        assert!(
+            s.authenticate("aspat_two")
+                .await
+                .is_none()
+        );
+        assert!(
+            s.authenticate("aspat_other")
+                .await
+                .is_some()
+        );
+        assert_eq!(
+            s.revoke_for_user("svc")
+                .await
+                .unwrap(),
+            0,
+            "already revoked tokens are not counted again"
         );
     }
 

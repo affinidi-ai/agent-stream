@@ -438,7 +438,7 @@
             {
               "event_type": "user.deleted",
               "name": "User Deleted",
-              "description": "Triggered when a user account is permanently deleted",
+              "description": "Triggered when a user is deleted. A user who signs in through OpenID Connect or SAML is kept as a disabled record instead of being removed",
               "runtime_variables": [
                 {
                   "name": "OLD_STATE",

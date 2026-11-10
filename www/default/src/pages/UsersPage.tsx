@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
-import { DELETE_USER_TITLE } from '../utils/userDelete';
+import { DELETE_USER_TITLE, keptAccountLabel } from '../utils/userDelete';
 import { usePermissions } from '../context/PermissionsContext';
 import SearchInput from '../components/shared/SearchInput';
 
@@ -33,6 +33,8 @@ interface User {
   department?: string;
   job_title?: string;
   avatar_path?: string;
+  oidc?: { issuer: string; subject: string };
+  saml_id?: string;
 }
 
 const UsersPage: React.FC = () => {
@@ -268,6 +270,14 @@ const UsersPage: React.FC = () => {
                         </td>
                         <td>
                           <strong>{user.username}</strong>
+                          {keptAccountLabel(user) && (
+                            <div
+                              className="small text-muted"
+                              data-testid={`users-kept-account-${user.user_id}`}
+                            >
+                              {keptAccountLabel(user)}
+                            </div>
+                          )}
                           {user.is_primary && (
                             <span
                               className="badge text-bg-primary ms-2"
@@ -437,6 +447,14 @@ const UsersPage: React.FC = () => {
                         {selectedUser.status.toUpperCase()}
                       </span>
                     </div>
+                    {keptAccountLabel(selectedUser) && (
+                      <div className="mb-2" data-testid="users-modal-kept-account">
+                        <strong>Deleted:</strong>{' '}
+                        <span className="text-muted">
+                          kept disabled for the {keptAccountLabel(selectedUser)}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

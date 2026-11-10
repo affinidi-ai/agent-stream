@@ -75,6 +75,12 @@ pub async fn provision_user_from_oidc(
     let existing = storage
         .load_user_by_oidc_identity(&identity)
         .await?;
+    if existing
+        .as_ref()
+        .is_some_and(|user| user.status != UserStatus::Approved)
+    {
+        return Err(ProvisionRefusal::NotApproved);
+    }
     let own_user_id = existing
         .as_ref()
         .map(|user| user.user_id.as_str());
@@ -85,9 +91,6 @@ pub async fn provision_user_from_oidc(
 
     let provisioned = match existing {
         Some(mut user) => {
-            if user.status != UserStatus::Approved {
-                return Err(ProvisionRefusal::NotApproved);
-            }
             let role_changed = user.role != role;
             user.username = username;
             user.email = email;
@@ -100,9 +103,8 @@ pub async fn provision_user_from_oidc(
         }
         None => {
             let user_count = storage
-                .list_users()
-                .await?
-                .len();
+                .count_toward_user_limit()
+                .await?;
             crate::config::global_limits()
                 .check_can_add("users", user_count)
                 .map_err(ProvisionRefusal::UserLimit)?;
@@ -127,6 +129,7 @@ pub async fn provision_user_from_oidc(
                     last_logged_in: Some(now),
                     saml_id: None,
                     oidc: Some(identity),
+                    deleted_at: None,
                 },
                 role_changed: false,
             }
@@ -336,6 +339,33 @@ mod tests {
                 .unwrap();
             assert_eq!(stored.role, UserRole::User, "{status}: the refused sign-in changed nothing");
         }
+    }
+
+    #[tokio::test]
+    async fn a_user_who_is_not_approved_is_refused_as_such_even_when_every_username_is_taken() {
+        let (_dir, storage) = storage().await;
+        let mut user = provision(&storage, "sub-1", json!({}), UserRole::User)
+            .await
+            .unwrap()
+            .user;
+        user.username = "renamed".to_string();
+        user.status = UserStatus::Disabled;
+        storage
+            .save_user(&user)
+            .await
+            .unwrap();
+        provision(&storage, "sub-2", json!({ "preferred_username": "taken-a" }), UserRole::User)
+            .await
+            .unwrap();
+        provision(&storage, "sub-3", json!({ "preferred_username": "sub-1" }), UserRole::User)
+            .await
+            .unwrap();
+
+        let refused = provision(&storage, "sub-1", json!({ "preferred_username": "taken-a" }), UserRole::User)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(refused, ProvisionRefusal::NotApproved), "{refused:?}");
     }
 
     #[tokio::test]

@@ -92,6 +92,9 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
   `administrator`. See [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
 - When provisioning a new user would pass the appliance user limit, the ACS answers `403`
   with a readable page instead of opening a session.
+- A user who is not approved (an administrator disabled or deleted them) is refused with `403`
+  and a readable page that does not say why, and no session opens. Deleting a SAML user keeps
+  their record, as [Deleting an OIDC or SAML user](#deleting-an-oidc-or-saml-user) describes.
 - On success the ACS sets the session cookie and returns a page that keeps the session token
   for the dashboard and redirects to `/`. The page's one inline script carries a fresh nonce,
   and its `Content-Security-Policy` runs only that script (see
@@ -178,14 +181,8 @@ Users:
 - A user who is not approved (an administrator disabled them) is refused even with a valid ID
   token, and all their sessions end. When creating a user would pass the appliance user limit, the callback answers `403`
   with a readable page.
-- Deleting an OIDC user (`DELETE /v1/users/{user_id}`) does not remove the record: it ends the
-  user's sessions, clears their name, email, department, job title, avatar link (not the image file) and passkeys, sets the
-  username to the user id, and keeps the user `Disabled` under their provider account (issuer
-  and `sub`). The next sign-in with that account is refused like any disabled user, instead of
-  creating a new approved user. The user stays in the list, counts toward the user limit, and
-  signs in again only when an administrator approves them. Users who do not sign in with OIDC
-  are removed by delete. A user deleted before this behaviour has no record left, so their next
-  sign-in creates a new user; disable that user to keep them out.
+- Deleting an OIDC user keeps their record, so the next sign-in is refused; see
+  [Deleting an OIDC or SAML user](#deleting-an-oidc-or-saml-user).
 
 Outcomes:
 
@@ -291,6 +288,30 @@ To register Agent Stream at the provider:
 | Post-logout redirect URI | The `logout.post_logout_redirect_uri` in `oidc.json`, for example `https://stream.example.com/?signed_out=1` |
 | Back-channel logout URI | `/oidc/backchannel-logout` on the same origin, for example `https://stream.example.com/api/oidc/backchannel-logout`; the provider must be able to reach it, through the same readiness routing as dashboard traffic. Either setting of "session required" works: a logout with `sid` ends that provider session, one with only `sub` ends all of the account's sessions |
 | Initiate login URI (optional) | `/oidc/initiate` on the same origin, for example `https://stream.example.com/api/oidc/initiate`, when the provider links people into the dashboard |
+
+## Deleting an OIDC or SAML user
+
+`DELETE /v1/users/{user_id}` removes a user who signs in with a passkey. A user who signs in
+with an OIDC or SAML account is not removed: with no record, the next sign-in would create a
+new approved user with the mapped role. The record is kept `Disabled` and marked deleted, so
+that sign-in is refused like any disabled user's (`403`, no reason shown; `user_disabled` in
+the OIDC log).
+
+- **Cleared:** first and last name, email, department, job title, avatar link and passkeys.
+  The username becomes the user id and the role goes back to `user`.
+- **Kept:** the user id, the created and last login times, and the provider account the
+  sign-in matches on: the OIDC issuer and `sub`, or the SAML user ID. The Users page shows
+  the account on a kept record, so an administrator knows whose sign-in approving it allows.
+- **Every delete:** the user's sessions end, the access tokens bound to the user are revoked,
+  and an uploaded avatar image file is removed (the shared default avatar never is). The
+  `user.deleted` event fires once; deleting a kept record again changes nothing.
+- **User limit:** a kept record does not count toward the `users` limit. Approving it again
+  gives it a seat, so that approval answers `403` when the limit is reached.
+- **Signing in again:** an administrator sets the status back to `approved`. The next
+  sign-in is the same user, with the role set from the claim or attribute mapping again. A
+  role in the kept record is not used.
+- Terms Acceptance Records survive user deletion; see
+  [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md).
 
 ## Sign-in throttling
 
@@ -425,6 +446,11 @@ overrides; each flag is applied over the system value). Every other field always
 the system settings.
 
 Every system-settings and user-settings response sends `prometheus_auth_password_hash` empty.
+
+## Known limitations
+
+A user deleted before an OIDC or SAML delete kept the record has no record left, so their
+next sign-in creates a new approved user. Disable that user to keep them out.
 
 ## Related
 

@@ -19,6 +19,9 @@ pub struct PasskeyStorage {
     user_write_lock: Mutex<()>,
 }
 
+/// The avatar file every new passkey user shares; never removed with a user.
+const DEFAULT_AVATAR_FILE: &str = "default.png";
+
 /// User data stored on disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserData {
@@ -58,6 +61,12 @@ pub struct UserData {
     /// The OpenID provider account this user signs in with (OIDC mode)
     #[serde(default)]
     pub oidc: Option<OidcIdentity>,
+
+    /// When an administrator deleted this user. Set only on a record that is
+    /// kept, disabled, so the user's provider account stays refused. Such a
+    /// record does not count toward the user limit.
+    #[serde(default)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// An account at an OpenID provider: its issuer and the subject (`sub`) it
@@ -85,7 +94,7 @@ impl PasskeyStorage {
             .with_context(|| format!("Failed to create avatars directory: {}", avatars_path))?;
 
         // Copy default avatar if it doesn't exist
-        let default_avatar_dest = format!("{}/default.png", avatars_path);
+        let default_avatar_dest = format!("{avatars_path}/{DEFAULT_AVATAR_FILE}");
         if !Path::new(&default_avatar_dest).exists() {
             let default_avatar_src = include_bytes!("../auth_manager/default_avatar.png");
             std::fs::write(&default_avatar_dest, default_avatar_src)
@@ -164,7 +173,13 @@ impl PasskeyStorage {
             anyhow::bail!("User already exists: {}", username);
         }
 
-        if !is_first_user && let Err(error) = crate::config::global_limits().check_can_add("users", users.len()) {
+        if !is_first_user
+            && let Err(error) = crate::config::global_limits().check_can_add(
+                "users",
+                self.count_toward_user_limit()
+                    .await?,
+            )
+        {
             return Err(anyhow::Error::new(error));
         }
 
@@ -191,10 +206,11 @@ impl PasskeyStorage {
             email: None,
             department: None,
             job_title: None,
-            avatar_path: Some("avatars/default.png".to_string()),
+            avatar_path: Some(format!("avatars/{DEFAULT_AVATAR_FILE}")),
             last_logged_in: None,
             saml_id: None,
             oidc: None,
+            deleted_at: None,
         };
         Ok(user_data)
     }
@@ -206,6 +222,7 @@ impl PasskeyStorage {
         role: Option<UserRole>,
         status: Option<UserStatus>,
     ) -> Result<()> {
+        let _user_write_guard = self.user_write_guard().await;
         let mut user_data = self
             .load_user(username)
             .await?
@@ -215,6 +232,9 @@ impl PasskeyStorage {
             user_data.role = new_role;
         }
         if let Some(new_status) = status {
+            if new_status == UserStatus::Approved {
+                user_data.deleted_at = None;
+            }
             user_data.status = new_status;
         }
         user_data.updated_at = chrono::Utc::now();
@@ -234,6 +254,7 @@ impl PasskeyStorage {
         job_title: Option<String>,
         avatar_path: Option<String>,
     ) -> Result<()> {
+        let _user_write_guard = self.user_write_guard().await;
         let mut user_data = self
             .load_user_by_id(user_id)
             .await?
@@ -299,44 +320,93 @@ impl PasskeyStorage {
             .collect())
     }
 
-    /// Delete a user by username. A user who signs in through an OpenID
-    /// provider is not removed: the record is scrubbed of profile data and kept
-    /// `Disabled` under the provider account, so the next sign-in is refused
-    /// instead of creating a new approved user.
+    /// Number of stored users that count toward the appliance user limit: every
+    /// user except the kept record of a deleted user.
+    pub async fn count_toward_user_limit(&self) -> Result<usize> {
+        Ok(self
+            .storage
+            .list_all()
+            .await?
+            .iter()
+            .filter(|user| user.deleted_at.is_none())
+            .count())
+    }
+
+    /// Delete a user by id and remove their uploaded avatar file. A user who
+    /// signs in through an OpenID provider or SAML is not removed: the record
+    /// is scrubbed of profile data and kept `Disabled` under the provider
+    /// account, so the next sign-in is refused instead of creating a new
+    /// approved user. Deleting a kept record again changes nothing.
     pub async fn delete_user(
         &self,
-        username: &str,
+        user_id: &str,
     ) -> Result<()> {
         let _user_write_guard = self.user_write_guard().await;
         let mut user_data = self
-            .load_user(username)
+            .load_user_by_id(user_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("User not found: {}", username))?;
+            .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
 
-        if user_data.oidc.is_some() {
-            user_data.username = user_data.user_id.clone();
-            user_data.status = UserStatus::Disabled;
-            user_data.passkeys = Vec::new();
-            user_data.first_name = None;
-            user_data.last_name = None;
-            user_data.email = None;
-            user_data.department = None;
-            user_data.job_title = None;
-            user_data.avatar_path = None;
-            user_data.updated_at = chrono::Utc::now();
-            self.save_user(&user_data)
-                .await?;
-            tracing::info!(user_id = %user_data.user_id, "Disabled the record of a deleted OIDC user");
+        if user_data.deleted_at.is_some() {
             return Ok(());
         }
 
-        self.storage
-            .delete(&user_data.user_id)
+        self.remove_avatar_file(
+            user_data
+                .avatar_path
+                .as_deref(),
+        )
+        .await?;
+
+        if user_data.oidc.is_none() && user_data.saml_id.is_none() {
+            self.storage
+                .delete(&user_data.user_id)
+                .await?;
+            tracing::info!(user_id = %user_data.user_id, "Permanently deleted user");
+            return Ok(());
+        }
+
+        let now = chrono::Utc::now();
+        user_data.username = user_data.user_id.clone();
+        user_data.status = UserStatus::Disabled;
+        user_data.role = UserRole::User;
+        user_data.passkeys = Vec::new();
+        user_data.first_name = None;
+        user_data.last_name = None;
+        user_data.email = None;
+        user_data.department = None;
+        user_data.job_title = None;
+        user_data.avatar_path = None;
+        user_data.updated_at = now;
+        user_data.deleted_at = Some(now);
+        self.save_user(&user_data)
             .await?;
-
-        tracing::info!("Permanently deleted user: {} (user_id: {})", username, user_data.user_id);
-
+        tracing::info!(user_id = %user_data.user_id, "Disabled the record of a deleted federated user");
         Ok(())
+    }
+
+    /// Remove the uploaded avatar file a record points at. Only a file directly
+    /// inside the avatars directory is removed, never the shared default, and a
+    /// file that is already gone is not an error.
+    async fn remove_avatar_file(
+        &self,
+        avatar_path: Option<&str>,
+    ) -> Result<()> {
+        let Some(relative) = avatar_path.and_then(|path| path.strip_prefix("avatars/")) else {
+            return Ok(());
+        };
+        let mut components = std::path::Path::new(relative).components();
+        let (Some(std::path::Component::Normal(file)), None) = (components.next(), components.next()) else {
+            return Ok(());
+        };
+        if file == DEFAULT_AVATAR_FILE {
+            return Ok(());
+        }
+        match tokio::fs::remove_file(std::path::Path::new(&self.avatars_path).join(file)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Load user by SAML ID (scans in-memory cache)
@@ -419,6 +489,7 @@ mod tests {
             last_logged_in: None,
             saml_id: None,
             oidc: None,
+            deleted_at: None,
         }
     }
 
@@ -490,6 +561,339 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    fn saml_user(id: &str) -> UserData {
+        let mut data = user(id);
+        data.status = UserStatus::Approved;
+        data.role = UserRole::PowerUser;
+        data.email = Some("s@example.com".to_string());
+        data.saml_id = Some("saml-1".to_string());
+        data
+    }
+
+    async fn write_avatar(
+        dir: &std::path::Path,
+        name: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join("avatars").join(name);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, b"image")
+            .await
+            .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn deleting_a_saml_user_keeps_a_disabled_record_for_the_saml_account() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&saml_user("saml-user"))
+            .await
+            .unwrap();
+
+        storage
+            .delete_user("saml-user")
+            .await
+            .unwrap();
+
+        let kept = storage
+            .load_user_by_saml_id("saml-1")
+            .await
+            .unwrap()
+            .expect("the SAML account keeps a record");
+        assert_eq!(kept.user_id, "saml-user");
+        assert_eq!(kept.status, UserStatus::Disabled);
+        assert!(kept.deleted_at.is_some());
+        assert!(kept.email.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_user_is_deleted_by_id_and_a_username_is_not_an_id() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        let mut data = user("id-1");
+        data.username = "alice".to_string();
+        storage
+            .save_user(&data)
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .delete_user("alice")
+                .await
+                .is_err()
+        );
+        storage
+            .delete_user("id-1")
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .load_user_by_id("id-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kept_record_is_disabled_marked_deleted_and_back_to_the_lowest_role() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        let mut data = oidc_user("oidc-1");
+        data.role = UserRole::PowerUser;
+        storage
+            .save_user(&data)
+            .await
+            .unwrap();
+
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        let kept = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.role, UserRole::User);
+        assert!(kept.deleted_at.is_some());
+        assert!(!kept.is_primary);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_kept_record_again_changes_nothing() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+        let first = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        let second = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.deleted_at, first.deleted_at);
+        assert_eq!(second.updated_at, first.updated_at);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_removes_their_uploaded_avatar_file_in_both_branches() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        let plain_file = write_avatar(temp_dir.path(), "plain.png").await;
+        let oidc_file = write_avatar(temp_dir.path(), "oidc-1.png").await;
+        let mut plain = user("plain");
+        plain.avatar_path = Some("avatars/plain.png".to_string());
+        let mut federated = oidc_user("oidc-1");
+        federated.avatar_path = Some("avatars/oidc-1.png".to_string());
+        storage
+            .save_user(&plain)
+            .await
+            .unwrap();
+        storage
+            .save_user(&federated)
+            .await
+            .unwrap();
+
+        storage
+            .delete_user("plain")
+            .await
+            .unwrap();
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        assert!(!plain_file.exists());
+        assert!(!oidc_file.exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_leaves_the_shared_default_avatar_and_files_outside_the_avatars_directory() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        let default_file = write_avatar(temp_dir.path(), "default.png").await;
+        let outside = temp_dir
+            .path()
+            .join("outside.png");
+        tokio::fs::write(&outside, b"image")
+            .await
+            .unwrap();
+        let mut first = user("first");
+        first.avatar_path = Some("avatars/default.png".to_string());
+        let mut second = user("second");
+        second.avatar_path = Some("avatars/../outside.png".to_string());
+        let mut third = user("third");
+        third.avatar_path = Some("elsewhere/default.png".to_string());
+        for data in [&first, &second, &third] {
+            storage
+                .save_user(data)
+                .await
+                .unwrap();
+        }
+
+        for id in ["first", "second", "third"] {
+            storage
+                .delete_user(id)
+                .await
+                .unwrap();
+        }
+
+        assert!(default_file.exists(), "the default avatar is shared");
+        assert!(outside.exists(), "a path that leaves the avatars directory is never followed");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_whose_avatar_file_is_already_gone_succeeds() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        let mut data = user("plain");
+        data.avatar_path = Some("avatars/missing.png".to_string());
+        storage
+            .save_user(&data)
+            .await
+            .unwrap();
+
+        storage
+            .delete_user("plain")
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .load_user_by_id("plain")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_waits_for_the_user_write_guard_so_it_cannot_overwrite_a_delete() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+        let wait = std::time::Duration::from_millis(50);
+
+        let guard = storage
+            .user_write_guard()
+            .await;
+        let role_update =
+            tokio::time::timeout(wait, storage.update_user("oidc-1", None, Some(UserStatus::Approved))).await;
+        let profile_update = tokio::time::timeout(
+            wait,
+            storage.update_profile("oidc-1", Some("X".to_string()), None, None, None, None, None),
+        )
+        .await;
+        drop(guard);
+
+        assert!(role_update.is_err(), "update_user must wait for the guard");
+        assert!(profile_update.is_err(), "update_profile must wait for the guard");
+        storage
+            .update_user("oidc-1", None, Some(UserStatus::Approved))
+            .await
+            .unwrap();
+        storage
+            .update_profile("oidc-1", Some("X".to_string()), None, None, None, None, None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn approving_a_kept_record_clears_the_deleted_marker() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        storage
+            .update_user("oidc-1", None, Some(UserStatus::Approved))
+            .await
+            .unwrap();
+
+        let approved = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(approved.status, UserStatus::Approved);
+        assert!(approved.deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn kept_records_do_not_count_toward_the_user_limit() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&user("plain"))
+            .await
+            .unwrap();
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .count_toward_user_limit()
+                .await
+                .unwrap(),
+            2
+        );
+
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .count_toward_user_limit()
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            storage
+                .list_users()
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "the record itself is still stored"
         );
     }
 

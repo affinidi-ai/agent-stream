@@ -346,7 +346,8 @@ administrator. Map `user_id` to a claim the identity
 provider never reassigns, such as Entra ID's
 `http://schemas.microsoft.com/identity/claims/objectidentifier`, rather than a user principal
 name. Users created by SAML are approved
-automatically and count against the `users` limit. `idp_metadata_url` in the example is not
+automatically and count against the `users` limit; the kept record of a deleted user does
+not. `idp_metadata_url` in the example is not
 read.
 
 ## `oidc.json`

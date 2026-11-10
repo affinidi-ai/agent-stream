@@ -143,8 +143,9 @@ const UserIntegrationsTab: React.FC<UserIntegrationsTabProps> = ({
                 status, profile) are modified
               </li>
               <li>
-                <strong>User Deleted (user.deleted):</strong> Triggered when a user account is
-                permanently deleted
+                <strong>User Deleted (user.deleted):</strong> Triggered when a user is deleted. A
+                user who signs in through OpenID Connect or SAML is kept as a disabled record
+                instead of being removed
               </li>
               <li>
                 <strong>User Login (user.login):</strong> Triggered when a user successfully logs in

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use super::service::SamlService;
-use super::user_provisioning::provision_user_from_saml;
+use super::user_provisioning::{UserNotApproved, provision_user_from_saml};
 use crate::auth::session::SessionManager;
 use crate::auth::session_cookie::{
     SAML_CORRELATION_COOKIE_NAME, build_saml_correlation_cookie, clear_saml_correlation_cookie,
@@ -153,6 +153,15 @@ pub async fn saml_acs(
             // than a blank 500, since the browser lands here straight from the IdP.
             if let Some(limit) = e.downcast_ref::<crate::config::LimitExceeded>() {
                 return Ok((StatusCode::FORBIDDEN, Html(sign_in_error_page(&limit.message()))).into_response());
+            }
+            if e.downcast_ref::<UserNotApproved>()
+                .is_some()
+            {
+                return Ok((
+                    StatusCode::FORBIDDEN,
+                    Html(sign_in_error_page("This account is not allowed to sign in.")),
+                )
+                    .into_response());
             }
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         }

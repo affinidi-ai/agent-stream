@@ -180,22 +180,7 @@ pub async fn list_users(
             .load_user_by_id(&user_id)
             .await
         {
-            users.push(User {
-                username: user_data.username,
-                user_id: user_data.user_id,
-                role: user_data.role,
-                status: user_data.status,
-                is_primary: user_data.is_primary,
-                created_at: user_data.created_at,
-                updated_at: user_data.updated_at,
-                first_name: user_data.first_name,
-                last_name: user_data.last_name,
-                email: user_data.email,
-                department: user_data.department,
-                job_title: user_data.job_title,
-                avatar_path: user_data.avatar_path,
-                last_logged_in: user_data.last_logged_in,
-            });
+            users.push(User::from(user_data));
         }
     }
 
@@ -253,22 +238,7 @@ pub async fn get_user(
         });
     }
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Update a user (role and/or status)
@@ -343,6 +313,17 @@ pub async fn update_user(
         {
             return Err((StatusCode::FORBIDDEN, "Cannot change status of primary administrator".to_string()));
         }
+    }
+
+    if user_before
+        .deleted_at
+        .is_some()
+    {
+        let users_counted = storage
+            .count_toward_user_limit()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to count users: {}", e)))?;
+        check_reapproval_seat(&user_before, req.status.as_ref(), users_counted, crate::config::global_limits())?;
     }
 
     // Update the user
@@ -461,22 +442,27 @@ pub async fn update_user(
         });
     }
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
+}
+
+/// Approving a deleted user's kept record gives it back a seat, so it is
+/// checked against the user limit like a new user.
+fn check_reapproval_seat(
+    user_before: &UserData,
+    requested_status: Option<&UserStatus>,
+    users_counted: usize,
+    limits: &crate::config::LimitsConfig,
+) -> Result<(), (StatusCode, String)> {
+    if user_before
+        .deleted_at
+        .is_none()
+        || requested_status != Some(&UserStatus::Approved)
+    {
+        return Ok(());
+    }
+    limits
+        .check_can_add("users", users_counted)
+        .map_err(|e| (StatusCode::FORBIDDEN, e.message()))
 }
 
 /// Delete a user
@@ -486,6 +472,7 @@ pub async fn delete_user(
     Extension(rbac_config): Extension<std::sync::Arc<RbacConfig>>,
     Extension(notification_store): Extension<Option<std::sync::Arc<crate::integrations::FileSystemNotificationStore>>>,
     Extension(session_manager): Extension<std::sync::Arc<crate::auth::session::SessionManager>>,
+    Extension(pat_authenticator): Extension<Option<std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator>>>,
     pat: Option<Extension<PatContext>>,
     Path(user_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -522,20 +509,19 @@ pub async fn delete_user(
         return Err((StatusCode::FORBIDDEN, "Cannot delete administrator users".to_string()));
     }
 
-    // Trigger user.deleted integration before deletion
-    if let Some(notif_store) = &notification_store {
-        let notif = notif_store.clone();
-        let user_clone = user_data.clone();
-        tokio::spawn(async move {
-            crate::integrations::trigger_user_deleted(notif.as_ref(), &user_clone).await;
-        });
-    }
+    let already_deleted = user_data.deleted_at.is_some();
 
-    // Permanently delete the user
     storage
-        .delete_user(&user_data.username)
+        .delete_user(&user_data.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete user: {}", e)))?;
+
+    if !already_deleted && let Some(notif_store) = &notification_store {
+        let notif = notif_store.clone();
+        tokio::spawn(async move {
+            crate::integrations::trigger_user_deleted(notif.as_ref(), &user_data).await;
+        });
+    }
 
     // Revoke any active sessions so the deleted account cannot continue
     // operating with previously issued bearer tokens.
@@ -545,6 +531,18 @@ pub async fn delete_user(
     if revoked > 0 {
         tracing::info!("Revoked {} active session(s) for deleted user_id={}", revoked, user_id);
     }
+
+    if let Some(authenticator) = &pat_authenticator {
+        let revoked_tokens = authenticator
+            .revoke_for_user(&user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
+        if revoked_tokens > 0 {
+            tracing::info!("Revoked {} access token(s) for deleted user_id={}", revoked_tokens, user_id);
+        }
+    }
+
+    tracing::info!(caller_user_id = %caller_user_id, user_id = %user_id, "User deleted");
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -560,22 +558,7 @@ pub async fn get_profile(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load user: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Update current user profile
@@ -603,22 +586,7 @@ pub async fn update_profile(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load updated user: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Upload user avatar
@@ -653,22 +621,7 @@ pub async fn upload_avatar(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load updated user: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Count users with role `Administrator` and status `Approved`.
@@ -717,6 +670,7 @@ mod tests {
             last_logged_in: None,
             saml_id: None,
             oidc: None,
+            deleted_at: None,
         }
     }
 
@@ -888,6 +842,50 @@ mod tests {
         let caller = mk_user("a", UserRole::Administrator, UserStatus::Approved, false);
         let target = mk_user("u", UserRole::User, UserStatus::Approved, false);
         authorize_user_delete(&caller, &target, &admin_only_rbac(), None).unwrap();
+    }
+
+    fn users_limit(limit: u64) -> crate::config::LimitsConfig {
+        crate::config::LimitsConfig {
+            limits: std::collections::HashMap::from([(
+                "users".to_string(),
+                crate::config::LimitDefinition {
+                    name: "Users".to_string(),
+                    description: String::new(),
+                    limit,
+                },
+            )]),
+        }
+    }
+
+    fn deleted_user() -> UserData {
+        let mut user = mk_user("d", UserRole::User, UserStatus::Disabled, false);
+        user.deleted_at = Some(chrono::Utc::now());
+        user
+    }
+
+    #[test]
+    fn approving_a_deleted_user_at_the_user_limit_is_refused() {
+        let refused =
+            check_reapproval_seat(&deleted_user(), Some(&UserStatus::Approved), 2, &users_limit(2)).unwrap_err();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        assert!(refused.1.contains("users"), "{}", refused.1);
+    }
+
+    #[test]
+    fn approving_a_deleted_user_below_the_user_limit_is_allowed() {
+        check_reapproval_seat(&deleted_user(), Some(&UserStatus::Approved), 1, &users_limit(2)).unwrap();
+    }
+
+    #[test]
+    fn approving_a_user_who_was_not_deleted_does_not_need_a_new_seat() {
+        let disabled = mk_user("u", UserRole::User, UserStatus::Disabled, false);
+        check_reapproval_seat(&disabled, Some(&UserStatus::Approved), 2, &users_limit(2)).unwrap();
+    }
+
+    #[test]
+    fn a_status_change_that_does_not_approve_a_deleted_user_needs_no_seat() {
+        check_reapproval_seat(&deleted_user(), Some(&UserStatus::Disabled), 2, &users_limit(2)).unwrap();
+        check_reapproval_seat(&deleted_user(), None, 2, &users_limit(2)).unwrap();
     }
 
     #[test]

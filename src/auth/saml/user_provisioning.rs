@@ -7,7 +7,15 @@ use crate::auth::saml::graph_api::GraphApiClient;
 use crate::auth::storage::{PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
 
-/// Provision or update a user from SAML attributes
+/// The SAML account has a user who is not approved: an administrator disabled
+/// or deleted them. Carried in the `anyhow` error so the ACS handler can refuse
+/// the sign-in without creating a user.
+#[derive(Debug, thiserror::Error)]
+#[error("the user is not approved")]
+pub struct UserNotApproved;
+
+/// Provision or update a user from SAML attributes. A user that exists and is
+/// not approved is refused with [`UserNotApproved`].
 pub async fn provision_user_from_saml(
     storage: &PasskeyStorage,
     attributes: &HashMap<String, String>,
@@ -82,7 +90,9 @@ pub async fn provision_user_from_saml(
         .await?;
 
     let user = if let Some(mut user) = existing_user {
-        // Update existing user
+        if user.status != UserStatus::Approved {
+            return Err(anyhow::Error::new(UserNotApproved));
+        }
         info!("Updating existing SAML user: {}", username);
 
         user.username = username.clone();
@@ -114,9 +124,8 @@ pub async fn provision_user_from_saml(
         // user always bootstraps admin access regardless of the configured cap.
         if !is_first_user {
             let user_count = storage
-                .list_users()
-                .await?
-                .len();
+                .count_toward_user_limit()
+                .await?;
             crate::config::global_limits()
                 .check_can_add("users", user_count)
                 .map_err(anyhow::Error::new)?;
@@ -147,6 +156,7 @@ pub async fn provision_user_from_saml(
             last_logged_in: Some(now),
             saml_id: Some(user_id_attr.clone()),
             oidc: None,
+            deleted_at: None,
         };
 
         info!("SAML user created successfully: {} (role: {:?})", username, final_role);
@@ -457,6 +467,101 @@ mod tests {
             .unwrap();
         assert_eq!(bob.role, UserRole::User, "an unmapped `admin` no longer grants administrator");
         assert!(!bob.is_primary);
+    }
+
+    async fn two_users(storage: &PasskeyStorage) -> (UserData, UserData) {
+        let config = config();
+        let first = provision_user_from_saml(storage, &attributes("alice"), &config, "")
+            .await
+            .unwrap();
+        let second = provision_user_from_saml(storage, &attributes("bob"), &config, "")
+            .await
+            .unwrap();
+        (first, second)
+    }
+
+    #[tokio::test]
+    async fn a_user_who_is_not_approved_is_refused_and_left_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (_, bob) = two_users(&storage).await;
+        storage
+            .update_user("bob", None, Some(UserStatus::Disabled))
+            .await
+            .unwrap();
+
+        let refused = provision_user_from_saml(&storage, &attributes("bob"), &config(), "")
+            .await
+            .unwrap_err();
+
+        assert!(
+            refused
+                .downcast_ref::<UserNotApproved>()
+                .is_some(),
+            "{refused:?}"
+        );
+        let stored = storage
+            .load_user_by_id(&bob.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, UserStatus::Disabled);
+        assert_eq!(stored.username, "bob");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_user_is_refused_at_the_next_sign_in_and_not_created_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (_, bob) = two_users(&storage).await;
+        storage
+            .delete_user(&bob.user_id)
+            .await
+            .unwrap();
+
+        let refused = provision_user_from_saml(&storage, &attributes("bob"), &config(), "")
+            .await
+            .unwrap_err();
+
+        assert!(
+            refused
+                .downcast_ref::<UserNotApproved>()
+                .is_some(),
+            "{refused:?}"
+        );
+        assert_eq!(
+            storage
+                .list_users()
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "no second user for the SAML account"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deleted_user_signs_in_as_the_same_user_once_approved_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (_, bob) = two_users(&storage).await;
+        storage
+            .delete_user(&bob.user_id)
+            .await
+            .unwrap();
+        storage
+            .update_user(&bob.user_id, None, Some(UserStatus::Approved))
+            .await
+            .unwrap();
+
+        let again = provision_user_from_saml(&storage, &attributes("bob"), &config(), "")
+            .await
+            .unwrap();
+
+        assert_eq!(again.user_id, bob.user_id);
+        assert_eq!(again.username, "bob");
+        assert_eq!(again.status, UserStatus::Approved);
+        assert!(again.deleted_at.is_none());
     }
 
     #[tokio::test]
