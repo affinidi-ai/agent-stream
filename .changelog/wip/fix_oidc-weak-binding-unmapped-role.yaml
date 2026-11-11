@@ -9,8 +9,8 @@ changes:
     - timestamp: '2026-11-12T09:00:00.000Z'
       title: Refuse a boolean-only required_claims when unmapped accounts get a role
       description: >-
-        An oidc.json whose required_claims entries are all booleans, such as
-        email_verified, and whose role_mapping.unmapped is a role instead of deny now
+        An oidc.json whose required_claims entries, apart from iss, aud and azp, are all
+        booleans (or the strings true or false in any case), such as email_verified, and whose role_mapping.unmapped is a role instead of deny now
         stops startup, because every verified account at the OpenID provider, from any
         tenant, would get that role. List an exact value of a claim that names your
         tenant, such as org_id, or set role_mapping.unmapped to deny. A file whose entries

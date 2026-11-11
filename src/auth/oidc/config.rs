@@ -508,21 +508,26 @@ fn binds_anything(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
         .is_some()
 }
 
-/// Whether a value can name one tenant: an exact string. A boolean, the string
-/// `"true"` or `"false"` a provider may send in its place, or a `regex:`
-/// pattern can match accounts of any tenant.
+/// A boolean, or the string `"true"` or `"false"` in any case that a provider
+/// may send in its place.
+fn is_boolean_like(value: &ValueMatcher) -> bool {
+    match value {
+        ValueMatcher::Bool(_) => true,
+        ValueMatcher::Exact(text) => text.eq_ignore_ascii_case("true") || text.eq_ignore_ascii_case("false"),
+        ValueMatcher::Regex(_) => false,
+    }
+}
+
+/// Whether a value can name one tenant: an exact string. A boolean-like value
+/// or a `regex:` pattern can match accounts of any tenant.
 fn is_exact_tenant_value(value: &ValueMatcher) -> bool {
-    matches!(value, ValueMatcher::Exact(text) if text != "true" && text != "false")
+    matches!(value, ValueMatcher::Exact(_)) && !is_boolean_like(value)
 }
 
 fn only_booleans(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
     bindable_entries(required)
         .flat_map(|(_, allowed)| allowed)
-        .all(|value| match value {
-            ValueMatcher::Bool(_) => true,
-            ValueMatcher::Exact(text) => text == "true" || text == "false",
-            ValueMatcher::Regex(_) => false,
-        })
+        .all(is_boolean_like)
 }
 
 /// The `required_claims` entries that allow only exact string values, the
@@ -1075,6 +1080,7 @@ mod tests {
         for claims in [
             json!({ "email_verified": [true] }),
             json!({ "email_verified": ["true"], "mfa": [false] }),
+            json!({ "email_verified": ["True", "TRUE"], "mfa": ["False"] }),
             json!({ "iss": ["https://idp.example.com"], "email_verified": [true] }),
         ] {
             for role in ["administrator", "poweruser", "user"] {
@@ -1092,7 +1098,8 @@ mod tests {
                     .unmapped,
                 None
             );
-            assert!(logs.contains("WARN"), "{logs}");
+            assert!(logs.contains("boolean or a pattern, so it may not tie sign-in"), "{logs}");
+            assert!(!logs.contains("grants a role"), "{logs}");
         }
     }
 
@@ -1121,7 +1128,11 @@ mod tests {
     #[tokio::test]
     async fn an_exact_or_mixed_binding_may_grant_unmapped_accounts_a_role() {
         use crate::observability::log_capture::capture_logs;
-        for claims in [json!({ "org_id": ["org_123"] }), json!({ "org_id": ["org_1", "regex:org_1_.*"] })] {
+        for claims in [
+            json!({ "org_id": ["org_123"] }),
+            json!({ "org_id": ["org_123"], "email_verified": ["True"] }),
+            json!({ "org_id": ["org_1", "regex:org_1_.*"] }),
+        ] {
             let file =
                 with(with(valid_file(), &["required_claims"], claims), &["role_mapping", "unmapped"], json!("user"));
             let (logs, config) = capture_logs(load(file)).await;
