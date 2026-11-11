@@ -7,12 +7,12 @@ changes:
   security: []
   breaking:
     - timestamp: '2026-11-12T09:00:00.000Z'
-      title: Refuse a boolean-only required_claims when unmapped accounts get a role
+      title: Refuse a granting role_mapping.unmapped without an exact required_claims entry
       description: >-
-        An oidc.json whose required_claims entries, apart from iss, aud and azp, are all
-        booleans (or the strings true or false in any case), such as email_verified, and whose role_mapping.unmapped is a role instead of deny now
-        stops startup, because every verified account at the OpenID provider, from any
-        tenant, would get that role. List an exact value of a claim that names your
-        tenant, such as org_id, or set role_mapping.unmapped to deny. A file whose entries
-        are only booleans and patterns still starts, with a warning that names
-        role_mapping.unmapped.
+        An oidc.json whose role_mapping.unmapped is a role, not deny, now stops startup
+        unless a required_claims entry lists only exact values, such as org_id. Booleans
+        like email_verified and patterns match accounts of every tenant, so such a file
+        gave the role to all of them. List an exact tenant value, or set
+        role_mapping.unmapped to deny. With deny, the file still starts, and the
+        weak-binding warning stays. A weak binding leaves it to role_mapping.values to keep
+        other tenants out, so map only a claim the provider controls.

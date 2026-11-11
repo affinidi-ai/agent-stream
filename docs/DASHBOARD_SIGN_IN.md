@@ -106,7 +106,7 @@ OIDC mode signs people in with one OpenID provider, configured in `oidc.json`
 fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson). The file
 must bind sign-in to a tenant at the provider: startup stops unless `required_claims` has an
 entry on a claim other than `iss`, `aud` or `azp`, or `allow_any_account` is `true` with
-`role_mapping.unmapped` left at `deny`. When every entry other than `iss`, `aud` and `azp` is a boolean, `unmapped` must be `deny` too.
+`role_mapping.unmapped` left at `deny`. A role for `unmapped` also needs an entry that lists only exact values.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |

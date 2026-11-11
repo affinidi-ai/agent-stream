@@ -416,32 +416,31 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
         let bound = exact_value_claims(&required_claims);
         if !bound.is_empty() {
             info!(issuer = %file.issuer, claims = %bound.join(", "), "required_claims ties sign-in to the tenant");
+        } else if role_mapping
+            .unmapped
+            .is_some()
+        {
+            let judged = bindable_entries(&required_claims)
+                .map(|(claim, _)| claim.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "role_mapping.unmapped must be deny unless a required_claims entry lists only exact values of a claim \
+                 that names your tenant: the entries other than iss, aud and azp ({judged}) allow booleans or \
+                 patterns, which match accounts of every tenant, so an unmapped role would go to all of them. List an \
+                 exact tenant value such as org_id, or set role_mapping.unmapped to deny"
+            ));
         } else if holds_exact_value(&required_claims) {
             info!(
                 issuer = %file.issuer,
                 "every required_claims entry mixes exact values with patterns or booleans: check that each allowed \
                  value belongs to your tenant"
             );
-        } else if role_mapping
-            .unmapped
-            .is_none()
-        {
+        } else {
             warn!(
                 issuer = %file.issuer,
                 "every required_claims entry is a boolean or a pattern, so it may not tie sign-in to your tenant: \
                  either can match accounts of every tenant at the OpenID provider"
-            );
-        } else if only_booleans(&required_claims) {
-            return Err("role_mapping.unmapped must be deny when every required_claims entry is a boolean: a boolean \
-                 matches accounts of every tenant, so an unmapped role would go to all of them. List an exact value \
-                 of a claim that names your tenant, or set role_mapping.unmapped to deny"
-                .to_string());
-        } else {
-            warn!(
-                issuer = %file.issuer,
-                "every required_claims entry is a boolean or a pattern and role_mapping.unmapped grants a role: \
-                 unless each pattern names only your tenant, accounts of every tenant at the OpenID provider get \
-                 that role"
             );
         }
     }
@@ -522,12 +521,6 @@ fn is_boolean_like(value: &ValueMatcher) -> bool {
 /// or a `regex:` pattern can match accounts of any tenant.
 fn is_exact_tenant_value(value: &ValueMatcher) -> bool {
     matches!(value, ValueMatcher::Exact(_)) && !is_boolean_like(value)
-}
-
-fn only_booleans(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
-    bindable_entries(required)
-        .flat_map(|(_, allowed)| allowed)
-        .all(is_boolean_like)
 }
 
 /// The `required_claims` entries that allow only exact string values, the
@@ -1071,8 +1064,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_boolean_only_binding_is_refused_when_unmapped_accounts_get_a_role() {
-        use crate::observability::log_capture::capture_logs;
+    async fn a_binding_with_no_exact_tenant_entry_is_refused_when_unmapped_accounts_get_a_role() {
         let file = |claims: Value, unmapped: &str| {
             with(with(valid_file(), &["required_claims"], claims), &["role_mapping", "unmapped"], json!(unmapped))
         };
@@ -1082,57 +1074,44 @@ mod tests {
             json!({ "email_verified": ["true"], "mfa": [false] }),
             json!({ "email_verified": ["True", "TRUE"], "mfa": ["False"] }),
             json!({ "iss": ["https://idp.example.com"], "email_verified": [true] }),
+            json!({ "email": ["regex:.*@example\\.com"] }),
+            json!({ "email": ["regex:.*@example\\.com"], "email_verified": [true] }),
+            json!({ "org_id": ["org_1", "regex:.*"] }),
+            json!({ "org_id": ["org_1", "regex:org_1_.*"] }),
         ] {
             for role in ["administrator", "poweruser", "user"] {
                 let refused = load(file(claims.clone(), role))
                     .await
                     .unwrap_err();
-                assert!(refused.contains("role_mapping.unmapped"), "{refused}");
-                assert!(refused.contains("boolean"), "{refused}");
+                assert!(refused.contains("role_mapping.unmapped must be deny"), "{refused}");
+                assert!(refused.contains("iss, aud and azp"), "{refused}");
             }
-            let (logs, config) = capture_logs(load(file(claims, "deny"))).await;
-            assert_eq!(
-                config
-                    .unwrap()
-                    .role_mapping
-                    .unmapped,
-                None
-            );
-            assert!(logs.contains("boolean or a pattern, so it may not tie sign-in"), "{logs}");
-            assert!(!logs.contains("grants a role"), "{logs}");
+            let config = load(file(claims, "deny"))
+                .await
+                .unwrap();
+            assert_eq!(config.role_mapping.unmapped, None);
         }
     }
 
     #[tokio::test]
-    async fn a_pattern_binding_that_grants_unmapped_accounts_a_role_starts_with_a_warning() {
-        use crate::observability::log_capture::capture_logs;
-        for claims in [
-            json!({ "email": ["regex:.*@example\\.com"] }),
-            json!({ "email": ["regex:.*@example\\.com"], "email_verified": [true] }),
-        ] {
-            let file =
-                with(with(valid_file(), &["required_claims"], claims), &["role_mapping", "unmapped"], json!("user"));
-            let (logs, config) = capture_logs(load(file)).await;
-            assert_eq!(
-                config
-                    .unwrap()
-                    .role_mapping
-                    .unmapped,
-                Some(UserRole::User)
-            );
-            assert!(logs.contains("WARN"), "{logs}");
-            assert!(logs.contains("role_mapping.unmapped grants a role"), "{logs}");
-        }
+    async fn the_refusal_names_the_claims_it_judged() {
+        let file = with(
+            with(
+                valid_file(),
+                &["required_claims"],
+                json!({ "iss": ["https://idp.example.com"], "email_verified": [true] }),
+            ),
+            &["role_mapping", "unmapped"],
+            json!("user"),
+        );
+        let refused = load(file).await.unwrap_err();
+        assert!(refused.contains("(email_verified)"), "{refused}");
     }
 
     #[tokio::test]
-    async fn an_exact_or_mixed_binding_may_grant_unmapped_accounts_a_role() {
+    async fn an_exact_tenant_entry_lets_unmapped_accounts_get_a_role_without_a_warning() {
         use crate::observability::log_capture::capture_logs;
-        for claims in [
-            json!({ "org_id": ["org_123"] }),
-            json!({ "org_id": ["org_123"], "email_verified": ["True"] }),
-            json!({ "org_id": ["org_1", "regex:org_1_.*"] }),
-        ] {
+        for claims in [json!({ "org_id": ["org_123"] }), json!({ "org_id": ["org_123"], "email_verified": ["True"] })] {
             let file =
                 with(with(valid_file(), &["required_claims"], claims), &["role_mapping", "unmapped"], json!("user"));
             let (logs, config) = capture_logs(load(file)).await;
