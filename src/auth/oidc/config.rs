@@ -9,7 +9,7 @@ use std::str::FromStr;
 use jsonwebtoken::Algorithm;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{info, warn};
 use url::Url;
 
 use crate::auth::types::UserRole;
@@ -52,6 +52,8 @@ struct OidcFile {
     claims: ClaimNames,
     #[serde(default)]
     required_claims: BTreeMap<String, Vec<RawClaimValue>>,
+    #[serde(default)]
+    allow_any_account: bool,
     role_mapping: RoleMappingFile,
     #[serde(default)]
     logout: LogoutSettings,
@@ -296,15 +298,6 @@ impl OidcConfig {
         let checked = check(file)?;
         let client_id = resolve_client_id(&checked.client_id).await?;
         let client_secret = resolve_client_secret(&checked.client_secret_reference).await?;
-        if checked
-            .required_claims
-            .is_empty()
-        {
-            warn!(
-                issuer = %checked.issuer,
-                "oidc.json has no required_claims: every account at the OpenID provider can sign in"
-            );
-        }
         Ok(Self {
             label: checked.label,
             issuer: checked.issuer,
@@ -396,6 +389,47 @@ fn check(file: OidcFile) -> Result<CheckedFile, String> {
     }
     let required_claims = required_claims(file.required_claims)?;
     let role_mapping = role_mapping(file.role_mapping)?;
+    if !binds_anything(&required_claims) {
+        if !file.allow_any_account {
+            return Err("required_claims must name at least one claim that binds sign-in to your tenant at the \
+                 provider (iss, aud and azp are tied to the issuer and client_id and cannot name a tenant), or set \
+                 allow_any_account to true to let every account at the provider sign in"
+                .to_string());
+        }
+        if role_mapping
+            .unmapped
+            .is_some()
+        {
+            return Err("allow_any_account requires role_mapping.unmapped to be deny: with no tenant binding, an \
+                 unmapped role would go to every account at the provider"
+                .to_string());
+        }
+        warn!(
+            target: "security_audit",
+            event = "oidc_tenant_binding_disabled",
+            issuer = %file.issuer,
+            unmapped = "deny",
+            "oidc.json sets allow_any_account without a tenant binding: every account at the OpenID provider that \
+             role_mapping maps can sign in"
+        );
+    } else {
+        let bound = exact_value_claims(&required_claims);
+        if !bound.is_empty() {
+            info!(issuer = %file.issuer, claims = %bound.join(", "), "required_claims ties sign-in to the tenant");
+        } else if holds_exact_value(&required_claims) {
+            info!(
+                issuer = %file.issuer,
+                "every required_claims entry mixes exact values with patterns or booleans: check that each allowed \
+                 value belongs to your tenant"
+            );
+        } else {
+            warn!(
+                issuer = %file.issuer,
+                "every required_claims entry is a boolean or a pattern, so it may not tie sign-in to your tenant: \
+                 either can match accounts of every tenant at the OpenID provider"
+            );
+        }
+    }
     Ok(CheckedFile {
         label,
         issuer: file.issuer,
@@ -425,6 +459,9 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
             let allowed = allowed
                 .into_iter()
                 .map(|value| match value {
+                    RawClaimValue::String(text) if text.trim().is_empty() => {
+                        Err(format!("{field} must not list a blank value"))
+                    }
                     RawClaimValue::String(text) => ValueMatcher::from_text(&field, &text),
                     RawClaimValue::Bool(value) => Ok(ValueMatcher::Bool(value)),
                 })
@@ -432,6 +469,55 @@ fn required_claims(file: BTreeMap<String, Vec<RawClaimValue>>) -> Result<BTreeMa
             Ok((claim, allowed))
         })
         .collect()
+}
+
+/// Claims tied to the issuer and to this client, not to a tenant: `iss` is the
+/// configured issuer, and `aud` and `azp` name `client_id`. An entry on one of
+/// them cannot tell one tenant's accounts from another's, so it binds nothing.
+const NON_TENANT_CLAIMS: &[&str] = &["iss", "aud", "azp"];
+
+/// The `required_claims` entries that can name a tenant: every entry but those
+/// on [`NON_TENANT_CLAIMS`].
+fn bindable_entries(
+    required: &BTreeMap<String, Vec<ValueMatcher>>
+) -> impl Iterator<Item = (&String, &Vec<ValueMatcher>)> {
+    required
+        .iter()
+        .filter(|(claim, _)| !NON_TENANT_CLAIMS.contains(&claim.as_str()))
+}
+
+/// Whether some `required_claims` entry is on a claim that can name a tenant.
+fn binds_anything(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+    bindable_entries(required)
+        .next()
+        .is_some()
+}
+
+/// Whether a value can name one tenant: an exact string. A boolean, the string
+/// `"true"` or `"false"` a provider may send in its place, or a `regex:`
+/// pattern can match accounts of any tenant.
+fn is_exact_tenant_value(value: &ValueMatcher) -> bool {
+    matches!(value, ValueMatcher::Exact(text) if text != "true" && text != "false")
+}
+
+/// The `required_claims` entries that allow only exact string values, the
+/// shape that can name one tenant.
+fn exact_value_claims(required: &BTreeMap<String, Vec<ValueMatcher>>) -> Vec<&str> {
+    bindable_entries(required)
+        .filter(|(_, allowed)| {
+            allowed
+                .iter()
+                .all(is_exact_tenant_value)
+        })
+        .map(|(claim, _)| claim.as_str())
+        .collect()
+}
+
+/// Whether any `required_claims` entry allows at least one exact string value.
+fn holds_exact_value(required: &BTreeMap<String, Vec<ValueMatcher>>) -> bool {
+    bindable_entries(required)
+        .flat_map(|(_, allowed)| allowed)
+        .any(is_exact_tenant_value)
 }
 
 fn non_empty(
@@ -746,7 +832,7 @@ mod tests {
         file["required_claim"] = binding;
 
         let refused = load(file).await.unwrap_err();
-        assert!(refused.contains("required_claim"), "{refused}");
+        assert!(refused.contains("unknown field"), "{refused}");
     }
 
     #[tokio::test]
@@ -764,6 +850,194 @@ mod tests {
                 .unwrap_err();
             assert!(refused.contains(expected), "{field}={value}: {refused}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_file_without_a_tenant_binding_is_refused_unless_it_opts_out() {
+        let mut unbound = valid_file();
+        unbound
+            .as_object_mut()
+            .unwrap()
+            .remove("required_claims");
+
+        for file in [unbound.clone(), with(valid_file(), &["required_claims"], json!({}))] {
+            let refused = load(file).await.unwrap_err();
+            assert!(refused.contains("required_claims"), "{refused}");
+            assert!(refused.contains("allow_any_account"), "{refused}");
+        }
+
+        let config = load(with(unbound, &["allow_any_account"], json!(true)))
+            .await
+            .unwrap();
+        assert!(
+            config
+                .required_claims
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn only_an_entry_of_exact_values_can_name_a_tenant() {
+        let exact = |text: &str| ValueMatcher::Exact(text.to_string());
+        let pattern = |text: &str| ValueMatcher::from_text("required_claims.x", text).unwrap();
+        let claims = |entries: &[(&str, Vec<ValueMatcher>)]| {
+            entries
+                .iter()
+                .cloned()
+                .map(|(claim, allowed)| (claim.to_string(), allowed))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        assert_eq!(exact_value_claims(&claims(&[("org_id", vec![exact("org_123")])])), ["org_id"]);
+        assert_eq!(
+            exact_value_claims(&claims(&[
+                ("email_verified", vec![ValueMatcher::Bool(true)]),
+                ("org_id", vec![exact("org_1"), exact("org_2")]),
+            ])),
+            ["org_id"]
+        );
+        for unbound in [
+            claims(&[("email_verified", vec![ValueMatcher::Bool(true)])]),
+            claims(&[("email_verified", vec![exact("true")])]),
+            claims(&[("org_id", vec![pattern("regex:.*")])]),
+            claims(&[("org_id", vec![exact("org_123"), pattern("regex:.*")])]),
+        ] {
+            assert!(exact_value_claims(&unbound).is_empty(), "{unbound:?}");
+        }
+    }
+
+    #[test]
+    fn a_mixed_entry_holds_an_exact_value_but_a_boolean_or_pattern_alone_does_not() {
+        let exact = |text: &str| ValueMatcher::Exact(text.to_string());
+        let pattern = |text: &str| ValueMatcher::from_text("required_claims.x", text).unwrap();
+        let claims = |allowed: Vec<ValueMatcher>| BTreeMap::from([("org_id".to_string(), allowed)]);
+
+        assert!(holds_exact_value(&claims(vec![exact("org_1"), pattern("regex:org_1_.*")])));
+        assert!(!holds_exact_value(&claims(vec![pattern("regex:.*")])));
+        assert!(!holds_exact_value(&claims(vec![ValueMatcher::Bool(true)])));
+        assert!(!holds_exact_value(&claims(vec![exact("true")])));
+    }
+
+    #[tokio::test]
+    async fn a_blank_required_claim_value_is_refused_like_a_blank_claim_name() {
+        for blank in ["", "  "] {
+            let refused = load(with(valid_file(), &["required_claims"], json!({ "org_id": [blank] })))
+                .await
+                .unwrap_err();
+            assert!(refused.contains("required_claims.org_id"), "{refused}");
+            assert!(refused.contains("blank"), "{refused}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claim_tied_to_the_issuer_or_client_is_no_tenant_binding() {
+        let issuer_and_client_claims =
+            json!({ "iss": ["https://idp.example.com"], "aud": ["agent-stream"], "azp": ["agent-stream"] });
+        for claims in [json!({ "iss": ["https://idp.example.com"] }), issuer_and_client_claims] {
+            let refused = load(with(valid_file(), &["required_claims"], claims))
+                .await
+                .unwrap_err();
+            assert!(refused.contains("iss, aud and azp"), "{refused}");
+            assert!(refused.contains("allow_any_account"), "{refused}");
+        }
+
+        let config = load(with(
+            valid_file(),
+            &["required_claims"],
+            json!({ "iss": ["https://idp.example.com"], "org_id": ["org_123"] }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(config.required_claims.len(), 2, "an entry that binds keeps its verified neighbours");
+
+        let opted_out = with(valid_file(), &["required_claims"], json!({ "iss": ["https://idp.example.com"] }));
+        assert!(
+            load(with(opted_out, &["allow_any_account"], json!(true)))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_opt_out_is_logged_as_a_security_audit_event_and_a_bound_file_is_not() {
+        use crate::observability::log_capture::capture_logs;
+        let mut unbound = with(valid_file(), &["allow_any_account"], json!(true));
+        unbound
+            .as_object_mut()
+            .unwrap()
+            .remove("required_claims");
+
+        let (logs, config) = capture_logs(load(unbound)).await;
+        config.unwrap();
+        assert!(logs.contains("security_audit"), "{logs}");
+        assert!(logs.contains("oidc_tenant_binding_disabled"), "{logs}");
+        assert!(logs.contains("idp.example.com"), "{logs}");
+
+        let (logs, config) = capture_logs(load(valid_file())).await;
+        config.unwrap();
+        assert!(!logs.contains("oidc_tenant_binding_disabled"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn startup_says_how_far_required_claims_ties_sign_in_to_a_tenant() {
+        use crate::observability::log_capture::capture_logs;
+        let logs_for = |claims: Value| async move {
+            let (logs, config) = capture_logs(load(with(valid_file(), &["required_claims"], claims))).await;
+            config.unwrap();
+            logs
+        };
+
+        let exact = logs_for(json!({ "org_id": ["org_123"], "email_verified": [true] })).await;
+        assert!(exact.contains("ties sign-in to the tenant"), "{exact}");
+        assert!(exact.contains("org_id"), "{exact}");
+        assert!(!exact.contains("WARN"), "{exact}");
+
+        let mixed = logs_for(json!({ "org_id": ["org_1", "regex:org_1_.*"] })).await;
+        assert!(mixed.contains("mixes exact values"), "{mixed}");
+        assert!(!mixed.contains("WARN"), "{mixed}");
+
+        for weak in
+            [json!({ "email_verified": [true] }), json!({ "org_id": ["regex:.*"] }), json!({ "org_id": ["true"] })]
+        {
+            let weak = logs_for(weak).await;
+            assert!(weak.contains("WARN"), "{weak}");
+            assert!(weak.contains("boolean or a pattern"), "{weak}");
+        }
+
+        let issuer_claim_beside_a_boolean =
+            logs_for(json!({ "iss": ["https://idp.example.com"], "email_verified": [true] })).await;
+        assert!(issuer_claim_beside_a_boolean.contains("WARN"), "{issuer_claim_beside_a_boolean}");
+    }
+
+    #[tokio::test]
+    async fn opting_out_of_the_tenant_binding_needs_unmapped_accounts_denied() {
+        let mut unbound = with(valid_file(), &["allow_any_account"], json!(true));
+        unbound
+            .as_object_mut()
+            .unwrap()
+            .remove("required_claims");
+
+        for role in ["administrator", "poweruser", "user"] {
+            let refused = load(with(unbound.clone(), &["role_mapping", "unmapped"], json!(role)))
+                .await
+                .unwrap_err();
+            assert!(refused.contains("allow_any_account"), "{refused}");
+            assert!(refused.contains("role_mapping.unmapped"), "{refused}");
+        }
+
+        let bound = with(valid_file(), &["allow_any_account"], json!(true));
+        let config = load(with(bound, &["role_mapping", "unmapped"], json!("user")))
+            .await
+            .unwrap();
+        assert_eq!(config.role_mapping.unmapped, Some(UserRole::User), "a bound file may still grant a role");
+    }
+
+    #[tokio::test]
+    async fn opting_out_while_binding_claims_still_requires_them() {
+        let config = load(with(valid_file(), &["allow_any_account"], json!(true)))
+            .await
+            .unwrap();
+        assert_eq!(config.required_claims["org_id"], [ValueMatcher::Exact("org_123".to_string())]);
     }
 
     #[test]

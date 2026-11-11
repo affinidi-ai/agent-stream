@@ -103,7 +103,10 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
 
 OIDC mode signs people in with one OpenID provider, configured in `oidc.json`
 ([`src/auth/oidc/`](../src/auth/oidc/)), using the authorization code flow with PKCE. Its
-fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson).
+fields are in [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#oidcjson). The file
+must bind sign-in to a tenant at the provider: startup stops unless `required_claims` has an
+entry on a claim other than `iss`, `aud` or `azp`, or `allow_any_account` is `true` with
+`role_mapping.unmapped` left at `deny`.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |

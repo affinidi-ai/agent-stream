@@ -607,6 +607,18 @@ async fn an_account_of_another_tenant_is_refused_before_any_user_is_created() {
 }
 
 #[tokio::test]
+async fn an_account_of_another_tenant_signs_in_when_no_required_claims_are_configured() {
+    let flow = Flow::with_config(|config| config.required_claims.clear()).await;
+
+    let response = flow
+        .sign_in(|claims| claims["org_id"] = json!("org_999"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(flow.user().await.is_some());
+}
+
+#[tokio::test]
 async fn an_account_whose_role_was_removed_upstream_is_refused_and_signed_out_everywhere() {
     let flow = Flow::new().await;
     assert_eq!(
