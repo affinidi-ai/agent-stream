@@ -3,7 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
-import { DELETE_USER_TITLE, keptAccountLabel } from '../utils/userDelete';
+import {
+  DELETE_USER_SUCCESS,
+  DELETE_USER_TITLE,
+  KEPT_ACCOUNT_HEADING,
+  keptAccountDetail,
+  keptAccountLabel,
+} from '../utils/userDelete';
 import { usePermissions } from '../context/PermissionsContext';
 import SearchInput from '../components/shared/SearchInput';
 
@@ -97,7 +103,7 @@ const UsersPage: React.FC = () => {
     async (user: User) => {
       try {
         await apiClient.delete(`/users/${user.user_id}`);
-        setSuccess('User deleted successfully');
+        setSuccess(DELETE_USER_SUCCESS);
         setTimeout(() => setSuccess(null), 3000);
         fetchUsers();
       } catch (err: any) {
@@ -449,9 +455,9 @@ const UsersPage: React.FC = () => {
                     </div>
                     {keptAccountLabel(selectedUser) && (
                       <div className="mb-2" data-testid="users-modal-kept-account">
-                        <strong>Deleted:</strong>{' '}
+                        <strong>{KEPT_ACCOUNT_HEADING}</strong>{' '}
                         <span className="text-muted">
-                          kept disabled for the {keptAccountLabel(selectedUser)}
+                          {keptAccountDetail(keptAccountLabel(selectedUser) ?? '')}
                         </span>
                       </div>
                     )}

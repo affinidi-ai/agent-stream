@@ -62,7 +62,8 @@ Sign-in:
 
 - `login/start` for an unknown username, or for a user who is not approved, returns a
   challenge that allows no credentials, so the response does not reveal which case applies.
-- `login/finish` answers `401` when the passkey does not verify. On success it records the
+- `login/finish` answers `401` when the passkey does not verify, and when the user was
+  deleted or disabled after `login/start`. On success it records the
   user's last sign-in and returns `session_token` and `consent_required`, and sets the
   session cookie.
 
@@ -92,9 +93,13 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
   `administrator`. See [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
 - When provisioning a new user would pass the appliance user limit, the ACS answers `403`
   with a readable page instead of opening a session.
-- A user who is not approved (an administrator disabled or deleted them) is refused with `403`
-  and a readable page that does not say why, and no session opens. Deleting a SAML user keeps
-  their record, as [Deleting an OIDC or SAML user](#deleting-an-oidc-or-saml-user) describes.
+- A user who is not approved (for example an administrator disabled or deleted them) is
+  refused with `403` and a readable page that does not say why, and no session opens.
+  Deleting a SAML user keeps their record, as
+  [Deleting an OIDC or SAML user](#deleting-an-oidc-or-saml-user) describes.
+- When the username the IdP asserts is already held by another user, the ACS refuses with the
+  same page and creates or changes nothing, as an OIDC sign-in does. An administrator resolves
+  the clash, for example by changing the other user's username.
 - On success the ACS sets the session cookie and returns a page that keeps the session token
   for the dashboard and redirects to `/`. The page's one inline script carries a fresh nonce,
   and its `Content-Security-Policy` runs only that script (see
@@ -299,17 +304,25 @@ the OIDC log).
 
 - **Cleared:** first and last name, email, department, job title, avatar link and passkeys.
   The username becomes the user id and the role goes back to `user`.
-- **Kept:** the user id, the created and last login times, and the provider account the
-  sign-in matches on: the OIDC issuer and `sub`, or the SAML user ID. The Users page shows
-  the account on a kept record, so an administrator knows whose sign-in approving it allows.
-- **Every delete:** the user's sessions end, the access tokens bound to the user are revoked,
-  and an uploaded avatar image file is removed (the shared default avatar never is). The
-  `user.deleted` event fires once; deleting a kept record again changes nothing.
+- **Kept:** the user id, the created and last login times, the user's notifications and
+  personal settings (both are stored by user id, so an approved-again user gets them back),
+  and the provider account the sign-in matches on: the OIDC issuer and `sub`, or the SAML
+  user ID. The Users and Edit User pages show the account on a kept record, and keep showing
+  it after approval until the user's next sign-in gives the record a username again, so an
+  administrator knows whose sign-in approving it allows.
+- **Every delete:** the user's sessions end, the access tokens bound to the user and the
+  tokens the user created for other subjects are revoked (see
+  [`ACCESS_TOKENS.md`](ACCESS_TOKENS.md)), and the uploaded avatar image files are removed
+  (the shared default avatar never is). A file that cannot be removed is logged and does not
+  stop the delete. The `user.deleted` integration event fires once, and the delete is logged
+  on the `audit` target as `user.deleted`; deleting a kept record again changes nothing.
 - **User limit:** a kept record does not count toward the `users` limit. Approving it again
   gives it a seat, so that approval answers `403` when the limit is reached.
 - **Signing in again:** an administrator sets the status back to `approved`. The next
   sign-in is the same user, with the role set from the claim or attribute mapping again. A
-  role in the kept record is not used.
+  role in the kept record is not used. Approving fires `user.approved` (without the welcome
+  notification) as well as `user.updated`, so an integration that offboarded the person on
+  `user.deleted` sees them return, and revokes any access token still bound to the user.
 - Terms Acceptance Records survive user deletion; see
   [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md).
 
@@ -449,8 +462,16 @@ Every system-settings and user-settings response sends `prometheus_auth_password
 
 ## Known limitations
 
-A user deleted before an OIDC or SAML delete kept the record has no record left, so their
-next sign-in creates a new approved user. Disable that user to keep them out.
+- A user whose record was removed has no record left, so their next sign-in creates a new
+  approved user: this is the case for a user deleted before delete kept OIDC and SAML
+  records. Disable such a user to keep them out.
+- A kept record is matched by its exact OIDC issuer and `sub`, or by its SAML user ID. After
+  you change the issuer, the SAML `user_id` mapping, or the sign-in mode, a deleted person's
+  next sign-in finds no record and creates a new approved user. Disable deleted users by hand
+  before the change.
+- No action removes a kept record, because removing it lets the account sign in again. To
+  answer an erasure request, delete the record's file from `_storage/`; the account's next
+  sign-in then creates a new approved user, so disable the account at the provider first.
 
 ## Related
 

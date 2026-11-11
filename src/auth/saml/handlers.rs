@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use super::service::SamlService;
-use super::user_provisioning::{UserNotApproved, provision_user_from_saml};
+use super::user_provisioning::{UserNotApproved, UsernameTaken, provision_user_from_saml};
 use crate::auth::session::SessionManager;
 use crate::auth::session_cookie::{
     SAML_CORRELATION_COOKIE_NAME, build_saml_correlation_cookie, clear_saml_correlation_cookie,
@@ -149,21 +149,10 @@ pub async fn saml_acs(
         Ok(user) => user,
         Err(e) => {
             error!("Failed to provision user from SAML: {}", e);
-            // Surface an appliance user-limit breach as a readable page (403) rather
-            // than a blank 500, since the browser lands here straight from the IdP.
-            if let Some(limit) = e.downcast_ref::<crate::config::LimitExceeded>() {
-                return Ok((StatusCode::FORBIDDEN, Html(sign_in_error_page(&limit.message()))).into_response());
-            }
-            if e.downcast_ref::<UserNotApproved>()
-                .is_some()
-            {
-                return Ok((
-                    StatusCode::FORBIDDEN,
-                    Html(sign_in_error_page("This account is not allowed to sign in.")),
-                )
-                    .into_response());
-            }
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+            return match provisioning_refusal(&e) {
+                Some(response) => Ok(response),
+                None => Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
+            };
         }
     };
 
@@ -341,4 +330,49 @@ pub async fn saml_logout_generic(
     response_headers.insert(axum::http::header::SET_COOKIE, session_cookie);
 
     (response_headers, StatusCode::OK).into_response()
+}
+
+/// The readable page (403, no session cookie) that answers a sign-in refused
+/// while provisioning, since the browser lands here straight from the IdP. An
+/// unexpected failure has none.
+fn provisioning_refusal(error: &anyhow::Error) -> Option<Response> {
+    let message = if let Some(limit) = error.downcast_ref::<crate::config::LimitExceeded>() {
+        limit.message()
+    } else if error
+        .downcast_ref::<UserNotApproved>()
+        .is_some()
+        || error
+            .downcast_ref::<UsernameTaken>()
+            .is_some()
+    {
+        "This account is not allowed to sign in.".to_string()
+    } else {
+        return None;
+    };
+    Some((StatusCode::FORBIDDEN, Html(sign_in_error_page(&message))).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_user_who_is_not_approved_or_whose_username_is_taken_gets_a_403_page_and_no_session() {
+        for refusal in [anyhow::Error::new(UserNotApproved), anyhow::Error::new(UsernameTaken)] {
+            let response = provisioning_refusal(&refusal).expect("a refusal has a page");
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(
+                response
+                    .headers()
+                    .get(SET_COOKIE)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unexpected_provisioning_failure_has_no_refusal_page() {
+        assert!(provisioning_refusal(&anyhow::anyhow!("disk full")).is_none());
+    }
 }

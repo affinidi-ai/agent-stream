@@ -195,6 +195,13 @@ struct ScopedMockPat {
 
 #[async_trait]
 impl PatAuthenticator for ScopedMockPat {
+    async fn revoke_for_user(
+        &self,
+        _user_id: &str,
+    ) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
     async fn authenticate(
         &self,
         token: &str,

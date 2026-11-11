@@ -784,6 +784,37 @@ impl Flow {
         .unwrap()
         .status()
     }
+
+    async fn update_status_through_route(
+        &self,
+        caller: &UserData,
+        user_id: &str,
+        status: &str,
+    ) -> StatusCode {
+        let app = Router::new()
+            .route("/v1/users/{user_id}", axum::routing::put(crate::auth_manager::handlers::update_user))
+            .layer(axum::Extension(None::<Arc<dyn PatAuthenticator>>))
+            .layer(axum::Extension(
+                self.oidc
+                    .session_manager
+                    .clone(),
+            ))
+            .layer(axum::Extension(self.oidc.storage.clone()))
+            .layer(axum::Extension(Arc::new(RbacConfig::default())))
+            .layer(axum::Extension(None::<Arc<crate::integrations::FileSystemNotificationStore>>))
+            .layer(axum::Extension(caller.user_id.clone()));
+        app.oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/users/{user_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "status": status }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
 }
 
 #[tokio::test]
@@ -832,14 +863,13 @@ async fn a_deleted_user_signs_in_as_the_same_user_once_an_administrator_approves
     let user = flow.user().await.unwrap();
     flow.delete_through_route(&admin, &user.user_id, None)
         .await;
-    flow.oidc
-        .storage
-        .update_user(&user.user_id, None, Some(UserStatus::Approved))
-        .await
-        .unwrap();
+    let approved = flow
+        .update_status_through_route(&admin, &user.user_id, "approved")
+        .await;
 
     let response = flow.sign_in(|_| {}).await;
 
+    assert_eq!(approved, StatusCode::OK);
     assert_eq!(response.status(), StatusCode::OK);
     let back = flow.user().await.unwrap();
     assert_eq!(back.user_id, user.user_id);

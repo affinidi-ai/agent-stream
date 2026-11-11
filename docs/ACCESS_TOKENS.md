@@ -34,8 +34,11 @@ The caller sends the secret as `Authorization: Bearer aspat_...`. When no valid 
 matches the bearer, `require_session_auth` tries it as an access token. Authentication
 fails (`401`) when the token is unknown, revoked, or expired, when any ancestor in its
 delegation chain is inactive, or when its bound user is no longer approved. Deleting a user
-revokes every token bound to them, with the tokens delegated from those, so approving a kept
-OIDC or SAML record again does not bring them back. A stored
+revokes every token bound to them and every token they created for another subject (for
+example a service account), with the tokens delegated from those. Approving a kept OIDC or
+SAML record again revokes any that remain, so none comes back. A service account's token
+that the deleted person created stops working too, so an administrator creates a new one.
+A stored
 resource scope that no longer compiles makes the token unusable rather than unscoped.
 
 Effective permissions on a feature-gated route are the bound user's role intersected with

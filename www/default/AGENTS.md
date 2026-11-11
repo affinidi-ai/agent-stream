@@ -163,9 +163,12 @@ buttons, empty states, list/table, page shell) and a new-page recipe, see
     toast with DOM APIs for this reason. Where a view must build an HTML string
     (`dangerouslySetInnerHTML`, the log viewers), every interpolated value that is
     not a constant goes through `escapeHtml` (`utils/escapeHtml.ts`).
-15. The wording that says what deleting a user does (the delete button title, and the
-    label of a kept user's provider account) comes from `utils/userDelete.ts`, never
-    inline, so every place that deletes a user says the same thing.
+15. The wording that says what deleting a user does (the delete button title, the success
+    toast, the "Deleted:" line and the label of a kept user's provider account, and the
+    notice on the Edit User page) comes from `utils/userDelete.ts`, never inline, so every
+    place that deletes a user says the same thing. The Edit User page shows the provider
+    account and the deleted notice for a disabled user bound to one, with test ids
+    `edit-user-kept-account` and `edit-user-deleted-notice`.
 
 ## Surface builder
 

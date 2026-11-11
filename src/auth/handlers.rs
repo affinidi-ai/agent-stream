@@ -439,7 +439,7 @@ pub async fn login_finish(
         })?;
 
     // Load user to get user_id
-    let mut user = auth_state
+    let user = auth_state
         .storage
         .load_user(&username)
         .await
@@ -452,15 +452,14 @@ pub async fn login_finish(
             StatusCode::UNAUTHORIZED
         })?;
 
-    // Update last_logged_in timestamp
-    user.last_logged_in = Some(chrono::Utc::now());
-    if let Err(e) = auth_state
+    let user = auth_state
         .storage
-        .save_user(&user)
+        .record_login(&user.user_id)
         .await
-    {
-        error!("Failed to update last_logged_in for user {}: {}", username, e);
-    }
+        .map_err(|e| {
+            error!("Refused sign-in of user {}: {}", username, e);
+            StatusCode::UNAUTHORIZED
+        })?;
 
     let finalized_session = SessionManagerFinalizer::new(
         auth_state

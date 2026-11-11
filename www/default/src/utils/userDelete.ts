@@ -1,7 +1,14 @@
 export const DELETE_USER_TITLE =
   'Delete user. A user who signs in through OpenID Connect or SAML is disabled and kept instead, so they cannot sign in until an administrator approves them again.';
 
-interface KeptAccount {
+export const DELETE_USER_SUCCESS = 'User deleted successfully';
+
+export const KEPT_ACCOUNT_HEADING = 'Deleted:';
+
+export const DELETED_USER_NOTICE =
+  'This user was deleted. Their account stays refused at sign-in until an administrator approves them again.';
+
+export interface KeptAccount {
   oidc?: { issuer: string; subject: string };
   saml_id?: string;
 }
@@ -15,3 +22,8 @@ export const keptAccountLabel = (user: KeptAccount): string | null => {
   }
   return null;
 };
+
+export const keptAccountDetail = (label: string): string => `kept disabled for the ${label}`;
+
+export const isDeletedKeptUser = (user: KeptAccount & { status: string }): boolean =>
+  user.status === 'disabled' && keptAccountLabel(user) !== null;

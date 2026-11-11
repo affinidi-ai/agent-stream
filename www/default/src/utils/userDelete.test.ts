@@ -1,4 +1,9 @@
-import { DELETE_USER_TITLE, keptAccountLabel } from './userDelete';
+import {
+  DELETE_USER_TITLE,
+  isDeletedKeptUser,
+  keptAccountDetail,
+  keptAccountLabel,
+} from './userDelete';
 
 describe('keptAccountLabel', () => {
   it('names the OpenID Connect account by subject and issuer', () => {
@@ -20,5 +25,27 @@ describe('DELETE_USER_TITLE', () => {
   it('says a federated user is kept and can return only when approved again', () => {
     expect(DELETE_USER_TITLE).toContain('OpenID Connect or SAML');
     expect(DELETE_USER_TITLE).toContain('approves them again');
+  });
+});
+
+describe('keptAccountDetail', () => {
+  it('says the record is kept disabled for the account', () => {
+    expect(keptAccountDetail('SAML account saml-1')).toBe(
+      'kept disabled for the SAML account saml-1'
+    );
+  });
+});
+
+describe('isDeletedKeptUser', () => {
+  const oidc = { issuer: 'https://idp.example.com', subject: 'sub-1' };
+
+  it('is true for a disabled user bound to a provider account', () => {
+    expect(isDeletedKeptUser({ status: 'disabled', oidc })).toBe(true);
+    expect(isDeletedKeptUser({ status: 'disabled', saml_id: 'saml-1' })).toBe(true);
+  });
+
+  it('is false for a user who is approved again or has no provider account', () => {
+    expect(isDeletedKeptUser({ status: 'approved', oidc })).toBe(false);
+    expect(isDeletedKeptUser({ status: 'disabled' })).toBe(false);
   });
 });

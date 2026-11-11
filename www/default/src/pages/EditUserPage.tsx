@@ -3,7 +3,12 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
-import { DELETE_USER_TITLE } from '../utils/userDelete';
+import {
+  DELETED_USER_NOTICE,
+  DELETE_USER_TITLE,
+  isDeletedKeptUser,
+  keptAccountLabel,
+} from '../utils/userDelete';
 
 interface User {
   username: string;
@@ -19,6 +24,8 @@ interface User {
   department?: string;
   job_title?: string;
   avatar_path?: string;
+  oidc?: { issuer: string; subject: string };
+  saml_id?: string;
 }
 
 interface UserForm {
@@ -174,6 +181,16 @@ const EditUserPage: React.FC = () => {
               This user is an administrator and cannot be deleted or downgraded below power user.
             </div>
           )}
+          {user && isDeletedKeptUser(user) && (
+            <div
+              className="alert alert-secondary"
+              role="alert"
+              data-testid="edit-user-deleted-notice"
+            >
+              <i className="fas fa-user-slash me-2"></i>
+              {DELETED_USER_NOTICE}
+            </div>
+          )}
           {form.status === 'new' && (
             <div className="alert alert-info" role="alert">
               <i className="fas fa-info-circle me-2"></i>
@@ -185,6 +202,11 @@ const EditUserPage: React.FC = () => {
             <div className="mb-3">
               <label className="form-label">Username</label>
               <input type="text" className="form-control" value={user?.username || ''} disabled />
+              {user && keptAccountLabel(user) && (
+                <div className="form-text" data-testid="edit-user-kept-account">
+                  {keptAccountLabel(user)}
+                </div>
+              )}
             </div>
             {created && (
               <div className="row">

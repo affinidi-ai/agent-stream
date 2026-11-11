@@ -14,8 +14,15 @@ use crate::auth::types::{UserRole, UserStatus};
 #[error("the user is not approved")]
 pub struct UserNotApproved;
 
+/// The username the identity provider asserted is already held by another
+/// user, so nothing is created or updated.
+#[derive(Debug, thiserror::Error)]
+#[error("the username is held by another user")]
+pub struct UsernameTaken;
+
 /// Provision or update a user from SAML attributes. A user that exists and is
-/// not approved is refused with [`UserNotApproved`].
+/// not approved is refused with [`UserNotApproved`], and a username another
+/// user already holds with [`UsernameTaken`].
 pub async fn provision_user_from_saml(
     storage: &PasskeyStorage,
     attributes: &HashMap<String, String>,
@@ -88,6 +95,18 @@ pub async fn provision_user_from_saml(
     let existing_user = storage
         .load_user_by_saml_id(user_id_attr)
         .await?;
+
+    if storage
+        .username_held_by_other(
+            username.as_str(),
+            existing_user
+                .as_ref()
+                .map(|user| user.user_id.as_str()),
+        )
+        .await?
+    {
+        return Err(anyhow::Error::new(UsernameTaken));
+    }
 
     let user = if let Some(mut user) = existing_user {
         if user.status != UserStatus::Approved {
@@ -182,18 +201,20 @@ pub async fn provision_user_from_saml(
             if let Some(avatar_filename) =
                 fetch_and_save_avatar(&graph_config, &user_email, &user_id, &avatars_storage_path).await
             {
-                // Update user with avatar path (relative path: avatars/filename)
                 let relative_avatar_path = format!("avatars/{}", avatar_filename);
-                if let Ok(Some(mut user)) = storage
-                    .load_user_by_id(&user_id)
+                match storage
+                    .set_avatar_if_approved(&user_id, relative_avatar_path.clone())
                     .await
                 {
-                    user.avatar_path = Some(relative_avatar_path.clone());
-                    if let Err(e) = storage.save_user(&user).await {
-                        warn!("Failed to update user with avatar path: {}", e);
-                    } else {
-                        info!("Successfully updated user {} with avatar: {}", user_id, relative_avatar_path);
+                    Ok(true) => {
+                        info!("Successfully updated user {} with avatar: {}", user_id, relative_avatar_path)
                     }
+                    Ok(false) => {
+                        storage
+                            .remove_avatar_files(&user_id, Some(&relative_avatar_path))
+                            .await
+                    }
+                    Err(e) => warn!("Failed to update user with avatar path: {}", e),
                 }
             }
         } else {
@@ -480,13 +501,89 @@ mod tests {
         (first, second)
     }
 
+    fn attributes_named(
+        id: &str,
+        username: &str,
+    ) -> HashMap<String, String> {
+        HashMap::from([("id".to_string(), id.to_string()), ("username".to_string(), username.to_string())])
+    }
+
+    #[tokio::test]
+    async fn a_new_account_asserting_a_username_another_user_holds_is_refused_and_nothing_is_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (_, bob) = two_users(&storage).await;
+
+        let refused = provision_user_from_saml(&storage, &attributes_named("name-id-2", "bob"), &config(), "")
+            .await
+            .unwrap_err();
+
+        assert!(
+            refused
+                .downcast_ref::<UsernameTaken>()
+                .is_some(),
+            "{refused:?}"
+        );
+        assert_eq!(
+            storage
+                .list_users()
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let holder = storage
+            .load_user_by_id(&bob.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(holder.saml_id.as_deref(), Some("bob"), "the holder is untouched");
+    }
+
+    #[tokio::test]
+    async fn an_existing_account_whose_asserted_username_is_now_held_by_another_user_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (alice, _) = two_users(&storage).await;
+
+        let refused = provision_user_from_saml(&storage, &attributes_named("alice", "bob"), &config(), "")
+            .await
+            .unwrap_err();
+
+        assert!(
+            refused
+                .downcast_ref::<UsernameTaken>()
+                .is_some(),
+            "{refused:?}"
+        );
+        let stored = storage
+            .load_user_by_id(&alice.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn an_account_signing_in_again_with_its_own_username_is_not_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (_, bob) = two_users(&storage).await;
+
+        let again = provision_user_from_saml(&storage, &attributes("bob"), &config(), "")
+            .await
+            .unwrap();
+
+        assert_eq!(again.user_id, bob.user_id);
+    }
+
     #[tokio::test]
     async fn a_user_who_is_not_approved_is_refused_and_left_unchanged() {
         let temp = tempfile::tempdir().unwrap();
         let storage = storage(&temp).await;
         let (_, bob) = two_users(&storage).await;
         storage
-            .update_user("bob", None, Some(UserStatus::Disabled))
+            .update_user(&bob.user_id, None, Some(UserStatus::Disabled), &crate::config::LimitsConfig::default())
             .await
             .unwrap();
 
@@ -550,7 +647,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .update_user(&bob.user_id, None, Some(UserStatus::Approved))
+            .update_user(&bob.user_id, None, Some(UserStatus::Approved), &crate::config::LimitsConfig::default())
             .await
             .unwrap();
 

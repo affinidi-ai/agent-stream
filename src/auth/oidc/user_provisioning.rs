@@ -149,12 +149,11 @@ async fn free_username<const N: usize>(
     own_user_id: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     for candidate in candidates {
-        match storage
-            .load_user(candidate)
+        if !storage
+            .username_held_by_other(candidate, own_user_id)
             .await?
         {
-            Some(holder) if Some(holder.user_id.as_str()) != own_user_id => continue,
-            _ => return Ok(Some(candidate.clone())),
+            return Ok(Some(candidate.clone()));
         }
     }
     Ok(None)

@@ -15,6 +15,31 @@ use crate::identity::handlers;
 use crate::identity::state::IdentityApiState;
 use crate::rbac::Feature;
 
+/// The user management routes with the layers every one of their handlers
+/// extracts: the caller's session, user storage, the access-token authenticator
+/// that a delete revokes tokens through, and the RBAC and metrics state.
+fn user_management_routes(
+    pat_authenticator: Option<std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator>>,
+    sess_mgr: std::sync::Arc<crate::auth::session::SessionManager>,
+    storage: std::sync::Arc<crate::auth::storage::PasskeyStorage>,
+    notification_store: Option<std::sync::Arc<crate::integrations::FileSystemNotificationStore>>,
+    rbac_config: std::sync::Arc<crate::rbac::RbacConfig>,
+    metrics_store: std::sync::Arc<crate::metrics::MetricsStore>,
+) -> Router {
+    Router::new()
+        .route("/v1/users", get(crate::auth_manager::handlers::list_users))
+        .route("/v1/users/{user_id}", get(crate::auth_manager::handlers::get_user))
+        .route("/v1/users/{user_id}", put(crate::auth_manager::handlers::update_user))
+        .route("/v1/users/{user_id}", delete(crate::auth_manager::handlers::delete_user))
+        .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
+        .layer(Extension(pat_authenticator))
+        .layer(Extension(sess_mgr))
+        .layer(Extension(storage))
+        .layer(Extension(notification_store))
+        .layer(Extension(rbac_config))
+        .layer(Extension(metrics_store))
+}
+
 fn create_pre_save_llm_connection_test_router<S>(gate: RbacGuard) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -759,20 +784,14 @@ pub fn create_identity_api_router(
         // These handlers are auth-mode-agnostic — they need PasskeyStorage,
         // RbacConfig, and MetricsStore (all available in both Passkey and SAML
         // modes), not the Passkey-specific AuthState.
-        router = router.merge(
-            Router::new()
-                .route("/v1/users", get(crate::auth_manager::handlers::list_users))
-                .route("/v1/users/{user_id}", get(crate::auth_manager::handlers::get_user))
-                .route("/v1/users/{user_id}", put(crate::auth_manager::handlers::update_user))
-                .route("/v1/users/{user_id}", delete(crate::auth_manager::handlers::delete_user))
-                .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
-                .layer(Extension(pat_authenticator.clone()))
-                .layer(Extension(sess_mgr.clone()))
-                .layer(Extension(storage.clone()))
-                .layer(Extension(notification_store.clone()))
-                .layer(Extension(rbac_config.clone()))
-                .layer(Extension(state.metrics_store.clone())),
-        );
+        router = router.merge(user_management_routes(
+            pat_authenticator.clone(),
+            sess_mgr.clone(),
+            storage.clone(),
+            notification_store.clone(),
+            rbac_config.clone(),
+            state.metrics_store.clone(),
+        ));
 
         // Add profile and permissions routes with session auth middleware.
         // The body limit caps the avatar multipart upload so an oversized file
@@ -1881,6 +1900,13 @@ mod pipe_connection_test_route_tests {
 
     #[async_trait::async_trait]
     impl crate::auth_manager::pat::PatAuthenticator for IntegrationPat {
+        async fn revoke_for_user(
+            &self,
+            _user_id: &str,
+        ) -> std::io::Result<usize> {
+            Ok(0)
+        }
+
         async fn authenticate(
             &self,
             token: &str,
@@ -3339,6 +3365,13 @@ mod token_scope_route_tests {
 
     #[async_trait::async_trait]
     impl PatAuthenticator for AdminTokens {
+        async fn revoke_for_user(
+            &self,
+            _user_id: &str,
+        ) -> std::io::Result<usize> {
+            Ok(0)
+        }
+
         async fn authenticate(
             &self,
             token: &str,
@@ -3487,6 +3520,86 @@ mod token_scope_route_tests {
                 assert_eq!(status, StatusCode::OK, "an unscoped token or session must reach {path}");
             }
         }
+    }
+
+    /// Records the users whose tokens a delete asked to revoke.
+    struct RecordingTokens(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl PatAuthenticator for RecordingTokens {
+        async fn revoke_for_user(
+            &self,
+            user_id: &str,
+        ) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(user_id.to_string());
+            Ok(1)
+        }
+
+        async fn authenticate(
+            &self,
+            _token: &str,
+        ) -> Option<PatPrincipal> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_through_the_user_routes_revokes_their_access_tokens() {
+        let fixture = admin_fixture().await;
+        let now = chrono::Utc::now();
+        fixture
+            .storage
+            .save_user(&UserData {
+                user_id: "member-1".to_string(),
+                username: "member".to_string(),
+                passkeys: Vec::new(),
+                role: UserRole::User,
+                status: UserStatus::Approved,
+                is_primary: false,
+                first_name: None,
+                last_name: None,
+                email: None,
+                department: None,
+                job_title: None,
+                avatar_path: None,
+                created_at: now,
+                updated_at: now,
+                last_logged_in: None,
+                saml_id: None,
+                oidc: None,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        let tokens = Arc::new(RecordingTokens(std::sync::Mutex::new(Vec::new())));
+        let app = user_management_routes(
+            Some(tokens.clone()),
+            fixture.sessions.clone(),
+            fixture.storage.clone(),
+            None,
+            Arc::new(crate::rbac::RbacConfig::default()),
+            Arc::new(crate::metrics::MetricsStore::new(10)),
+        );
+
+        let status = app
+            .oneshot(request("DELETE", "/v1/users/member-1", &fixture.session_token))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(*tokens.0.lock().unwrap(), vec!["member-1".to_string()]);
+        assert!(
+            fixture
+                .storage
+                .load_user_by_id("member-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Router state for exercising route gates only. A request that passes its

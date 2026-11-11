@@ -28,19 +28,20 @@ pub struct User {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_logged_in: Option<chrono::DateTime<chrono::Utc>>,
     /// The OpenID provider account of a deleted user's kept record, so an
-    /// administrator can tell whose sign-in approving it allows. Absent for
-    /// every other user.
+    /// administrator can tell whose sign-in approving it allows. It stays
+    /// until the user's next sign-in gives the record a username again.
+    /// Absent for every other user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcIdentity>,
-    /// The SAML account of a deleted user's kept record. Absent for every
-    /// other user.
+    /// The SAML account of a deleted user's kept record, shown for as long as
+    /// the OpenID account is. Absent for every other user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saml_id: Option<String>,
 }
 
 impl From<UserData> for User {
     fn from(user: UserData) -> Self {
-        let kept = user.deleted_at.is_some();
+        let kept = user.deleted_at.is_some() || user.username == user.user_id;
         Self {
             username: user.username,
             user_id: user.user_id,
@@ -145,5 +146,21 @@ mod tests {
         let json = serde_json::to_value(&user).unwrap();
         assert_eq!(json["oidc"]["subject"], "sub-1");
         assert_eq!(json["saml_id"], "saml-1");
+    }
+
+    #[test]
+    fn a_re_approved_record_keeps_exposing_the_account_until_its_next_sign_in() {
+        let mut data = user_data();
+        data.username = data.user_id.clone();
+        data.deleted_at = None;
+
+        let user = User::from(data);
+
+        assert_eq!(
+            user.oidc
+                .map(|oidc| oidc.subject),
+            Some("sub-1".to_string())
+        );
+        assert_eq!(user.saml_id.as_deref(), Some("saml-1"));
     }
 }
