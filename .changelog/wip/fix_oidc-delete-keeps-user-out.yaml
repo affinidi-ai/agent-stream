@@ -53,6 +53,12 @@ changes:
         It used to write to the first record with the same username, which could be another
         user's. The passkey and SAML sign-in writes also no longer bring back a user deleted
         during the sign-in.
+    - timestamp: '2026-11-12T12:00:00.000Z'
+      title: Refuse an uploaded image name that leaves the upload directory
+      description: >-
+        Saving an uploaded image now refuses a file name that is not a single path component
+        and an extension that is not one of the supported image types, so a user id can never
+        place an avatar outside the avatars directory.
   removed: []
   security:
     - timestamp: '2026-11-11T12:00:00.000Z'

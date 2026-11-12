@@ -109,6 +109,26 @@ pub async fn read_image_field(
     Err((StatusCode::BAD_REQUEST, format!("No '{}' file provided", field_name)))
 }
 
+/// The static extension for one of the extensions `image_extension` returns.
+fn image_extension_name(extension: &str) -> Option<&'static str> {
+    match extension {
+        "jpg" => Some("jpg"),
+        "png" => Some("png"),
+        "gif" => Some("gif"),
+        "webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+/// True when `name` is one normal path component: not empty, not `.` or `..`, with no separator.
+fn is_single_path_component(name: &str) -> bool {
+    let mut components = std::path::Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(name)
+    )
+}
+
 /// Persist image `bytes` into `dir` as `<file_stem>.<extension>` and return the
 /// path relative to the served root (`<relative_prefix>/<file>`).
 pub async fn save_image(
@@ -118,6 +138,12 @@ pub async fn save_image(
     extension: &str,
     bytes: &[u8],
 ) -> Result<String, (StatusCode, String)> {
+    let extension = image_extension_name(extension)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Unsupported image extension".to_string()))?;
+    if !is_single_path_component(file_stem) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid file name".to_string()));
+    }
+
     fs::create_dir_all(dir)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create upload directory: {}", e)))?;
@@ -205,5 +231,42 @@ mod tests {
         assert_eq!(written, bytes);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn save_image_refuses_a_file_name_that_leaves_the_directory() {
+        let dir = std::env::temp_dir().join(format!("uploads_test_{}", uuid::Uuid::new_v4()));
+        let dir_str = dir
+            .to_string_lossy()
+            .to_string();
+
+        for stem in ["", ".", "..", "../escape", "a/b", "/abs"] {
+            let result = save_image(&dir_str, "uploads", stem, "png", &[0x89]).await;
+            match result {
+                Err((status, _)) => assert_eq!(status, StatusCode::BAD_REQUEST, "stem {stem:?}"),
+                Ok(path) => panic!("stem {stem:?} was accepted as {path}"),
+            }
+        }
+        assert!(!dir.exists(), "nothing is created for a refused name");
+    }
+
+    #[tokio::test]
+    async fn save_image_refuses_an_extension_that_is_not_an_image_type() {
+        let dir = std::env::temp_dir().join(format!("uploads_test_{}", uuid::Uuid::new_v4()));
+        let dir_str = dir
+            .to_string_lossy()
+            .to_string();
+
+        for extension in ["svg", "png/../x", "", "html"] {
+            let result = save_image(&dir_str, "uploads", "logo", extension, &[0x89]).await;
+            assert!(matches!(result, Err((StatusCode::BAD_REQUEST, _))), "extension {extension:?} was accepted");
+        }
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_user_id_with_dots_and_at_signs_is_one_path_component() {
+        assert!(is_single_path_component("jane.doe@example.com"));
+        assert!(is_single_path_component("oidc-12"));
     }
 }
