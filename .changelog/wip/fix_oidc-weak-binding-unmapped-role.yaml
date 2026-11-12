@@ -1,0 +1,18 @@
+branch: fix/oidc-weak-binding-unmapped-role
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security: []
+  breaking:
+    - timestamp: '2026-11-12T09:00:00.000Z'
+      title: Refuse a granting role_mapping.unmapped without an exact required_claims entry
+      description: >-
+        An oidc.json whose role_mapping.unmapped is a role, not deny, now stops startup
+        unless a required_claims entry lists only exact values, such as org_id. Booleans
+        like email_verified and patterns match accounts of every tenant, so such a file
+        gave the role to all of them. List an exact tenant value, or set
+        role_mapping.unmapped to deny. With deny, the file still starts, and the
+        weak-binding warning stays. A weak binding leaves it to role_mapping.values to keep
+        other tenants out, so map only a claim the provider controls.
