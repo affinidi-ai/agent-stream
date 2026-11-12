@@ -21,8 +21,9 @@ pub struct UserNotApproved;
 pub struct UsernameTaken;
 
 /// Provision or update a user from SAML attributes. A user that exists and is
-/// not approved is refused with [`UserNotApproved`], and a username another
-/// user already holds with [`UsernameTaken`].
+/// not approved is refused with [`UserNotApproved`]. When another user holds
+/// the asserted username the SAML user ID is used instead, and only when that
+/// is held too is the sign-in refused with [`UsernameTaken`].
 pub async fn provision_user_from_saml(
     storage: &PasskeyStorage,
     attributes: &HashMap<String, String>,
@@ -96,25 +97,18 @@ pub async fn provision_user_from_saml(
         .load_user_by_saml_id(user_id_attr)
         .await?;
 
-    if storage
-        .username_held_by_other(
-            username.as_str(),
-            existing_user
-                .as_ref()
-                .map(|user| user.user_id.as_str()),
-        )
-        .await?
-    {
-        return Err(anyhow::Error::new(UsernameTaken));
-    }
-
     let user = if let Some(mut user) = existing_user {
         if user.status != UserStatus::Approved {
             return Err(anyhow::Error::new(UserNotApproved));
         }
+        let username = if user.username == *username {
+            username.clone()
+        } else {
+            resolve_username(storage, username, user_id_attr, Some(&user.user_id)).await?
+        };
         info!("Updating existing SAML user: {}", username);
 
-        user.username = username.clone();
+        user.username = username;
         user.email = email.clone();
         user.first_name = first_name;
         user.last_name = last_name;
@@ -131,6 +125,7 @@ pub async fn provision_user_from_saml(
         user
     } else {
         // Create new user (Just-In-Time provisioning)
+        let username = resolve_username(storage, username, user_id_attr, None).await?;
         info!("Creating new SAML user: {}", username);
 
         // Check if this is the first user (should be admin)
@@ -211,7 +206,7 @@ pub async fn provision_user_from_saml(
                     }
                     Ok(false) => {
                         storage
-                            .remove_avatar_files(&user_id, Some(&relative_avatar_path))
+                            .remove_uploaded_avatar(&user_id, &relative_avatar_path)
                             .await
                     }
                     Err(e) => warn!("Failed to update user with avatar path: {}", e),
@@ -223,6 +218,22 @@ pub async fn provision_user_from_saml(
     }
 
     Ok(user)
+}
+
+/// The username a SAML user gets: the asserted one, or the SAML user ID when
+/// another user holds it. A user whose stored username already is the asserted
+/// one never reaches this, so users that already share a username keep signing
+/// in.
+async fn resolve_username(
+    storage: &PasskeyStorage,
+    asserted: &str,
+    saml_user_id: &str,
+    own_user_id: Option<&str>,
+) -> Result<String> {
+    storage
+        .free_username(&[asserted, saml_user_id], own_user_id)
+        .await?
+        .ok_or_else(|| anyhow::Error::new(UsernameTaken))
 }
 
 /// The role a value without a `role_mapping` entry was granted by name before
@@ -509,12 +520,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_new_account_asserting_a_username_another_user_holds_is_refused_and_nothing_is_created() {
+    async fn a_new_account_asserting_a_username_another_user_holds_gets_its_saml_user_id_as_username() {
         let temp = tempfile::tempdir().unwrap();
         let storage = storage(&temp).await;
         let (_, bob) = two_users(&storage).await;
 
-        let refused = provision_user_from_saml(&storage, &attributes_named("name-id-2", "bob"), &config(), "")
+        let second_bob = provision_user_from_saml(&storage, &attributes_named("name-id-2", "bob"), &config(), "")
+            .await
+            .unwrap();
+
+        assert_eq!(second_bob.username, "name-id-2");
+        assert_ne!(second_bob.user_id, bob.user_id);
+        let holder = storage
+            .load_user_by_id(&bob.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((holder.username.as_str(), holder.saml_id.as_deref()), ("bob", Some("bob")));
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_whose_asserted_username_and_saml_user_id_are_both_held_is_refused_and_nothing_is_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        two_users(&storage).await;
+        provision_user_from_saml(&storage, &attributes_named("someone", "name-id-3"), &config(), "")
+            .await
+            .unwrap();
+
+        let refused = provision_user_from_saml(&storage, &attributes_named("name-id-3", "bob"), &config(), "")
             .await
             .unwrap_err();
 
@@ -530,38 +564,67 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-            2
+            3
         );
-        let holder = storage
-            .load_user_by_id(&bob.user_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(holder.saml_id.as_deref(), Some("bob"), "the holder is untouched");
     }
 
     #[tokio::test]
-    async fn an_existing_account_whose_asserted_username_is_now_held_by_another_user_is_refused() {
+    async fn an_existing_account_whose_asserted_username_is_now_held_by_another_user_gets_its_saml_user_id() {
         let temp = tempfile::tempdir().unwrap();
         let storage = storage(&temp).await;
         let (alice, _) = two_users(&storage).await;
 
-        let refused = provision_user_from_saml(&storage, &attributes_named("alice", "bob"), &config(), "")
+        let signed_in = provision_user_from_saml(&storage, &attributes_named("alice", "bob"), &config(), "")
             .await
-            .unwrap_err();
-
-        assert!(
-            refused
-                .downcast_ref::<UsernameTaken>()
-                .is_some(),
-            "{refused:?}"
-        );
-        let stored = storage
-            .load_user_by_id(&alice.user_id)
-            .await
-            .unwrap()
             .unwrap();
-        assert_eq!(stored.username, "alice");
+
+        assert_eq!(signed_in.user_id, alice.user_id);
+        assert_eq!(signed_in.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn a_user_id_remap_signs_everyone_in_as_a_new_user_and_leaves_the_old_records_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (alice, bob) = two_users(&storage).await;
+
+        let remapped_alice =
+            provision_user_from_saml(&storage, &attributes_named("object-id-a", "alice"), &config(), "")
+                .await
+                .unwrap();
+        let remapped_bob = provision_user_from_saml(&storage, &attributes_named("object-id-b", "bob"), &config(), "")
+            .await
+            .unwrap();
+
+        assert_eq!(remapped_alice.username, "object-id-a");
+        assert_eq!(remapped_bob.username, "object-id-b");
+        assert_ne!(remapped_alice.user_id, alice.user_id);
+        assert_ne!(remapped_bob.user_id, bob.user_id);
+    }
+
+    #[tokio::test]
+    async fn two_existing_users_that_share_a_username_both_keep_signing_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (_, bob) = two_users(&storage).await;
+        let mut duplicate = provision_user_from_saml(&storage, &attributes_named("dup", "dup"), &config(), "")
+            .await
+            .unwrap();
+        duplicate.username = "bob".to_string();
+        storage
+            .save_user(&duplicate)
+            .await
+            .unwrap();
+
+        let first = provision_user_from_saml(&storage, &attributes_named("bob", "bob"), &config(), "")
+            .await
+            .unwrap();
+        let second = provision_user_from_saml(&storage, &attributes_named("dup", "bob"), &config(), "")
+            .await
+            .unwrap();
+
+        assert_eq!((first.user_id.as_str(), first.username.as_str()), (bob.user_id.as_str(), "bob"));
+        assert_eq!((second.user_id.as_str(), second.username.as_str()), (duplicate.user_id.as_str(), "bob"));
     }
 
     #[tokio::test]
@@ -575,6 +638,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(again.user_id, bob.user_id);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_user_whose_asserted_username_is_held_is_refused_as_not_approved() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let (_, bob) = two_users(&storage).await;
+        storage
+            .update_user(&bob.user_id, None, Some(UserStatus::Disabled), &crate::config::LimitsConfig::default())
+            .await
+            .unwrap();
+
+        let refused = provision_user_from_saml(&storage, &attributes_named("bob", "alice"), &config(), "")
+            .await
+            .unwrap_err();
+
+        assert!(
+            refused
+                .downcast_ref::<UserNotApproved>()
+                .is_some(),
+            "{refused:?}"
+        );
     }
 
     #[tokio::test]

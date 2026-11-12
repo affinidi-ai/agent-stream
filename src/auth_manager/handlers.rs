@@ -321,11 +321,16 @@ pub async fn update_user(
         .is_some()
         && req.status == Some(crate::auth::UserStatus::Approved);
 
-    if reapproved && let Some(authenticator) = &pat_authenticator {
-        authenticator
-            .revoke_for_user(&user_id)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
+    if reapproved {
+        if let Some(authenticator) = &pat_authenticator {
+            authenticator
+                .revoke_for_user(&user_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
+        }
+        session_manager
+            .remove_sessions_for_user(&user_id)
+            .await;
     }
 
     storage
@@ -503,14 +508,12 @@ pub async fn delete_user(
 
     let already_deleted = user_data.deleted_at.is_some();
 
+    let mut revoked_tokens = 0;
     if let Some(authenticator) = &pat_authenticator {
-        let revoked_tokens = authenticator
+        revoked_tokens = authenticator
             .revoke_for_user(&user_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
-        if revoked_tokens > 0 {
-            tracing::info!("Revoked {} access token(s) for deleted user_id={}", revoked_tokens, user_id);
-        }
     }
 
     storage
@@ -525,6 +528,7 @@ pub async fn delete_user(
         caller_username = %caller.username,
         target_user_id = %user_id,
         already_deleted,
+        revoked_tokens,
         "User deleted by {}",
         caller.username,
     );
@@ -617,7 +621,7 @@ pub async fn upload_avatar(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update profile with avatar: {}", e)))?;
     if !linked {
         storage
-            .remove_avatar_files(&user_id, Some(&relative_avatar_path))
+            .remove_uploaded_avatar(&user_id, &relative_avatar_path)
             .await;
         return Err((StatusCode::FORBIDDEN, "User not approved".to_string()));
     }

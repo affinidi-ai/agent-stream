@@ -63,7 +63,8 @@ Sign-in:
 - `login/start` for an unknown username, or for a user who is not approved, returns a
   challenge that allows no credentials, so the response does not reveal which case applies.
 - `login/finish` answers `401` when the passkey does not verify, and when the user was
-  deleted or disabled after `login/start`. On success it records the
+  deleted or disabled after `login/start`; a failure to store the
+  sign-in answers `500`. On success it records the
   user's last sign-in and returns `session_token` and `consent_required`, and sets the
   session cookie.
 
@@ -97,9 +98,12 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
   refused with `403` and a readable page that does not say why, and no session opens.
   Deleting a SAML user keeps their record, as
   [Deleting an OIDC or SAML user](#deleting-an-oidc-or-saml-user) describes.
-- When the username the IdP asserts is already held by another user, the ACS refuses with the
-  same page and creates or changes nothing, as an OIDC sign-in does. An administrator resolves
-  the clash, for example by changing the other user's username.
+- When the username the IdP asserts is already held by another user, the user gets their SAML
+  user ID as username instead, and only when that is held too is the sign-in refused with the
+  same page, with nothing created or changed. A user whose stored username already is the
+  asserted one signs in as before, so users who already share a username keep signing in. To
+  clear a refusal, change the asserted attribute at the identity provider, or delete the
+  other user if they are not an administrator.
 - On success the ACS sets the session cookie and returns a page that keeps the session token
   for the dashboard and redirects to `/`. The page's one inline script carries a fresh nonce,
   and its `Content-Security-Policy` runs only that script (see
@@ -311,18 +315,20 @@ the OIDC log).
   it after approval until the user's next sign-in gives the record a username again, so an
   administrator knows whose sign-in approving it allows.
 - **Every delete:** the user's sessions end, the access tokens bound to the user and the
-  tokens the user created for other subjects are revoked (see
+  tokens whose secret the user last received are revoked (see
   [`ACCESS_TOKENS.md`](ACCESS_TOKENS.md)), and the uploaded avatar image files are removed
   (the shared default avatar never is). A file that cannot be removed is logged and does not
   stop the delete. The `user.deleted` integration event fires once, and the delete is logged
-  on the `audit` target as `user.deleted`; deleting a kept record again changes nothing.
+  on the `audit` target as `user.deleted` with the number of tokens revoked; deleting a kept
+  record again changes nothing.
 - **User limit:** a kept record does not count toward the `users` limit. Approving it again
   gives it a seat, so that approval answers `403` when the limit is reached.
 - **Signing in again:** an administrator sets the status back to `approved`. The next
   sign-in is the same user, with the role set from the claim or attribute mapping again. A
   role in the kept record is not used. Approving fires `user.approved` (without the welcome
   notification) as well as `user.updated`, so an integration that offboarded the person on
-  `user.deleted` sees them return, and revokes any access token still bound to the user.
+  `user.deleted` sees them return, and ends any session and revokes any access token still
+  bound to the user.
 - Terms Acceptance Records survive user deletion; see
   [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md).
 

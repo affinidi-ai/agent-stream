@@ -6,9 +6,11 @@ import { DeleteButton } from '../components/shared/DeleteButton';
 import {
   DELETE_USER_SUCCESS,
   DELETE_USER_TITLE,
+  isDeletedKeptUser,
   KEPT_ACCOUNT_HEADING,
   keptAccountDetail,
   keptAccountLabel,
+  PROVIDER_ACCOUNT_HEADING,
 } from '../utils/userDelete';
 import { usePermissions } from '../context/PermissionsContext';
 import SearchInput from '../components/shared/SearchInput';
@@ -455,9 +457,15 @@ const UsersPage: React.FC = () => {
                     </div>
                     {keptAccountLabel(selectedUser) && (
                       <div className="mb-2" data-testid="users-modal-kept-account">
-                        <strong>{KEPT_ACCOUNT_HEADING}</strong>{' '}
+                        <strong>
+                          {isDeletedKeptUser(selectedUser)
+                            ? KEPT_ACCOUNT_HEADING
+                            : PROVIDER_ACCOUNT_HEADING}
+                        </strong>{' '}
                         <span className="text-muted">
-                          {keptAccountDetail(keptAccountLabel(selectedUser) ?? '')}
+                          {isDeletedKeptUser(selectedUser)
+                            ? keptAccountDetail(keptAccountLabel(selectedUser) ?? '')
+                            : keptAccountLabel(selectedUser)}
                         </span>
                       </div>
                     )}

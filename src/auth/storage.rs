@@ -77,6 +77,17 @@ pub struct OidcIdentity {
     pub subject: String,
 }
 
+/// The single plain file name an `avatars/<name>` path stores, or `None` for
+/// any other path.
+fn avatar_file_name(avatar_path: Option<&str>) -> Option<std::ffi::OsString> {
+    let relative = avatar_path?.strip_prefix("avatars/")?;
+    let mut components = Path::new(relative).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(file)), None) => Some(file.to_os_string()),
+        _ => None,
+    }
+}
+
 impl StorableEntity for UserData {
     fn id(&self) -> &str {
         &self.user_id
@@ -253,23 +264,25 @@ impl PasskeyStorage {
             .await
     }
 
-    /// Record a sign-in on the stored record of an approved user. Fails when
-    /// the record is gone or no longer approved, so a delete that lands during
-    /// the sign-in is not undone by this write.
+    /// Record a sign-in on the stored record of an approved user. Returns
+    /// `None` when the record is gone or no longer approved, so a delete that
+    /// lands during the sign-in is not undone by this write.
     pub async fn record_login(
         &self,
         user_id: &str,
-    ) -> Result<UserData> {
+    ) -> Result<Option<UserData>> {
         let _user_write_guard = self.user_write_guard().await;
-        let mut user_data = self
+        let Some(mut user_data) = self
             .load_user_by_id(user_id)
             .await?
             .filter(|user| user.status == UserStatus::Approved)
-            .ok_or_else(|| anyhow::anyhow!("User not found or not approved: {}", user_id))?;
+        else {
+            return Ok(None);
+        };
         user_data.last_logged_in = Some(chrono::Utc::now());
         self.save_user(&user_data)
             .await?;
-        Ok(user_data)
+        Ok(Some(user_data))
     }
 
     /// Link an uploaded avatar to a user who is still approved. Returns
@@ -309,6 +322,26 @@ impl PasskeyStorage {
             .await?
             .iter()
             .any(|holder| holder.username == username && Some(holder.user_id.as_str()) != own_user_id))
+    }
+
+    /// The first of `candidates` that no other user has as their username. The
+    /// admin handlers address users by id, but a username that two users share
+    /// still makes the dashboard ambiguous. Call it under the same guard as
+    /// [`Self::username_held_by_other`].
+    pub async fn free_username(
+        &self,
+        candidates: &[&str],
+        own_user_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        for candidate in candidates {
+            if !self
+                .username_held_by_other(candidate, own_user_id)
+                .await?
+            {
+                return Ok(Some((*candidate).to_string()));
+            }
+        }
+        Ok(None)
     }
 
     /// Update user profile information
@@ -461,15 +494,27 @@ impl PasskeyStorage {
         user_id: &str,
         avatar_path: Option<&str>,
     ) {
-        let stored = avatar_path
-            .and_then(|path| path.strip_prefix("avatars/"))
-            .and_then(|relative| {
-                let mut components = std::path::Path::new(relative).components();
-                match (components.next(), components.next()) {
-                    (Some(std::path::Component::Normal(file)), None) => Some(file.to_os_string()),
-                    _ => None,
-                }
-            });
+        self.remove_avatar_matching(user_id, avatar_file_name(avatar_path), Some(user_id))
+            .await;
+    }
+
+    /// Remove only the file `avatar_path` names, for an upload whose link to
+    /// the user was refused. The user's other avatar files stay.
+    pub async fn remove_uploaded_avatar(
+        &self,
+        user_id: &str,
+        avatar_path: &str,
+    ) {
+        self.remove_avatar_matching(user_id, avatar_file_name(Some(avatar_path)), None)
+            .await;
+    }
+
+    async fn remove_avatar_matching(
+        &self,
+        user_id: &str,
+        stored: Option<std::ffi::OsString>,
+        stem: Option<&str>,
+    ) {
         let mut entries = match tokio::fs::read_dir(&self.avatars_path).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
@@ -491,9 +536,9 @@ impl PasskeyStorage {
             if name == DEFAULT_AVATAR_FILE {
                 continue;
             }
-            let is_users = stored.as_deref() == Some(name.as_os_str())
-                || Path::new(&name).file_stem() == Some(std::ffi::OsStr::new(user_id));
-            if !is_users {
+            let is_wanted = stored.as_deref() == Some(name.as_os_str())
+                || stem.is_some_and(|stem| Path::new(&name).file_stem() == Some(std::ffi::OsStr::new(stem)));
+            if !is_wanted {
                 continue;
             }
             match tokio::fs::remove_file(entry.path()).await {
@@ -1261,7 +1306,8 @@ mod tests {
         let signed_in = storage
             .record_login("plain")
             .await
-            .unwrap();
+            .unwrap()
+            .expect("an approved user signs in");
         assert!(
             signed_in
                 .last_logged_in
@@ -1281,14 +1327,16 @@ mod tests {
             storage
                 .record_login("oidc-1")
                 .await
-                .is_err(),
+                .unwrap()
+                .is_none(),
             "a kept record is not signed in"
         );
         assert!(
             storage
                 .record_login("nobody")
                 .await
-                .is_err()
+                .unwrap()
+                .is_none()
         );
         assert!(
             storage
@@ -1300,6 +1348,26 @@ mod tests {
                 .is_none(),
             "a refused sign-in writes nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn removing_an_uploaded_avatar_keeps_the_users_other_avatar_files() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        let current = write_avatar(temp_dir.path(), "plain.jpg").await;
+        let uploaded = write_avatar(temp_dir.path(), "plain.png").await;
+        let default_file = write_avatar(temp_dir.path(), "default.png").await;
+
+        storage
+            .remove_uploaded_avatar("plain", "avatars/plain.png")
+            .await;
+        storage
+            .remove_uploaded_avatar("plain", "avatars/default.png")
+            .await;
+
+        assert!(!uploaded.exists());
+        assert!(current.exists(), "the avatar the record still points at stays");
+        assert!(default_file.exists());
     }
 
     #[tokio::test]

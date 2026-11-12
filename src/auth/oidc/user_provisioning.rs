@@ -84,7 +84,8 @@ pub async fn provision_user_from_oidc(
     let own_user_id = existing
         .as_ref()
         .map(|user| user.user_id.as_str());
-    let username = free_username(storage, [&preferred_username, &identity.subject], own_user_id)
+    let username = storage
+        .free_username(&[preferred_username.as_str(), identity.subject.as_str()], own_user_id)
         .await?
         .ok_or(ProvisionRefusal::UsernameTaken)?;
     let now = chrono::Utc::now();
@@ -139,24 +140,6 @@ pub async fn provision_user_from_oidc(
         .save_user(&provisioned.user)
         .await?;
     Ok(provisioned)
-}
-
-/// The first of `candidates` that no other user has as their username. The
-/// admin handlers find users by username, so two users must never share one.
-async fn free_username<const N: usize>(
-    storage: &PasskeyStorage,
-    candidates: [&String; N],
-    own_user_id: Option<&str>,
-) -> anyhow::Result<Option<String>> {
-    for candidate in candidates {
-        if !storage
-            .username_held_by_other(candidate, own_user_id)
-            .await?
-        {
-            return Ok(Some(candidate.clone()));
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]

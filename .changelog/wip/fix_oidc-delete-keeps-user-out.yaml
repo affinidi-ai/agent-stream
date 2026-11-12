@@ -39,11 +39,13 @@ changes:
         again. A user whose record was removed before this change has no record left, so
         disable them again if they signed in anew.
     - timestamp: '2026-11-11T12:00:03.000Z'
-      title: Refuse a SAML sign-in that is not approved or takes another user's username
+      title: Refuse a SAML sign-in by a user who is not approved
       description: >-
         A SAML sign-in by a user who is not approved is now refused with a 403 page instead
-        of opening a session, as is one whose asserted username another user already holds,
-        which used to create a second user with the same username.
+        of opening a session. A user whose asserted username another user already holds
+        gets their SAML user ID as username instead of a second user with the same
+        username, and is refused only when that is held too. Users who already share a
+        username keep signing in.
     - timestamp: '2026-11-11T12:00:04.000Z'
       title: Apply an administrator's user update to the user that was authorised
       description: >-
@@ -54,13 +56,14 @@ changes:
   removed: []
   security:
     - timestamp: '2026-11-11T12:00:00.000Z'
-      title: Revoke a deleted user's access tokens, including those they created
+      title: Revoke a deleted user's access tokens, including those they hold for others
       description: >-
-        Affects 1.0.1 and earlier, fixed in the next release. A token created by a deleted
-        user for another subject stayed usable after the delete. Once deleted users are kept,
-        a token bound to one would also have become valid again on approval. Deleting a user
-        now revokes both kinds, with their delegated tokens, and approving a kept record
-        again revokes any that remain.
-        A service account token the deleted user created stops working and must be created
-        again by another administrator.
+        Affects 1.0.1 and earlier, fixed in the next release. A token for another subject
+        whose secret the deleted user last received (they created it, or rotated it) stayed
+        usable after the delete. Once deleted users are kept, a token bound to one would
+        also have become valid again on approval. Deleting a user now revokes both kinds,
+        with their delegated tokens, and approving a kept record again revokes any that
+        remain and ends the user's earlier sessions. A token that someone else rotated
+        keeps working. A service account token the deleted user holds stops working and
+        must be created or rotated again by another administrator.
   breaking: []

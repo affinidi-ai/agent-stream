@@ -26,6 +26,11 @@ describe('DELETE_USER_TITLE', () => {
     expect(DELETE_USER_TITLE).toContain('OpenID Connect or SAML');
     expect(DELETE_USER_TITLE).toContain('approves them again');
   });
+
+  it('says the access tokens the user holds are revoked', () => {
+    expect(DELETE_USER_TITLE).toContain('Access tokens bound to the user');
+    expect(DELETE_USER_TITLE).toContain('created or rotated for others');
+  });
 });
 
 describe('keptAccountDetail', () => {

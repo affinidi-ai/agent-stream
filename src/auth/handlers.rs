@@ -457,7 +457,11 @@ pub async fn login_finish(
         .record_login(&user.user_id)
         .await
         .map_err(|e| {
-            error!("Refused sign-in of user {}: {}", username, e);
+            error!("Failed to record the sign-in of user {}: {}", username, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            error!("Refused sign-in of user {}: no longer approved", username);
             StatusCode::UNAUTHORIZED
         })?;
 

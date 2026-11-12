@@ -1,9 +1,11 @@
 export const DELETE_USER_TITLE =
-  'Delete user. A user who signs in through OpenID Connect or SAML is disabled and kept instead, so they cannot sign in until an administrator approves them again.';
+  'Delete user. A user who signs in through OpenID Connect or SAML is disabled and kept instead, so they cannot sign in until an administrator approves them again. Access tokens bound to the user, and tokens the user created or rotated for others, are revoked.';
 
 export const DELETE_USER_SUCCESS = 'User deleted successfully';
 
 export const KEPT_ACCOUNT_HEADING = 'Deleted:';
+
+export const PROVIDER_ACCOUNT_HEADING = 'Provider account:';
 
 export const DELETED_USER_NOTICE =
   'This user was deleted. Their account stays refused at sign-in until an administrator approves them again.';

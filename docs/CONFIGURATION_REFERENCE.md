@@ -345,7 +345,9 @@ whoever the identity provider later gives the primary administrator's value sign
 administrator. Map `user_id` to a claim the identity
 provider never reassigns, such as Entra ID's
 `http://schemas.microsoft.com/identity/claims/objectidentifier`, rather than a user principal
-name. Users created by SAML are approved
+name. Changing the mapping later gives every user a new record on their next sign-in, because
+users are matched by that value; the old records stay, and a user whose username the old record
+holds gets their new SAML user ID as username. Users created by SAML are approved
 automatically and count against the `users` limit; the kept record of a deleted user does
 not. `idp_metadata_url` in the example is not
 read.

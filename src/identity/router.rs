@@ -3522,8 +3522,28 @@ mod token_scope_route_tests {
         }
     }
 
-    /// Records the users whose tokens a delete asked to revoke.
-    struct RecordingTokens(std::sync::Mutex<Vec<String>>);
+    /// Records the users whose tokens a delete or an approval asked to revoke,
+    /// and fails the revocation when told to.
+    struct RecordingTokens {
+        revoked_for: std::sync::Mutex<Vec<String>>,
+        fails: bool,
+    }
+
+    impl RecordingTokens {
+        fn new(fails: bool) -> Arc<Self> {
+            Arc::new(Self {
+                revoked_for: std::sync::Mutex::new(Vec::new()),
+                fails,
+            })
+        }
+
+        fn revoked_for(&self) -> Vec<String> {
+            self.revoked_for
+                .lock()
+                .unwrap()
+                .clone()
+        }
+    }
 
     #[async_trait::async_trait]
     impl PatAuthenticator for RecordingTokens {
@@ -3531,7 +3551,10 @@ mod token_scope_route_tests {
             &self,
             user_id: &str,
         ) -> std::io::Result<usize> {
-            self.0
+            if self.fails {
+                return Err(std::io::Error::other("token store unavailable"));
+            }
+            self.revoked_for
                 .lock()
                 .unwrap()
                 .push(user_id.to_string());
@@ -3546,18 +3569,21 @@ mod token_scope_route_tests {
         }
     }
 
-    #[tokio::test]
-    async fn deleting_a_user_through_the_user_routes_revokes_their_access_tokens() {
-        let fixture = admin_fixture().await;
+    async fn save_member(
+        fixture: &Fixture,
+        user_id: &str,
+        status: UserStatus,
+        federated: bool,
+    ) {
         let now = chrono::Utc::now();
         fixture
             .storage
             .save_user(&UserData {
-                user_id: "member-1".to_string(),
-                username: "member".to_string(),
+                user_id: user_id.to_string(),
+                username: user_id.to_string(),
                 passkeys: Vec::new(),
                 role: UserRole::User,
-                status: UserStatus::Approved,
+                status,
                 is_primary: false,
                 first_name: None,
                 last_name: None,
@@ -3569,29 +3595,58 @@ mod token_scope_route_tests {
                 updated_at: now,
                 last_logged_in: None,
                 saml_id: None,
-                oidc: None,
+                oidc: federated.then(|| crate::auth::storage::OidcIdentity {
+                    issuer: "https://idp.example.com".to_string(),
+                    subject: format!("sub-{user_id}"),
+                }),
                 deleted_at: None,
             })
             .await
             .unwrap();
-        let tokens = Arc::new(RecordingTokens(std::sync::Mutex::new(Vec::new())));
-        let app = user_management_routes(
+    }
+
+    fn user_routes(
+        fixture: &Fixture,
+        tokens: &Arc<RecordingTokens>,
+    ) -> Router {
+        user_management_routes(
             Some(tokens.clone()),
             fixture.sessions.clone(),
             fixture.storage.clone(),
             None,
             Arc::new(crate::rbac::RbacConfig::default()),
             Arc::new(crate::metrics::MetricsStore::new(10)),
-        );
+        )
+    }
 
-        let status = app
+    fn set_status_request(
+        user_id: &str,
+        token: &str,
+        status: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/users/{user_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "status": status }).to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_through_the_user_routes_revokes_their_access_tokens() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "member-1", UserStatus::Approved, false).await;
+        let tokens = RecordingTokens::new(false);
+
+        let status = user_routes(&fixture, &tokens)
             .oneshot(request("DELETE", "/v1/users/member-1", &fixture.session_token))
             .await
             .unwrap()
             .status();
 
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(*tokens.0.lock().unwrap(), vec!["member-1".to_string()]);
+        assert_eq!(tokens.revoked_for(), vec!["member-1".to_string()]);
         assert!(
             fixture
                 .storage
@@ -3599,6 +3654,92 @@ mod token_scope_route_tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_whose_token_revocation_fails_answers_500_and_leaves_the_user_unchanged() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "member-1", UserStatus::Approved, true).await;
+        let tokens = RecordingTokens::new(true);
+
+        let status = user_routes(&fixture, &tokens)
+            .oneshot(request("DELETE", "/v1/users/member-1", &fixture.session_token))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let stored = fixture
+            .storage
+            .load_user_by_id("member-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, UserStatus::Approved);
+        assert!(stored.deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn approving_a_kept_record_again_revokes_its_tokens_and_sessions() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "kept-1", UserStatus::Approved, true).await;
+        let earlier_session = fixture
+            .sessions
+            .create_session("kept-1".to_string(), "kept-1".to_string())
+            .await;
+        fixture
+            .storage
+            .delete_user("kept-1")
+            .await
+            .unwrap();
+        let tokens = RecordingTokens::new(false);
+
+        let status = user_routes(&fixture, &tokens)
+            .oneshot(set_status_request("kept-1", &fixture.session_token, "approved"))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tokens.revoked_for(), vec!["kept-1".to_string()]);
+        assert!(
+            fixture
+                .sessions
+                .validate_session(&earlier_session)
+                .await
+                .is_none(),
+            "a session from before the delete does not come back"
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .load_user_by_id("kept-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            UserStatus::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn approving_a_disabled_user_who_was_not_deleted_revokes_nothing() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "disabled-1", UserStatus::Disabled, true).await;
+        let tokens = RecordingTokens::new(false);
+
+        let status = user_routes(&fixture, &tokens)
+            .oneshot(set_status_request("disabled-1", &fixture.session_token, "approved"))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            tokens
+                .revoked_for()
+                .is_empty()
         );
     }
 
