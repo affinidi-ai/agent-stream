@@ -611,10 +611,16 @@ pub async fn upload_avatar(
         crate::uploads::save_image(storage.avatars_path(), "avatars", &user_data.user_id, file_extension, &avatar_data)
             .await?;
 
-    storage
-        .update_profile(&user_id, None, None, None, None, None, Some(relative_avatar_path.clone()))
+    let linked = storage
+        .set_avatar_if_approved(&user_id, relative_avatar_path.clone())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update profile with avatar: {}", e)))?;
+    if !linked {
+        storage
+            .remove_avatar_files(&user_id, Some(&relative_avatar_path))
+            .await;
+        return Err((StatusCode::FORBIDDEN, "User not approved".to_string()));
+    }
 
     let user_data = storage
         .load_user_by_id(&user_id)

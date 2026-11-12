@@ -785,6 +785,34 @@ impl Flow {
         .status()
     }
 
+    async fn upload_avatar_through_route(
+        &self,
+        user_id: &str,
+    ) -> StatusCode {
+        let boundary = "avatar-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let app = Router::new()
+            .route("/v1/profile/avatar", axum::routing::post(crate::auth_manager::handlers::upload_avatar))
+            .layer(axum::Extension(self.oidc.storage.clone()))
+            .layer(axum::Extension(user_id.to_string()));
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/profile/avatar")
+                .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
     async fn update_status_through_route(
         &self,
         caller: &UserData,
@@ -1604,4 +1632,61 @@ async fn signing_out_without_a_live_session_still_clears_the_browser() {
             "{session:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn an_approved_user_can_upload_an_avatar() {
+    let flow = Flow::new().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+
+    let uploaded = flow
+        .upload_avatar_through_route(&user.user_id)
+        .await;
+
+    assert_eq!(uploaded, StatusCode::OK);
+    let stored = flow.user().await.unwrap();
+    assert_eq!(stored.avatar_path, Some(format!("avatars/{}.png", user.user_id)));
+    assert!(
+        std::path::Path::new(
+            flow.oidc
+                .storage
+                .avatars_path()
+        )
+        .join(format!("{}.png", user.user_id))
+        .exists()
+    );
+}
+
+#[tokio::test]
+async fn an_avatar_uploaded_for_a_deleted_user_is_refused_and_its_file_removed() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+    flow.delete_through_route(&admin, &user.user_id, None)
+        .await;
+
+    let uploaded = flow
+        .upload_avatar_through_route(&user.user_id)
+        .await;
+
+    assert_eq!(uploaded, StatusCode::FORBIDDEN);
+    assert!(
+        !std::path::Path::new(
+            flow.oidc
+                .storage
+                .avatars_path()
+        )
+        .join(format!("{}.png", user.user_id))
+        .exists(),
+        "the uploaded file did not stay public"
+    );
+    assert!(
+        flow.user()
+            .await
+            .unwrap()
+            .avatar_path
+            .is_none()
+    );
 }
