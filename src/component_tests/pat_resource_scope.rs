@@ -195,6 +195,13 @@ struct ScopedMockPat {
 
 #[async_trait]
 impl PatAuthenticator for ScopedMockPat {
+    async fn revoke_for_user(
+        &self,
+        _user_id: &str,
+    ) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
     async fn authenticate(
         &self,
         token: &str,
@@ -259,6 +266,7 @@ async fn make_storage_with_role(role: UserRole) -> (Arc<PasskeyStorage>, tempfil
             last_logged_in: None,
             saml_id: None,
             oidc: None,
+            deleted_at: None,
         })
         .await
         .expect("save user");

@@ -43,6 +43,13 @@ pub trait PatAuthenticator: Send + Sync {
         &self,
         token: &str,
     ) -> Option<PatPrincipal>;
+
+    /// Revoke every access token bound to `user_id`, with the tokens delegated
+    /// from them, and return how many were revoked.
+    async fn revoke_for_user(
+        &self,
+        user_id: &str,
+    ) -> std::io::Result<usize>;
 }
 
 /// Request extension inserted by `require_session_auth` for a request that

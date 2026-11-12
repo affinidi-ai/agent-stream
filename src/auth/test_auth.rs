@@ -273,6 +273,7 @@ async fn ensure_test_user(
                 last_logged_in: Some(now),
                 saml_id: None,
                 oidc: None,
+                deleted_at: None,
             }
         }
     };
@@ -533,6 +534,7 @@ mod tests {
                 last_logged_in: None,
                 saml_id: None,
                 oidc: None,
+                deleted_at: None,
             })
             .await
             .unwrap();

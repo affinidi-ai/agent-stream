@@ -13,6 +13,8 @@ use axum::routing::get;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use crate::access_tokens::store::hash_secret;
+use crate::access_tokens::{AccessToken, FsAccessTokenStore, generate_token};
 use crate::auth::oidc::config::TokenEndpointAuthMethod;
 use crate::auth::oidc::test_support::{
     CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, StubProvider, config_for, id_token_claims, logout_claims, sign_logout,
@@ -23,6 +25,8 @@ use crate::auth::oidc::{
 use crate::auth::session::SessionManager;
 use crate::auth::storage::{OidcIdentity, PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
+use crate::auth_manager::pat::PatAuthenticator;
+use crate::rbac::RbacConfig;
 use crate::url_validation::test_service_endpoints;
 
 struct Flow {
@@ -715,6 +719,258 @@ async fn a_disabled_user_is_refused_even_with_a_valid_token_and_signed_out_every
     );
 }
 
+impl Flow {
+    async fn member_sign_in(&self) -> Response<Body> {
+        self.sign_in(|claims| claims["roles"] = json!(["member"]))
+            .await
+    }
+
+    async fn administrator(&self) -> UserData {
+        let now = chrono::Utc::now();
+        let admin = UserData {
+            user_id: "admin-1".to_string(),
+            username: "admin".to_string(),
+            passkeys: Vec::new(),
+            role: UserRole::Administrator,
+            status: UserStatus::Approved,
+            is_primary: true,
+            first_name: None,
+            last_name: None,
+            email: None,
+            department: None,
+            job_title: None,
+            avatar_path: None,
+            created_at: now,
+            updated_at: now,
+            last_logged_in: None,
+            saml_id: None,
+            oidc: None,
+            deleted_at: None,
+        };
+        self.oidc
+            .storage
+            .save_user(&admin)
+            .await
+            .unwrap();
+        admin
+    }
+
+    async fn delete_through_route(
+        &self,
+        caller: &UserData,
+        user_id: &str,
+        authenticator: Option<Arc<dyn PatAuthenticator>>,
+    ) -> StatusCode {
+        let app = Router::new()
+            .route("/v1/users/{user_id}", axum::routing::delete(crate::auth_manager::handlers::delete_user))
+            .layer(axum::Extension(authenticator))
+            .layer(axum::Extension(
+                self.oidc
+                    .session_manager
+                    .clone(),
+            ))
+            .layer(axum::Extension(self.oidc.storage.clone()))
+            .layer(axum::Extension(Arc::new(RbacConfig::default())))
+            .layer(axum::Extension(None::<Arc<crate::integrations::FileSystemNotificationStore>>))
+            .layer(axum::Extension(caller.user_id.clone()));
+        app.oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/users/{user_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    async fn upload_avatar_through_route(
+        &self,
+        user_id: &str,
+    ) -> StatusCode {
+        let boundary = "avatar-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let app = Router::new()
+            .route("/v1/profile/avatar", axum::routing::post(crate::auth_manager::handlers::upload_avatar))
+            .layer(axum::Extension(self.oidc.storage.clone()))
+            .layer(axum::Extension(user_id.to_string()));
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/profile/avatar")
+                .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    async fn update_status_through_route(
+        &self,
+        caller: &UserData,
+        user_id: &str,
+        status: &str,
+    ) -> StatusCode {
+        let app = Router::new()
+            .route("/v1/users/{user_id}", axum::routing::put(crate::auth_manager::handlers::update_user))
+            .layer(axum::Extension(None::<Arc<dyn PatAuthenticator>>))
+            .layer(axum::Extension(
+                self.oidc
+                    .session_manager
+                    .clone(),
+            ))
+            .layer(axum::Extension(self.oidc.storage.clone()))
+            .layer(axum::Extension(Arc::new(RbacConfig::default())))
+            .layer(axum::Extension(None::<Arc<crate::integrations::FileSystemNotificationStore>>))
+            .layer(axum::Extension(caller.user_id.clone()));
+        app.oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/users/{user_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "status": status }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+}
+
+#[tokio::test]
+async fn a_deleted_user_is_refused_at_the_next_sign_in_and_not_created_again() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+    let elsewhere = flow
+        .other_session(&user)
+        .await;
+
+    let deleted = flow
+        .delete_through_route(&admin, &user.user_id, None)
+        .await;
+    let response = flow.member_sign_in().await;
+
+    assert_eq!(deleted, StatusCode::NO_CONTENT);
+    assert!(
+        !flow
+            .session_is_live(&elsewhere)
+            .await,
+        "deleting the user ended their sessions"
+    );
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let kept = flow.user().await.unwrap();
+    assert_eq!(kept.user_id, user.user_id, "no second user was created");
+    assert_eq!(kept.status, UserStatus::Disabled);
+    assert!(kept.deleted_at.is_some());
+    assert_eq!(
+        flow.oidc
+            .storage
+            .list_users()
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_user_signs_in_as_the_same_user_once_an_administrator_approves_them_again() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+    flow.delete_through_route(&admin, &user.user_id, None)
+        .await;
+    let approved = flow
+        .update_status_through_route(&admin, &user.user_id, "approved")
+        .await;
+
+    let response = flow.sign_in(|_| {}).await;
+
+    assert_eq!(approved, StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
+    let back = flow.user().await.unwrap();
+    assert_eq!(back.user_id, user.user_id);
+    assert_eq!(back.status, UserStatus::Approved);
+    assert_eq!(back.role, UserRole::Administrator, "the role comes from the ID token, not the kept record");
+    assert!(back.deleted_at.is_none());
+}
+
+#[tokio::test]
+async fn deleting_a_user_revokes_the_access_tokens_bound_to_them_and_no_others() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+    let tokens = Arc::new(
+        FsAccessTokenStore::new(
+            flow._dir
+                .path()
+                .join("tokens"),
+        )
+        .await
+        .unwrap(),
+    );
+    let mut secrets = Vec::new();
+    for bound_to in [&user.user_id, &admin.user_id] {
+        let (id, secret) = generate_token();
+        tokens
+            .create(AccessToken {
+                id,
+                name: "service".to_string(),
+                description: String::new(),
+                token_hash: hash_secret(&secret),
+                user_id: bound_to.clone(),
+                scopes: Vec::new(),
+                resource_pattern: None,
+                required_headers: Vec::new(),
+                created_by: admin.user_id.clone(),
+                parent_token_id: None,
+                delegation_depth: 0,
+                rotation_generation: 0,
+                rotated_at: None,
+                rotated_by: None,
+                created_at: chrono::Utc::now(),
+                last_used_at: None,
+                expires_at: None,
+                revoked_at: None,
+            })
+            .await
+            .unwrap();
+        secrets.push(secret);
+    }
+
+    let deleted = flow
+        .delete_through_route(&admin, &user.user_id, Some(tokens.clone()))
+        .await;
+
+    assert_eq!(deleted, StatusCode::NO_CONTENT);
+    assert!(
+        tokens
+            .authenticate(&secrets[0])
+            .await
+            .is_none(),
+        "the deleted user's token is revoked"
+    );
+    assert!(
+        tokens
+            .authenticate(&secrets[1])
+            .await
+            .is_some(),
+        "another user's token still works"
+    );
+}
+
 #[tokio::test]
 async fn an_unreachable_provider_shows_a_readable_page() {
     let flow = Flow::with_config(|config| config.issuer = "http://127.0.0.1:9".to_string()).await;
@@ -1376,4 +1632,61 @@ async fn signing_out_without_a_live_session_still_clears_the_browser() {
             "{session:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn an_approved_user_can_upload_an_avatar() {
+    let flow = Flow::new().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+
+    let uploaded = flow
+        .upload_avatar_through_route(&user.user_id)
+        .await;
+
+    assert_eq!(uploaded, StatusCode::OK);
+    let stored = flow.user().await.unwrap();
+    assert_eq!(stored.avatar_path, Some(format!("avatars/{}.png", user.user_id)));
+    assert!(
+        std::path::Path::new(
+            flow.oidc
+                .storage
+                .avatars_path()
+        )
+        .join(format!("{}.png", user.user_id))
+        .exists()
+    );
+}
+
+#[tokio::test]
+async fn an_avatar_uploaded_for_a_deleted_user_is_refused_and_its_file_removed() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+    flow.delete_through_route(&admin, &user.user_id, None)
+        .await;
+
+    let uploaded = flow
+        .upload_avatar_through_route(&user.user_id)
+        .await;
+
+    assert_eq!(uploaded, StatusCode::FORBIDDEN);
+    assert!(
+        !std::path::Path::new(
+            flow.oidc
+                .storage
+                .avatars_path()
+        )
+        .join(format!("{}.png", user.user_id))
+        .exists(),
+        "the uploaded file did not stay public"
+    );
+    assert!(
+        flow.user()
+            .await
+            .unwrap()
+            .avatar_path
+            .is_none()
+    );
 }

@@ -119,11 +119,11 @@ pub async fn register_start(
         .is_some();
 
     // Enforce the appliance user limit before registering a new user.
-    if let Ok(users) = auth_state
+    if let Ok(user_count) = auth_state
         .storage
-        .list_users()
+        .count_toward_user_limit()
         .await
-        && let Err(e) = crate::config::global_limits().check_can_add("users", users.len())
+        && let Err(e) = crate::config::global_limits().check_can_add("users", user_count)
     {
         error!("{}", e.message());
         return Err((StatusCode::FORBIDDEN, e.message()));
@@ -439,7 +439,7 @@ pub async fn login_finish(
         })?;
 
     // Load user to get user_id
-    let mut user = auth_state
+    let user = auth_state
         .storage
         .load_user(&username)
         .await
@@ -452,15 +452,18 @@ pub async fn login_finish(
             StatusCode::UNAUTHORIZED
         })?;
 
-    // Update last_logged_in timestamp
-    user.last_logged_in = Some(chrono::Utc::now());
-    if let Err(e) = auth_state
+    let user = auth_state
         .storage
-        .save_user(&user)
+        .record_login(&user.user_id)
         .await
-    {
-        error!("Failed to update last_logged_in for user {}: {}", username, e);
-    }
+        .map_err(|e| {
+            error!("Failed to record the sign-in of user {}: {}", username, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            error!("Refused sign-in of user {}: no longer approved", username);
+            StatusCode::UNAUTHORIZED
+        })?;
 
     let finalized_session = SessionManagerFinalizer::new(
         auth_state
@@ -648,6 +651,7 @@ mod tests {
                 last_logged_in: None,
                 saml_id: None,
                 oidc: None,
+                deleted_at: None,
             })
             .await
             .unwrap();

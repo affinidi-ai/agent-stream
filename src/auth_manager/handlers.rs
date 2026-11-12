@@ -180,22 +180,7 @@ pub async fn list_users(
             .load_user_by_id(&user_id)
             .await
         {
-            users.push(User {
-                username: user_data.username,
-                user_id: user_data.user_id,
-                role: user_data.role,
-                status: user_data.status,
-                is_primary: user_data.is_primary,
-                created_at: user_data.created_at,
-                updated_at: user_data.updated_at,
-                first_name: user_data.first_name,
-                last_name: user_data.last_name,
-                email: user_data.email,
-                department: user_data.department,
-                job_title: user_data.job_title,
-                avatar_path: user_data.avatar_path,
-                last_logged_in: user_data.last_logged_in,
-            });
+            users.push(User::from(user_data));
         }
     }
 
@@ -253,22 +238,7 @@ pub async fn get_user(
         });
     }
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Update a user (role and/or status)
@@ -278,6 +248,7 @@ pub async fn update_user(
     Extension(rbac_config): Extension<std::sync::Arc<RbacConfig>>,
     Extension(notification_store): Extension<Option<std::sync::Arc<crate::integrations::FileSystemNotificationStore>>>,
     Extension(session_manager): Extension<std::sync::Arc<crate::auth::session::SessionManager>>,
+    Extension(pat_authenticator): Extension<Option<std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator>>>,
     pat: Option<Extension<PatContext>>,
     Path(user_id): Path<String>,
     Json(req): Json<UpdateUserRequest>,
@@ -345,11 +316,30 @@ pub async fn update_user(
         }
     }
 
-    // Update the user
+    let reapproved = user_before
+        .deleted_at
+        .is_some()
+        && req.status == Some(crate::auth::UserStatus::Approved);
+
+    if reapproved {
+        if let Some(authenticator) = &pat_authenticator {
+            authenticator
+                .revoke_for_user(&user_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
+        }
+        session_manager
+            .remove_sessions_for_user(&user_id)
+            .await;
+    }
+
     storage
-        .update_user(&user_before.username, req.role.clone(), req.status.clone())
+        .update_user(&user_id, req.role.clone(), req.status.clone(), crate::config::global_limits())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update user: {}", e)))?;
+        .map_err(|e| match e.downcast_ref::<crate::config::LimitExceeded>() {
+            Some(limit) => (StatusCode::FORBIDDEN, limit.message()),
+            None => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update user: {}", e)),
+        })?;
 
     // Update profile fields if provided
     if req.first_name.is_some()
@@ -451,6 +441,14 @@ pub async fn update_user(
         }
     }
 
+    if reapproved && let Some(notif_store) = &notification_store {
+        let notif = notif_store.clone();
+        let user_clone = user_data.clone();
+        tokio::spawn(async move {
+            crate::integrations::trigger_user_approved(notif.as_ref(), &user_clone).await;
+        });
+    }
+
     // Trigger user.updated integration for any update
     if let Some(notif_store) = &notification_store {
         let notif = notif_store.clone();
@@ -461,22 +459,7 @@ pub async fn update_user(
         });
     }
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Delete a user
@@ -486,6 +469,7 @@ pub async fn delete_user(
     Extension(rbac_config): Extension<std::sync::Arc<RbacConfig>>,
     Extension(notification_store): Extension<Option<std::sync::Arc<crate::integrations::FileSystemNotificationStore>>>,
     Extension(session_manager): Extension<std::sync::Arc<crate::auth::session::SessionManager>>,
+    Extension(pat_authenticator): Extension<Option<std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator>>>,
     pat: Option<Extension<PatContext>>,
     Path(user_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -522,20 +506,39 @@ pub async fn delete_user(
         return Err((StatusCode::FORBIDDEN, "Cannot delete administrator users".to_string()));
     }
 
-    // Trigger user.deleted integration before deletion
-    if let Some(notif_store) = &notification_store {
-        let notif = notif_store.clone();
-        let user_clone = user_data.clone();
-        tokio::spawn(async move {
-            crate::integrations::trigger_user_deleted(notif.as_ref(), &user_clone).await;
-        });
+    let already_deleted = user_data.deleted_at.is_some();
+
+    let mut revoked_tokens = 0;
+    if let Some(authenticator) = &pat_authenticator {
+        revoked_tokens = authenticator
+            .revoke_for_user(&user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
     }
 
-    // Permanently delete the user
     storage
-        .delete_user(&user_data.username)
+        .delete_user(&user_data.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete user: {}", e)))?;
+
+    tracing::info!(
+        target: "audit",
+        event = "user.deleted",
+        caller_user_id = %caller_user_id,
+        caller_username = %caller.username,
+        target_user_id = %user_id,
+        already_deleted,
+        revoked_tokens,
+        "User deleted by {}",
+        caller.username,
+    );
+
+    if !already_deleted && let Some(notif_store) = &notification_store {
+        let notif = notif_store.clone();
+        tokio::spawn(async move {
+            crate::integrations::trigger_user_deleted(notif.as_ref(), &user_data).await;
+        });
+    }
 
     // Revoke any active sessions so the deleted account cannot continue
     // operating with previously issued bearer tokens.
@@ -560,22 +563,7 @@ pub async fn get_profile(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load user: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Update current user profile
@@ -603,22 +591,7 @@ pub async fn update_profile(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load updated user: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Upload user avatar
@@ -642,10 +615,16 @@ pub async fn upload_avatar(
         crate::uploads::save_image(storage.avatars_path(), "avatars", &user_data.user_id, file_extension, &avatar_data)
             .await?;
 
-    storage
-        .update_profile(&user_id, None, None, None, None, None, Some(relative_avatar_path.clone()))
+    let linked = storage
+        .set_avatar_if_approved(&user_id, relative_avatar_path.clone())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update profile with avatar: {}", e)))?;
+    if !linked {
+        storage
+            .remove_uploaded_avatar(&user_id, &relative_avatar_path)
+            .await;
+        return Err((StatusCode::FORBIDDEN, "User not approved".to_string()));
+    }
 
     let user_data = storage
         .load_user_by_id(&user_id)
@@ -653,22 +632,7 @@ pub async fn upload_avatar(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load updated user: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(User {
-        username: user_data.username,
-        user_id: user_data.user_id,
-        role: user_data.role,
-        status: user_data.status,
-        is_primary: user_data.is_primary,
-        created_at: user_data.created_at,
-        updated_at: user_data.updated_at,
-        first_name: user_data.first_name,
-        last_name: user_data.last_name,
-        email: user_data.email,
-        department: user_data.department,
-        job_title: user_data.job_title,
-        avatar_path: user_data.avatar_path,
-        last_logged_in: user_data.last_logged_in,
-    }))
+    Ok(Json(User::from(user_data)))
 }
 
 /// Count users with role `Administrator` and status `Approved`.
@@ -717,6 +681,7 @@ mod tests {
             last_logged_in: None,
             saml_id: None,
             oidc: None,
+            deleted_at: None,
         }
     }
 

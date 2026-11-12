@@ -33,7 +33,14 @@ callers on a Surface (see [`SOURCE_AUTH.md`](SOURCE_AUTH.md)).
 The caller sends the secret as `Authorization: Bearer aspat_...`. When no valid session
 matches the bearer, `require_session_auth` tries it as an access token. Authentication
 fails (`401`) when the token is unknown, revoked, or expired, when any ancestor in its
-delegation chain is inactive, or when its bound user is no longer approved. A stored
+delegation chain is inactive, or when its bound user is no longer approved. Deleting a user
+revokes every token bound to them and every token for another subject (for example a service
+account) whose secret they last received, with the tokens delegated from those. That is the
+person who created the token, or who rotated it if it was rotated: a token that someone else
+rotated keeps working, and one the deleted person rotated is revoked. Approving a kept OIDC or
+SAML record again revokes any that remain, so none comes back. A service account's token that
+the deleted person holds stops working, so an administrator creates a new one or rotates
+it. A stored
 resource scope that no longer compiles makes the token unusable rather than unscoped.
 
 Effective permissions on a feature-gated route are the bound user's role intersected with

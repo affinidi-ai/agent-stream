@@ -256,6 +256,13 @@ impl FsAccessTokenStore {
         id: &str,
     ) -> std::io::Result<Option<AccessToken>> {
         let _guard = self.write_lock.lock().await;
+        self.revoke_locked(id).await
+    }
+
+    async fn revoke_locked(
+        &self,
+        id: &str,
+    ) -> std::io::Result<Option<AccessToken>> {
         let Some(root) = self.get(id) else {
             return Ok(None);
         };
@@ -597,6 +604,39 @@ impl PatAuthenticator for FsAccessTokenStore {
             resource_scope,
         })
     }
+
+    async fn revoke_for_user(
+        &self,
+        user_id: &str,
+    ) -> std::io::Result<usize> {
+        let _guard = self.write_lock.lock().await;
+        let active = || {
+            self.cache
+                .iter()
+                .filter(|entry| entry.revoked_at.is_none())
+                .count()
+        };
+        let active_before = active();
+        let token_ids: Vec<String> = self
+            .cache
+            .iter()
+            .filter(|entry| {
+                entry.revoked_at.is_none()
+                    && (entry.user_id == user_id
+                        || entry
+                            .rotated_by
+                            .as_deref()
+                            .unwrap_or(&entry.created_by)
+                            == user_id)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        for token_id in token_ids {
+            self.revoke_locked(&token_id)
+                .await?;
+        }
+        Ok(active_before - active())
+    }
 }
 
 /// Re-read the tokens the previous Active wrote, so a token it revoked is
@@ -762,6 +802,180 @@ mod tests {
                 .is_none(),
             "revoked token"
         );
+    }
+
+    #[tokio::test]
+    async fn revoking_for_a_user_revokes_every_token_bound_to_them_and_no_other() {
+        let s = store().await;
+        for (secret, user) in [("aspat_one", "svc"), ("aspat_two", "svc"), ("aspat_other", "someone-else")] {
+            let mut rec = record(&hash_secret(secret), vec![]);
+            rec.user_id = user.into();
+            s.create(rec).await.unwrap();
+        }
+
+        let revoked = s
+            .revoke_for_user("svc")
+            .await
+            .unwrap();
+
+        assert_eq!(revoked, 2);
+        assert!(
+            s.authenticate("aspat_one")
+                .await
+                .is_none()
+        );
+        assert!(
+            s.authenticate("aspat_two")
+                .await
+                .is_none()
+        );
+        assert!(
+            s.authenticate("aspat_other")
+                .await
+                .is_some()
+        );
+        assert_eq!(
+            s.revoke_for_user("svc")
+                .await
+                .unwrap(),
+            0,
+            "already revoked tokens are not counted again"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_for_a_user_also_revokes_the_tokens_delegated_from_theirs() {
+        let s = store().await;
+        let mut root = record(&hash_secret("aspat_root"), vec![]);
+        root.user_id = "svc".into();
+        let root_id = root.id.clone();
+        s.create(root).await.unwrap();
+        let mut child = record(&hash_secret("aspat_child"), vec![]);
+        child.user_id = "svc".into();
+        child.parent_token_id = Some(root_id);
+        child.delegation_depth = 1;
+        let child_id = child.id.clone();
+        s.create(child).await.unwrap();
+        let mut grandchild = record(&hash_secret("aspat_grandchild"), vec![]);
+        grandchild.user_id = "svc".into();
+        grandchild.parent_token_id = Some(child_id);
+        grandchild.delegation_depth = 2;
+        s.create(grandchild)
+            .await
+            .unwrap();
+
+        let revoked = s
+            .revoke_for_user("svc")
+            .await
+            .unwrap();
+
+        assert_eq!(revoked, 3);
+        for (index, secret) in ["aspat_root", "aspat_child", "aspat_grandchild"]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                s.authenticate(secret)
+                    .await
+                    .is_none(),
+                "delegated token {index} is still valid"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn revoking_for_a_user_also_revokes_tokens_they_minted_for_other_subjects() {
+        let s = store().await;
+        let mut minted = record(&hash_secret("aspat_minted"), vec![]);
+        minted.user_id = "service-account".into();
+        minted.created_by = "leaver".into();
+        s.create(minted)
+            .await
+            .unwrap();
+        let mut unrelated = record(&hash_secret("aspat_unrelated"), vec![]);
+        unrelated.user_id = "service-account".into();
+        unrelated.created_by = "someone-else".into();
+        s.create(unrelated)
+            .await
+            .unwrap();
+
+        let revoked = s
+            .revoke_for_user("leaver")
+            .await
+            .unwrap();
+
+        assert_eq!(revoked, 1);
+        assert!(
+            s.authenticate("aspat_minted")
+                .await
+                .is_none()
+        );
+        assert!(
+            s.authenticate("aspat_unrelated")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_for_a_user_follows_whoever_last_received_the_secret() {
+        let s = store().await;
+        let mut rotated_by_someone_else = record(&hash_secret("aspat_rotated_away"), vec![]);
+        rotated_by_someone_else.user_id = "service-account".into();
+        rotated_by_someone_else.created_by = "leaver".into();
+        rotated_by_someone_else.rotated_by = Some("other-admin".into());
+        s.create(rotated_by_someone_else)
+            .await
+            .unwrap();
+        let mut rotated_by_the_leaver = record(&hash_secret("aspat_rotated_by_leaver"), vec![]);
+        rotated_by_the_leaver.user_id = "service-account".into();
+        rotated_by_the_leaver.created_by = "other-admin".into();
+        rotated_by_the_leaver.rotated_by = Some("leaver".into());
+        s.create(rotated_by_the_leaver)
+            .await
+            .unwrap();
+
+        let revoked = s
+            .revoke_for_user("leaver")
+            .await
+            .unwrap();
+
+        assert_eq!(revoked, 1);
+        assert!(
+            s.authenticate("aspat_rotated_away")
+                .await
+                .is_some(),
+            "another administrator holds this secret now"
+        );
+        assert!(
+            s.authenticate("aspat_rotated_by_leaver")
+                .await
+                .is_none(),
+            "the leaver holds this secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_for_a_user_counts_the_delegated_tokens_it_revokes_too() {
+        let s = store().await;
+        let mut root = record(&hash_secret("aspat_counted_root"), vec![]);
+        root.user_id = "svc".into();
+        root.created_by = "leaver".into();
+        let root_id = root.id.clone();
+        s.create(root).await.unwrap();
+        let mut child = record(&hash_secret("aspat_counted_child"), vec![]);
+        child.user_id = "svc".into();
+        child.created_by = "delegate".into();
+        child.parent_token_id = Some(root_id);
+        child.delegation_depth = 1;
+        s.create(child).await.unwrap();
+
+        let revoked = s
+            .revoke_for_user("leaver")
+            .await
+            .unwrap();
+
+        assert_eq!(revoked, 2);
     }
 
     #[tokio::test]

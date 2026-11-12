@@ -1,0 +1,75 @@
+branch: fix/oidc-delete-keeps-user-out
+changes:
+  added:
+    - timestamp: '2026-11-11T12:00:00.000Z'
+      title: Show a deleted user's OpenID Connect or SAML account on the Users pages
+      description: >-
+        The user API now returns an optional oidc (issuer and subject) or saml_id field for a
+        kept deleted user, and the Users and Edit User pages show it, so an administrator
+        knows whose sign-in approving the record allows. The account stays visible after
+        approval until the user's next sign-in. Users who are not kept are unchanged.
+  changed:
+    - timestamp: '2026-11-11T12:00:00.000Z'
+      title: Leave deleted users out of the user limit
+      description: >-
+        A kept deleted record no longer counts toward the users limit or the users counter,
+        and approving it again is checked against the limit while the user lock is held, so
+        a concurrent sign-in or approval cannot push the appliance past the limit.
+    - timestamp: '2026-11-11T12:00:01.000Z'
+      title: Remove a deleted user's avatar files and log the delete on the audit target
+      description: >-
+        Deleting any user now removes their uploaded avatar images, including files left by
+        an earlier upload with another extension, after the record has changed. A file that
+        cannot be removed is logged and does not stop the delete. The delete is logged on
+        the audit target as user.deleted.
+    - timestamp: '2026-11-11T12:00:02.000Z'
+      title: Send user.approved when a deleted user's kept record is approved again
+      description: >-
+        Approving a kept record again now sends the user.approved integration event, without
+        the welcome notification, so an integration that offboarded the person on
+        user.deleted sees them return.
+  fixed:
+    - timestamp: '2026-11-09T12:00:00.000Z'
+      title: Keep a deleted OpenID Connect or SAML user out at the next sign-in
+      description: >-
+        Deleting a user who signs in with OpenID Connect or SAML used to remove the record,
+        so their next sign-in created a new approved user with their mapped role. Delete now
+        clears the user's profile data and passkeys and keeps a disabled record under their
+        provider account, so the next sign-in is refused until an administrator approves them
+        again. A user whose record was removed before this change has no record left, so
+        disable them again if they signed in anew.
+    - timestamp: '2026-11-11T12:00:03.000Z'
+      title: Refuse a SAML sign-in by a user who is not approved
+      description: >-
+        A SAML sign-in by a user who is not approved is now refused with a 403 page instead
+        of opening a session. A user whose asserted username another user already holds
+        gets their SAML user ID as username instead of a second user with the same
+        username, and is refused only when that is held too. Users who already share a
+        username keep signing in.
+    - timestamp: '2026-11-11T12:00:04.000Z'
+      title: Apply an administrator's user update to the user that was authorised
+      description: >-
+        Approving, disabling or changing the role of a user now writes to that user's id.
+        It used to write to the first record with the same username, which could be another
+        user's. The passkey and SAML sign-in writes also no longer bring back a user deleted
+        during the sign-in.
+    - timestamp: '2026-11-12T12:00:00.000Z'
+      title: Refuse an uploaded image name that leaves the upload directory
+      description: >-
+        Saving an uploaded image now refuses a file name that is not a single path component
+        and an extension that is not one of the supported image types, so a user id can never
+        place an avatar outside the avatars directory.
+  removed: []
+  security:
+    - timestamp: '2026-11-11T12:00:00.000Z'
+      title: Revoke a deleted user's access tokens, including those they hold for others
+      description: >-
+        Affects 1.0.1 and earlier, fixed in the next release. A token for another subject
+        whose secret the deleted user last received (they created it, or rotated it) stayed
+        usable after the delete. Once deleted users are kept, a token bound to one would
+        also have become valid again on approval. Deleting a user now revokes both kinds,
+        with their delegated tokens, and approving a kept record again revokes any that
+        remain and ends the user's earlier sessions. A token that someone else rotated
+        keeps working. A service account token the deleted user holds stops working and
+        must be created or rotated again by another administrator.
+  breaking: []

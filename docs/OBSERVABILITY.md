@@ -63,7 +63,7 @@ lines, not tamper-evident records, and OpenTelemetry exports them only when `log
 names `security_audit`.
 
 The `audit` target carries backup and restore events ("Storage operation audit") and user
-management events (`user.updated`, `user.update_denied`). Every audit-configuration change,
+management events (`user.updated`, `user.update_denied`, `user.deleted`). Every audit-configuration change,
 and any failure to deliver it, is logged under `audit_control`. Neither target is in the default
 `logs.targets`, so OpenTelemetry exports them only when it names them.
 

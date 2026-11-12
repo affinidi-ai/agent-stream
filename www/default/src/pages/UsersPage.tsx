@@ -3,6 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
+import {
+  DELETE_USER_SUCCESS,
+  DELETE_USER_TITLE,
+  isDeletedKeptUser,
+  KEPT_ACCOUNT_HEADING,
+  keptAccountDetail,
+  keptAccountLabel,
+  PROVIDER_ACCOUNT_HEADING,
+} from '../utils/userDelete';
 import { usePermissions } from '../context/PermissionsContext';
 import SearchInput from '../components/shared/SearchInput';
 
@@ -32,6 +41,8 @@ interface User {
   department?: string;
   job_title?: string;
   avatar_path?: string;
+  oidc?: { issuer: string; subject: string };
+  saml_id?: string;
 }
 
 const UsersPage: React.FC = () => {
@@ -94,7 +105,7 @@ const UsersPage: React.FC = () => {
     async (user: User) => {
       try {
         await apiClient.delete(`/users/${user.user_id}`);
-        setSuccess('User deleted successfully');
+        setSuccess(DELETE_USER_SUCCESS);
         setTimeout(() => setSuccess(null), 3000);
         fetchUsers();
       } catch (err: any) {
@@ -267,6 +278,14 @@ const UsersPage: React.FC = () => {
                         </td>
                         <td>
                           <strong>{user.username}</strong>
+                          {keptAccountLabel(user) && (
+                            <div
+                              className="small text-muted"
+                              data-testid={`users-kept-account-${user.user_id}`}
+                            >
+                              {keptAccountLabel(user)}
+                            </div>
+                          )}
                           {user.is_primary && (
                             <span
                               className="badge text-bg-primary ms-2"
@@ -352,7 +371,7 @@ const UsersPage: React.FC = () => {
                               <DeleteButton
                                 onDelete={() => handleDelete(user)}
                                 className="btn-sm"
-                                title="Delete user permanently"
+                                title={DELETE_USER_TITLE}
                               />
                             )}
                         </td>
@@ -436,6 +455,20 @@ const UsersPage: React.FC = () => {
                         {selectedUser.status.toUpperCase()}
                       </span>
                     </div>
+                    {keptAccountLabel(selectedUser) && (
+                      <div className="mb-2" data-testid="users-modal-kept-account">
+                        <strong>
+                          {isDeletedKeptUser(selectedUser)
+                            ? KEPT_ACCOUNT_HEADING
+                            : PROVIDER_ACCOUNT_HEADING}
+                        </strong>{' '}
+                        <span className="text-muted">
+                          {isDeletedKeptUser(selectedUser)
+                            ? keptAccountDetail(keptAccountLabel(selectedUser) ?? '')
+                            : keptAccountLabel(selectedUser)}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -490,6 +523,7 @@ const UsersPage: React.FC = () => {
                       setSelectedUser(null);
                     }}
                     variant="danger"
+                    title={DELETE_USER_TITLE}
                   >
                     Delete User
                   </DeleteButton>

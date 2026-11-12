@@ -75,19 +75,23 @@ pub async fn provision_user_from_oidc(
     let existing = storage
         .load_user_by_oidc_identity(&identity)
         .await?;
+    if existing
+        .as_ref()
+        .is_some_and(|user| user.status != UserStatus::Approved)
+    {
+        return Err(ProvisionRefusal::NotApproved);
+    }
     let own_user_id = existing
         .as_ref()
         .map(|user| user.user_id.as_str());
-    let username = free_username(storage, [&preferred_username, &identity.subject], own_user_id)
+    let username = storage
+        .free_username(&[preferred_username.as_str(), identity.subject.as_str()], own_user_id)
         .await?
         .ok_or(ProvisionRefusal::UsernameTaken)?;
     let now = chrono::Utc::now();
 
     let provisioned = match existing {
         Some(mut user) => {
-            if user.status != UserStatus::Approved {
-                return Err(ProvisionRefusal::NotApproved);
-            }
             let role_changed = user.role != role;
             user.username = username;
             user.email = email;
@@ -100,9 +104,8 @@ pub async fn provision_user_from_oidc(
         }
         None => {
             let user_count = storage
-                .list_users()
-                .await?
-                .len();
+                .count_toward_user_limit()
+                .await?;
             crate::config::global_limits()
                 .check_can_add("users", user_count)
                 .map_err(ProvisionRefusal::UserLimit)?;
@@ -127,6 +130,7 @@ pub async fn provision_user_from_oidc(
                     last_logged_in: Some(now),
                     saml_id: None,
                     oidc: Some(identity),
+                    deleted_at: None,
                 },
                 role_changed: false,
             }
@@ -136,25 +140,6 @@ pub async fn provision_user_from_oidc(
         .save_user(&provisioned.user)
         .await?;
     Ok(provisioned)
-}
-
-/// The first of `candidates` that no other user has as their username. The
-/// admin handlers find users by username, so two users must never share one.
-async fn free_username<const N: usize>(
-    storage: &PasskeyStorage,
-    candidates: [&String; N],
-    own_user_id: Option<&str>,
-) -> anyhow::Result<Option<String>> {
-    for candidate in candidates {
-        match storage
-            .load_user(candidate)
-            .await?
-        {
-            Some(holder) if Some(holder.user_id.as_str()) != own_user_id => continue,
-            _ => return Ok(Some(candidate.clone())),
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -336,6 +321,33 @@ mod tests {
                 .unwrap();
             assert_eq!(stored.role, UserRole::User, "{status}: the refused sign-in changed nothing");
         }
+    }
+
+    #[tokio::test]
+    async fn a_user_who_is_not_approved_is_refused_as_such_even_when_every_username_is_taken() {
+        let (_dir, storage) = storage().await;
+        let mut user = provision(&storage, "sub-1", json!({}), UserRole::User)
+            .await
+            .unwrap()
+            .user;
+        user.username = "renamed".to_string();
+        user.status = UserStatus::Disabled;
+        storage
+            .save_user(&user)
+            .await
+            .unwrap();
+        provision(&storage, "sub-2", json!({ "preferred_username": "taken-a" }), UserRole::User)
+            .await
+            .unwrap();
+        provision(&storage, "sub-3", json!({ "preferred_username": "sub-1" }), UserRole::User)
+            .await
+            .unwrap();
+
+        let refused = provision(&storage, "sub-1", json!({ "preferred_username": "taken-a" }), UserRole::User)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(refused, ProvisionRefusal::NotApproved), "{refused:?}");
     }
 
     #[tokio::test]

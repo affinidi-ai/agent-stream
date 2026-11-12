@@ -479,6 +479,12 @@ its values are `RECORD_ID`, `SURFACE_ID`, `SURFACE_NAME`, `CONTENT_HASH`, `PREV_
 | Gateway record | `gateway.created`, `gateway.updated`, `gateway.deleted`, `gateway.status_changed`, `gateway.accessed` | `GET`, `PUT /api/v1/gateways/{id}/integrations` (`PUT` needs `gateways.edit`) |
 | Dashboard user | `user.created`, `user.approved`, `user.updated`, `user.deleted`, `user.login`, `user.accessed` | `GET`, `PUT /api/v1/users/integrations` (`PUT` needs `integrations.edit`) |
 
+`user.approved` fires when a new user is approved with a role other than administrator, and
+when an administrator approves a deleted user's kept record again, together with `user.updated`
+in both cases. The event for a kept record carries the user id and the provider account (`oidc`
+or `saml_id` in `NEW_STATE`); `USERNAME` is the user id and `USER_EMAIL` is empty until the
+user's next sign-in.
+
 A trigger configuration is `{"integration_integrations": [{"integration_id", "event_types",
 "variables"}]}`, stored under the integration triggers directory (`gateways/{id}/`,
 `users/`). An event is delivered to an integration that is active, in the resource's own

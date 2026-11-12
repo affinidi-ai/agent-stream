@@ -15,6 +15,31 @@ use crate::identity::handlers;
 use crate::identity::state::IdentityApiState;
 use crate::rbac::Feature;
 
+/// The user management routes with the layers every one of their handlers
+/// extracts: the caller's session, user storage, the access-token authenticator
+/// that a delete revokes tokens through, and the RBAC and metrics state.
+fn user_management_routes(
+    pat_authenticator: Option<std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator>>,
+    sess_mgr: std::sync::Arc<crate::auth::session::SessionManager>,
+    storage: std::sync::Arc<crate::auth::storage::PasskeyStorage>,
+    notification_store: Option<std::sync::Arc<crate::integrations::FileSystemNotificationStore>>,
+    rbac_config: std::sync::Arc<crate::rbac::RbacConfig>,
+    metrics_store: std::sync::Arc<crate::metrics::MetricsStore>,
+) -> Router {
+    Router::new()
+        .route("/v1/users", get(crate::auth_manager::handlers::list_users))
+        .route("/v1/users/{user_id}", get(crate::auth_manager::handlers::get_user))
+        .route("/v1/users/{user_id}", put(crate::auth_manager::handlers::update_user))
+        .route("/v1/users/{user_id}", delete(crate::auth_manager::handlers::delete_user))
+        .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
+        .layer(Extension(pat_authenticator))
+        .layer(Extension(sess_mgr))
+        .layer(Extension(storage))
+        .layer(Extension(notification_store))
+        .layer(Extension(rbac_config))
+        .layer(Extension(metrics_store))
+}
+
 fn create_pre_save_llm_connection_test_router<S>(gate: RbacGuard) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -759,19 +784,14 @@ pub fn create_identity_api_router(
         // These handlers are auth-mode-agnostic — they need PasskeyStorage,
         // RbacConfig, and MetricsStore (all available in both Passkey and SAML
         // modes), not the Passkey-specific AuthState.
-        router = router.merge(
-            Router::new()
-                .route("/v1/users", get(crate::auth_manager::handlers::list_users))
-                .route("/v1/users/{user_id}", get(crate::auth_manager::handlers::get_user))
-                .route("/v1/users/{user_id}", put(crate::auth_manager::handlers::update_user))
-                .route("/v1/users/{user_id}", delete(crate::auth_manager::handlers::delete_user))
-                .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
-                .layer(Extension(sess_mgr.clone()))
-                .layer(Extension(storage.clone()))
-                .layer(Extension(notification_store.clone()))
-                .layer(Extension(rbac_config.clone()))
-                .layer(Extension(state.metrics_store.clone())),
-        );
+        router = router.merge(user_management_routes(
+            pat_authenticator.clone(),
+            sess_mgr.clone(),
+            storage.clone(),
+            notification_store.clone(),
+            rbac_config.clone(),
+            state.metrics_store.clone(),
+        ));
 
         // Add profile and permissions routes with session auth middleware.
         // The body limit caps the avatar multipart upload so an oversized file
@@ -1850,6 +1870,7 @@ mod pipe_connection_test_route_tests {
                 last_logged_in: None,
                 saml_id: None,
                 oidc: None,
+                deleted_at: None,
             })
             .await
             .unwrap();
@@ -1879,6 +1900,13 @@ mod pipe_connection_test_route_tests {
 
     #[async_trait::async_trait]
     impl crate::auth_manager::pat::PatAuthenticator for IntegrationPat {
+        async fn revoke_for_user(
+            &self,
+            _user_id: &str,
+        ) -> std::io::Result<usize> {
+            Ok(0)
+        }
+
         async fn authenticate(
             &self,
             token: &str,
@@ -3337,6 +3365,13 @@ mod token_scope_route_tests {
 
     #[async_trait::async_trait]
     impl PatAuthenticator for AdminTokens {
+        async fn revoke_for_user(
+            &self,
+            _user_id: &str,
+        ) -> std::io::Result<usize> {
+            Ok(0)
+        }
+
         async fn authenticate(
             &self,
             token: &str,
@@ -3408,6 +3443,7 @@ mod token_scope_route_tests {
                 last_logged_in: None,
                 saml_id: None,
                 oidc: None,
+                deleted_at: None,
             })
             .await
             .unwrap();
@@ -3484,6 +3520,227 @@ mod token_scope_route_tests {
                 assert_eq!(status, StatusCode::OK, "an unscoped token or session must reach {path}");
             }
         }
+    }
+
+    /// Records the users whose tokens a delete or an approval asked to revoke,
+    /// and fails the revocation when told to.
+    struct RecordingTokens {
+        revoked_for: std::sync::Mutex<Vec<String>>,
+        fails: bool,
+    }
+
+    impl RecordingTokens {
+        fn new(fails: bool) -> Arc<Self> {
+            Arc::new(Self {
+                revoked_for: std::sync::Mutex::new(Vec::new()),
+                fails,
+            })
+        }
+
+        fn revoked_for(&self) -> Vec<String> {
+            self.revoked_for
+                .lock()
+                .unwrap()
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PatAuthenticator for RecordingTokens {
+        async fn revoke_for_user(
+            &self,
+            user_id: &str,
+        ) -> std::io::Result<usize> {
+            if self.fails {
+                return Err(std::io::Error::other("token store unavailable"));
+            }
+            self.revoked_for
+                .lock()
+                .unwrap()
+                .push(user_id.to_string());
+            Ok(1)
+        }
+
+        async fn authenticate(
+            &self,
+            _token: &str,
+        ) -> Option<PatPrincipal> {
+            None
+        }
+    }
+
+    async fn save_member(
+        fixture: &Fixture,
+        user_id: &str,
+        status: UserStatus,
+        federated: bool,
+    ) {
+        let now = chrono::Utc::now();
+        fixture
+            .storage
+            .save_user(&UserData {
+                user_id: user_id.to_string(),
+                username: user_id.to_string(),
+                passkeys: Vec::new(),
+                role: UserRole::User,
+                status,
+                is_primary: false,
+                first_name: None,
+                last_name: None,
+                email: None,
+                department: None,
+                job_title: None,
+                avatar_path: None,
+                created_at: now,
+                updated_at: now,
+                last_logged_in: None,
+                saml_id: None,
+                oidc: federated.then(|| crate::auth::storage::OidcIdentity {
+                    issuer: "https://idp.example.com".to_string(),
+                    subject: format!("sub-{user_id}"),
+                }),
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    fn user_routes(
+        fixture: &Fixture,
+        tokens: &Arc<RecordingTokens>,
+    ) -> Router {
+        user_management_routes(
+            Some(tokens.clone()),
+            fixture.sessions.clone(),
+            fixture.storage.clone(),
+            None,
+            Arc::new(crate::rbac::RbacConfig::default()),
+            Arc::new(crate::metrics::MetricsStore::new(10)),
+        )
+    }
+
+    fn set_status_request(
+        user_id: &str,
+        token: &str,
+        status: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/users/{user_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "status": status }).to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_through_the_user_routes_revokes_their_access_tokens() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "member-1", UserStatus::Approved, false).await;
+        let tokens = RecordingTokens::new(false);
+
+        let status = user_routes(&fixture, &tokens)
+            .oneshot(request("DELETE", "/v1/users/member-1", &fixture.session_token))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(tokens.revoked_for(), vec!["member-1".to_string()]);
+        assert!(
+            fixture
+                .storage
+                .load_user_by_id("member-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_whose_token_revocation_fails_answers_500_and_leaves_the_user_unchanged() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "member-1", UserStatus::Approved, true).await;
+        let tokens = RecordingTokens::new(true);
+
+        let status = user_routes(&fixture, &tokens)
+            .oneshot(request("DELETE", "/v1/users/member-1", &fixture.session_token))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let stored = fixture
+            .storage
+            .load_user_by_id("member-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, UserStatus::Approved);
+        assert!(stored.deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn approving_a_kept_record_again_revokes_its_tokens_and_sessions() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "kept-1", UserStatus::Approved, true).await;
+        let earlier_session = fixture
+            .sessions
+            .create_session("kept-1".to_string(), "kept-1".to_string())
+            .await;
+        fixture
+            .storage
+            .delete_user("kept-1")
+            .await
+            .unwrap();
+        let tokens = RecordingTokens::new(false);
+
+        let status = user_routes(&fixture, &tokens)
+            .oneshot(set_status_request("kept-1", &fixture.session_token, "approved"))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tokens.revoked_for(), vec!["kept-1".to_string()]);
+        assert!(
+            fixture
+                .sessions
+                .validate_session(&earlier_session)
+                .await
+                .is_none(),
+            "a session from before the delete does not come back"
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .load_user_by_id("kept-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            UserStatus::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn approving_a_disabled_user_who_was_not_deleted_revokes_nothing() {
+        let fixture = admin_fixture().await;
+        save_member(&fixture, "disabled-1", UserStatus::Disabled, true).await;
+        let tokens = RecordingTokens::new(false);
+
+        let status = user_routes(&fixture, &tokens)
+            .oneshot(set_status_request("disabled-1", &fixture.session_token, "approved"))
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            tokens
+                .revoked_for()
+                .is_empty()
+        );
     }
 
     /// Router state for exercising route gates only. A request that passes its
