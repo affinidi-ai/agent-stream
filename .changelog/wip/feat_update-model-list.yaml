@@ -1,0 +1,17 @@
+branch: feat/update-model-list
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-18T12:00:00.000Z'
+      title: Refresh the built-in OpenAI, Anthropic, Bedrock and OpenRouter models
+      description: >-
+        The built-in catalogue now lists current models, prices and context
+        limits for OpenAI, Anthropic, AWS Bedrock and OpenRouter, and OpenAI
+        gains an Embeddings endpoint. OpenRouter drops Claude 3.7 Sonnet and
+        Gemini 2.0 Flash and now carries prices. New appliances are seeded with
+        this catalogue; existing appliances keep their stored copy until it is
+        refreshed. The other built-in providers are unchanged.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []
