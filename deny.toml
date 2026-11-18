@@ -31,6 +31,10 @@ exceptions = [
     { allow = [
         "BlueOak-1.0.0",
     ], crate = "minicbor" },
+    # BSD-2-Clause variant ("in this position and unchanged") — via ssi → ssi-ssh
+    { allow = [
+        "BSD-2-Clause-pos-unchanged",
+    ], crate = "sshkeys" },
     # MPL-2.0 copyleft deps
     { allow = [
         "MPL-2.0",
