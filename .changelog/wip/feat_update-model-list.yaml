@@ -13,5 +13,12 @@ changes:
         refreshed. The other built-in providers are unchanged.
   fixed: []
   removed: []
-  security: []
+  security:
+    - timestamp: '2026-11-18T15:00:00.000Z'
+      title: Update libz-sys and quinn-udp to fix two dependency advisories
+      description: >-
+        libz-sys moves from 1.1.31 to 1.1.33 to fix a heap buffer overflow
+        (RUSTSEC-2026-0544), and quinn-udp from 0.5.14 to 0.5.16 to fix a
+        receive loop that can spin after a truncated datagram
+        (RUSTSEC-2026-0538). Only the lockfile changes.
   breaking: []
