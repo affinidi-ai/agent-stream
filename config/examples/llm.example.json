@@ -765,6 +765,7 @@
         {
           "name": "Davinci 002",
           "value": "davinci-002",
+          "enabled": false,
           "cost_per_1k_input": 0.002,
           "cost_per_1k_output": 0.002,
           "max_input_tokens": 16384,
@@ -773,6 +774,7 @@
         {
           "name": "Babbage 002",
           "value": "babbage-002",
+          "enabled": false,
           "cost_per_1k_input": 0.0004,
           "cost_per_1k_output": 0.0004,
           "max_input_tokens": 16384,
@@ -781,6 +783,7 @@
         {
           "name": "GPT 3.5 Turbo Instruct",
           "value": "gpt-3.5-turbo-instruct",
+          "enabled": false,
           "cost_per_1k_input": 0.0015,
           "cost_per_1k_output": 0.002,
           "max_input_tokens": 8192,
@@ -903,16 +906,14 @@
           "value": "omni-moderation-latest",
           "cost_per_1k_input": 0,
           "cost_per_1k_output": 0,
-          "max_input_tokens": 32768,
-          "max_output_tokens": 0
+          "max_input_tokens": 32768
         },
         {
           "name": "Omni Moderation 2024 09 26",
           "value": "omni-moderation-2024-09-26",
           "cost_per_1k_input": 0,
           "cost_per_1k_output": 0,
-          "max_input_tokens": 32768,
-          "max_output_tokens": 0
+          "max_input_tokens": 32768
         },
         {
           "name": "O1 2024 12 17",
@@ -4986,7 +4987,6 @@
         },
         {
           "name": "OpenAI GPT OSS 20B",
-          "enabled": false,
           "capabilities": {
             "supports_json_mode": true
           },
@@ -5027,7 +5027,6 @@
         },
         {
           "name": "OpenAI GPT OSS 120B",
-          "enabled": false,
           "capabilities": {
             "supports_json_mode": true
           },
@@ -5068,7 +5067,6 @@
         },
         {
           "name": "OpenAI GPT OSS Safeguard 20B",
-          "enabled": false,
           "capabilities": {
             "supports_json_mode": true
           },
@@ -5111,7 +5109,6 @@
         },
         {
           "name": "OpenAI GPT OSS Safeguard 120B",
-          "enabled": false,
           "capabilities": {
             "supports_json_mode": true
           },
@@ -11452,8 +11449,8 @@
             "supports_json_mode": true
           },
           "value": "z-ai/glm-5.3:batch",
-          "cost_per_1k_input": 0.000322,
-          "cost_per_1k_output": 0.000989,
+          "cost_per_1k_input": 0.000281,
+          "cost_per_1k_output": 0.00125,
           "max_input_tokens": 1048576,
           "max_output_tokens": 943718
         },

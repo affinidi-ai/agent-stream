@@ -7,11 +7,26 @@ changes:
       description: >-
         The built-in catalogue now lists current models, prices and context
         limits for OpenAI, Anthropic, AWS Bedrock and OpenRouter, and OpenAI
-        gains an Embeddings endpoint. OpenRouter drops Claude 3.7 Sonnet and
-        Gemini 2.0 Flash and now carries prices. New appliances are seeded with
+        gains an Embeddings endpoint. The legacy completions-only OpenAI models
+        (Davinci 002, Babbage 002, GPT 3.5 Turbo Instruct) are listed disabled,
+        since they cannot serve chat. Anthropic enables Claude Fable 5.
+        OpenRouter drops Claude 3.7 Sonnet and Gemini 2.0 Flash, now carries
+        prices, and ships 212 of its 500 models disabled, including every
+        anthropic/* and openai/* model; GPT-4o, enabled before, is now
+        disabled, so a Surface that uses it cannot be saved until it moves to
+        another model. New appliances are seeded with
         this catalogue; existing appliances keep their stored copy until it is
         refreshed. The other built-in providers are unchanged.
-  fixed: []
+  fixed:
+    - timestamp: '2026-11-18T16:00:00.000Z'
+      title: Include the provider's API version in the embeddings URL the dashboard saves
+      description: >-
+        The embeddings model picker for the semantic cache and drift replay
+        evaluation now builds the endpoint URL from the provider's base URL,
+        API version prefix and embeddings path. Before, a catalogue embeddings
+        path skipped the version prefix, so OpenAI's new Embeddings endpoint
+        was saved as https://api.openai.com/embeddings and every embedding call
+        failed.
   removed: []
   security:
     - timestamp: '2026-11-18T15:00:00.000Z'
@@ -20,5 +35,6 @@ changes:
         libz-sys moves from 1.1.31 to 1.1.33 to fix a heap buffer overflow
         (RUSTSEC-2026-0544), and quinn-udp from 0.5.14 to 0.5.16 to fix a
         receive loop that can spin after a truncated datagram
-        (RUSTSEC-2026-0538). Only the lockfile changes.
+        (RUSTSEC-2026-0538). The license check now also accepts the
+        BSD-2-Clause-pos-unchanged license of sshkeys, which ssi pulls in.
   breaking: []
