@@ -2,7 +2,14 @@ branch: fix/enforce-token-scopes-on-unguarded-routes
 changes:
   added: []
   changed: []
-  fixed: []
+  fixed:
+    - timestamp: '2026-11-19T09:00:00.000Z'
+      title: Let a resource-restricted access token read the Surface provider catalog
+      description: >-
+        GET /v1/pipes/config was read as a request for a Surface named config, so an access
+        token with a resource pattern got 404 unless its pattern matched that name. The
+        catalog holds no tenant data, so it is now treated like the integration catalogs and
+        stays readable to such a token.
   removed: []
   security:
     - timestamp: '2026-11-18T15:14:38.000Z'

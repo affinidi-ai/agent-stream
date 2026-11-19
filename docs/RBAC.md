@@ -262,8 +262,10 @@ or carries one of these declarations:
 A unit test parses the source and fails when a `.route(...)` registration has none of these,
 or when the declaration does not wrap every method the route registers, so an access token
 with explicit scopes never reaches a route that none of its scopes covers. The test does not
-inspect static file services (`nest_service`, `fallback_service`) or fallbacks, which serve
-files and `404` answers rather than management handlers. Routes that use `scope_gate`:
+inspect static file services or fallbacks (`nest_service`, `fallback_service`, `fallback`):
+the `/avatars` and `/uploads` file services, the dashboard's static bundle, and the `404`
+answers for unknown routes, none of which is a management handler. Routes that use
+`scope_gate`:
 
 | Routes | Permission a scoped token needs |
 | --- | --- |
@@ -288,7 +290,8 @@ Writes to the caller's own account (`PUT /v1/profile`, `POST /v1/profile/avatar`
 with explicit scopes. Reads of the caller's own data (`GET /v1/profile`, `/v1/permissions`,
 `/v1/user-settings`, `/v1/user-settings/overrides`, `/v1/terms/status`, and the caller's own
 notifications) stay open to it, as does `GET /v1/identity/did-document`, whose document is
-also published at `/.well-known/did.json`.
+also published at `/.well-known/did.json` and, as its `did:webvh` log, at
+`/.well-known/did/did.jsonl`.
 
 ### Surface ownership
 

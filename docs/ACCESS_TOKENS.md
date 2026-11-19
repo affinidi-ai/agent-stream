@@ -45,8 +45,9 @@ resource scope that no longer compiles makes the token unusable rather than unsc
 
 Effective permissions on a feature-gated route are the bound user's role intersected with
 the token's scopes; see [`RBAC.md`](RBAC.md#access-tokens-and-roles). A token with explicit
-scopes is refused with `403` on any route none of its scopes covers, apart from public routes
-and reads of the bound user's own data; [`RBAC.md`](RBAC.md#route-access-declarations) lists
+scopes is refused with `403` on any route none of its scopes covers, apart from public routes,
+reads of the bound user's own data, and reads of data the appliance also publishes, such as
+the DID document; [`RBAC.md`](RBAC.md#route-access-declarations) lists
 the scope each such route needs. Running a Surface needs `pipes.execute`. When Terms are
 enabled, the bound user must have accepted the current Terms, or every call answers `403`
 `TERMS_ACCEPTANCE_REQUIRED` (see [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md)).
