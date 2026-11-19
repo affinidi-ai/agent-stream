@@ -40,6 +40,15 @@ changes:
         connection and key settings, refuses a publication older than the accepted one, a changed or
         reused publication, and a catalog whose SHA-256 or size does not match the manifest. A rollback
         keeps the accepted publication sequence, so an older publication cannot be replayed afterwards.
+    - timestamp: '2026-11-19T12:00:00.000Z'
+      title: Stop a refreshed catalog from taking over providers or endpoint hosts
+      description: >-
+        Affected: 1.0.0 to 1.0.2. Fixed: the release after 1.0.2. A refresh could add a provider whose id
+        matched a custom provider, which then sent that provider's key to the publisher's base URL. It
+        could also set an endpoint path to a full URL, choosing the host that receives a provider's key,
+        and a provider it added stayed callable because its models were enabled. A refresh now skips a
+        new provider whose id matches a custom provider and logs a warning, refuses an endpoint path that
+        does not start with a single '/', and adds a new provider with each of its models disabled.
   breaking:
     - timestamp: '2026-11-19T05:41:50.000Z'
       title: Point llm_catalog.refresh_url at a catalog manifest, not a catalog file

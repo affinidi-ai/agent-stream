@@ -387,20 +387,34 @@ impl LlmProviderCatalog {
     /// the download and keeps everything else, so the file cannot change where
     /// a provider's key is sent or how it is sent. A provider only in the
     /// download is added disabled, after its `default_base_url` passes the
-    /// public-address check. A provider only in storage is kept.
+    /// public-address check, with the provider and each of its models
+    /// disabled. A provider only in the download whose id matches a custom
+    /// provider is skipped, so the download never takes over that id. A
+    /// provider only in storage is kept.
     ///
-    /// The document is validated (schema + non-empty + unique ids) **before**
-    /// anything on disk is touched, and the freshly written file is re-verified
-    /// after the write; any failure rolls the previous file back so a bad
-    /// refresh can never leave the appliance without a working catalog.
+    /// The document is validated (schema + non-empty + unique ids + relative
+    /// endpoint paths) **before** anything on disk is touched, and the freshly
+    /// written file is re-verified after the write; any failure rolls the
+    /// previous file back so a bad refresh can never leave the appliance
+    /// without a working catalog.
     pub async fn refresh_builtin(
         &self,
         doc: Value,
     ) -> Result<BuiltinRefresh, CatalogError> {
         validate_catalog_document(&doc)?;
+        validate_endpoint_paths(&doc)?;
 
         let _guard = self.write_lock.lock().await;
         let mut providers = self.read_doc()?;
+        let builtin_enums: HashSet<String> = providers
+            .iter()
+            .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
+            .collect();
+        let custom_enums: HashSet<String> = self
+            .valid_custom_providers(&builtin_enums)
+            .iter()
+            .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
+            .collect();
         let mut added = 0;
         for downloaded in extract_providers(&doc) {
             let id = provider_enum_value(&downloaded).map(str::to_ascii_lowercase);
@@ -409,12 +423,19 @@ impl LlmProviderCatalog {
                 .find(|stored| provider_enum_value(stored).map(str::to_ascii_lowercase) == id)
             {
                 Some(stored) => *stored = merge_refreshed_provider(stored, &downloaded),
+                None if id
+                    .as_ref()
+                    .is_some_and(|id| custom_enums.contains(id)) =>
+                {
+                    warn!(
+                        provider = provider_enum_value(&downloaded).unwrap_or_default(),
+                        "Skipped a provider in the refreshed LLM catalog whose id matches a custom provider"
+                    );
+                }
                 None => {
                     let mut provider = downloaded;
                     check_base_url(&mut provider, None).await?;
-                    if let Some(fields) = provider.as_object_mut() {
-                        fields.insert("enabled".to_string(), Value::Bool(false));
-                    }
+                    disable_added_provider(&mut provider);
                     providers.push(provider);
                     added += 1;
                 }
@@ -714,6 +735,54 @@ fn merge_refreshed_provider(
         }
     }
     merged
+}
+
+/// Mark a provider the download added as disabled, together with each of its
+/// models, so none of them is offered or callable until an admin enables it.
+fn disable_added_provider(provider: &mut Value) {
+    let Some(fields) = provider.as_object_mut() else {
+        return;
+    };
+    fields.insert("enabled".to_string(), Value::Bool(false));
+    if let Some(models) = fields
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+    {
+        for model in models
+            .iter_mut()
+            .filter_map(Value::as_object_mut)
+        {
+            model.insert("enabled".to_string(), Value::Bool(false));
+        }
+    }
+}
+
+/// Refuse a downloaded endpoint `path` that does not start with exactly one
+/// `/`. Anything else is used as a full URL, so the download could choose the
+/// host that receives a provider's key.
+fn validate_endpoint_paths(doc: &Value) -> Result<(), CatalogError> {
+    for provider in extract_providers(doc) {
+        let endpoints = provider
+            .get("endpoints")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for path in endpoints
+            .iter()
+            .filter_map(|endpoint| endpoint.get("path"))
+        {
+            let relative = path
+                .as_str()
+                .is_some_and(|p| p.starts_with('/') && !p.starts_with("//") && !p.starts_with("/\\"));
+            if !relative {
+                return Err(CatalogError::Validation(format!(
+                    "endpoint path of '{}' must be a path starting with a single '/'",
+                    provider_enum_value(&provider).unwrap_or_default()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Extract the providers array from either a bare `{ "providers": [...] }`
@@ -1754,7 +1823,13 @@ mod tests {
     #[tokio::test]
     async fn refresh_adds_a_new_provider_disabled_after_the_base_url_check() {
         let (store, _custom) = store_with_builtin("refresh_new_provider");
-        let mut acme = with_base_url(provider("acme"), "https://93.184.216.34/v1");
+        let mut acme = with_base_url(
+            provider_with_models(
+                "acme",
+                json!([{ "name": "Default", "value": "acme-default" }, { "name": "On", "value": "acme-on", "enabled": true }]),
+            ),
+            "https://93.184.216.34/v1",
+        );
         acme["enabled"] = json!(true);
         acme[PUBLIC_BASE_URL_MARKER] = json!(false);
 
@@ -1767,6 +1842,85 @@ mod tests {
         assert_eq!(added["enabled"], false);
         assert_eq!(added[PUBLIC_BASE_URL_MARKER], true);
         assert_eq!(added["default_base_url"], "https://93.184.216.34/v1");
+
+        assert_eq!(store.model_enabled("acme", "acme-default"), Some(false));
+        assert_eq!(store.model_enabled("acme", "acme-on"), Some(false));
+        let mut offered = store
+            .cached_providers()
+            .to_vec();
+        retain_enabled_models(&mut offered);
+        let acme_offered = offered
+            .iter()
+            .find(|p| provider_enum_value(p) == Some("acme"))
+            .unwrap();
+        assert_eq!(acme_offered["models"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn refresh_skips_a_new_provider_whose_id_matches_a_custom_provider() {
+        let (store, custom) = store_with_builtin("refresh_custom_collision");
+        let custom_acme = with_base_url(provider("acme"), "https://custom.example/v1");
+        std::fs::write(&custom, json!({ "providers": [custom_acme] }).to_string()).unwrap();
+
+        let refresh = store
+            .refresh_builtin(json!({
+                "providers": [provider("openai"), with_base_url(provider("ACME"), "https://93.184.216.34/v1")]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0 });
+        assert!(
+            store
+                .list_providers()
+                .unwrap()
+                .iter()
+                .all(|p| !provider_enum_value(p).is_some_and(|e| e.eq_ignore_ascii_case("acme")))
+        );
+        assert_eq!(store.custom_providers().len(), 1);
+        let resolved: Vec<Value> = store
+            .cached_providers()
+            .iter()
+            .filter(|p| provider_enum_value(p).is_some_and(|e| e.eq_ignore_ascii_case("acme")))
+            .cloned()
+            .collect();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0]["default_base_url"], "https://custom.example/v1");
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_an_endpoint_path_that_is_not_relative() {
+        let (store, _custom) = store_with_builtin("refresh_endpoint_path");
+        let before = std::fs::read_to_string(&store.path).unwrap();
+
+        for path in [
+            "https://collector.example/v1/chat/completions",
+            "collector.example/chat",
+            "//collector.example/chat",
+            "/\\collector.example/chat",
+        ] {
+            for id in ["openai", "acme"] {
+                let mut downloaded = provider(id);
+                downloaded["endpoints"] = json!([{ "name": "Chat", "path": path }]);
+                let refused = store
+                    .refresh_builtin(json!({ "providers": [downloaded] }))
+                    .await;
+                assert!(
+                    matches!(&refused, Err(CatalogError::Validation(message))
+                        if message.contains("endpoint path") && message.contains(id)),
+                    "{id} with {path} must be refused, got {refused:?}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        assert!(!store.backup_path().exists());
+
+        let mut relative = provider("openai");
+        relative["endpoints"] = json!([{ "name": "Chat", "path": "/chat/completions" }]);
+        store
+            .refresh_builtin(json!({ "providers": [relative] }))
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "openai")["endpoints"][0]["path"], "/chat/completions");
     }
 
     #[tokio::test]
