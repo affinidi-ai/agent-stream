@@ -8,6 +8,15 @@ changes:
         (updated, unchanged, transport_failure, validation_failure, rollback_rejection, hash_mismatch,
         storage_failure), and agent_stream_llm_catalog_publication_sequence reports the accepted
         publication, so operators can see refreshes that were refused and why.
+    - timestamp: '2026-11-19T22:00:00.000Z'
+      title: Reset the accepted catalog publication sequence through the API
+      description: >-
+        POST /api/v1/llm-providers/refresh/reset lowers the accepted publication sequence, so an
+        appliance pinned by a wrong or hostile publication accepts a new one without editing
+        llm_catalog_refresh.json by hand. Every version_id already seen stays refused, so the reset
+        cannot install an earlier publication again. Each reset is logged as an audit event. A refresh
+        now refuses a publication more than 1,000,000 above the accepted sequence, or above 2^32 when
+        none was accepted yet.
   changed:
     - timestamp: '2026-11-19T05:41:50.000Z'
       title: Refresh only models, endpoints and prices of built-in providers
@@ -16,7 +25,7 @@ changes:
         provider takes only models, endpoints, endpoint_parameters and description from the download;
         its name, enabled flag, base URL, API schema and version prefix, API key settings and
         requires_forward_caller_token stay as stored. Changes an administrator made to models and prices
-        of a built-in provider are replaced; keep those in the custom catalog. A provider new in the
+        of a built-in provider are replaced, apart from each model's enabled switch; keep those in the custom catalog. A provider new in the
         download is added disabled after its base URL passes the public-address check, and a provider
         missing from the download is kept. A second refresh of the same publication reports that the
         catalog is already up to date; after a rollback, the next refresh installs it again.
@@ -71,7 +80,7 @@ changes:
     - timestamp: '2026-11-19T05:41:50.000Z'
       title: Stop a refreshed catalog from redirecting provider API keys
       description: >-
-        Affected: 1.0.0 to 1.0.2. Fixed: the release after 1.0.2. A refreshed catalog could change a
+        Affected: 1.0.0 to 1.0.2. Fixed: 1.0.3. A refreshed catalog could change a
         built-in provider's default_base_url, so every provider key was sent to a host the published file
         named, without the private-address check a custom provider gets. The refresh now keeps the stored
         connection and key settings, refuses a publication older than the accepted one, a changed or
@@ -83,12 +92,14 @@ changes:
     - timestamp: '2026-11-19T12:00:00.000Z'
       title: Stop a refreshed catalog from taking over providers or endpoint hosts
       description: >-
-        Affected: 1.0.0 to 1.0.2. Fixed: the release after 1.0.2. A refresh could add a provider whose id
+        Affected: 1.0.0 to 1.0.2. Fixed: 1.0.3. A refresh could add a provider whose id
         matched a custom provider, which then sent that provider's key to the publisher's base URL. It
         could also set an endpoint path to a full URL, choosing the host that receives a provider's key,
         and a provider it added stayed callable because its models were enabled. A refresh now skips a
         new provider whose id matches a custom provider and logs a warning, refuses an endpoint path that
-        does not start with a single '/', and adds a new provider with each of its models disabled.
+        does not start with a single '/', and adds a new provider with each of its models disabled. Each
+        model keeps its stored enabled switch across refreshes, and a model new to a disabled provider
+        is added disabled, so a later publication cannot turn those models back on.
   breaking:
     - timestamp: '2026-11-19T05:41:50.000Z'
       title: Point llm_catalog.refresh_url at a catalog manifest, not a catalog file

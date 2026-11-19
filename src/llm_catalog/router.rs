@@ -41,6 +41,7 @@ pub fn create_llm_providers_router(
         .route("/api/v1/llm-providers/custom", put(handlers::put_custom))
         .route("/api/v1/llm-providers/refresh", post(handlers::refresh_builtin).get(handlers::refresh_status))
         .route("/api/v1/llm-providers/refresh/rollback", post(handlers::rollback_builtin))
+        .route("/api/v1/llm-providers/refresh/reset", post(handlers::reset_refresh_sequence))
         .route("/api/v1/llm-providers/{enum_value}", get(handlers::get_provider))
         .route("/api/v1/llm-providers/{enum_value}", put(handlers::update_provider))
         .route("/api/v1/llm-providers/{enum_value}", delete(handlers::delete_provider))
@@ -185,6 +186,7 @@ mod tests {
             (Method::GET, "/api/v1/llm-providers/refresh", None),
             (Method::POST, "/api/v1/llm-providers/refresh", None),
             (Method::POST, "/api/v1/llm-providers/refresh/rollback", None),
+            (Method::POST, "/api/v1/llm-providers/refresh/reset", Some(json!({ "publication_sequence": 1 }))),
             (Method::GET, "/api/v1/llm-providers/openai", None),
             (Method::PUT, "/api/v1/llm-providers/openai", Some(openai(json!(0.0)))),
             (Method::DELETE, "/api/v1/llm-providers/openai", None),

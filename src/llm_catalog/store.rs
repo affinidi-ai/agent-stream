@@ -392,8 +392,7 @@ impl LlmProviderCatalog {
     /// Whether `llm.json.bak` exists, which means a refresh replaced the
     /// built-in catalog and no rollback restored it since.
     pub(crate) fn has_backup(&self) -> bool {
-        self.backup_path()
-            .exists()
+        self.backup_path().exists()
     }
 
     /// The built-in `llm.json` as it is on disk now, or `None` when it cannot
@@ -473,7 +472,9 @@ impl LlmProviderCatalog {
                         .and_then(|id| checked.get(&id))
                         .cloned()
                         .ok_or_else(|| {
-                            CatalogError::Io("the built-in LLM catalog changed during the refresh; try again".to_string())
+                            CatalogError::Io(
+                                "the built-in LLM catalog changed during the refresh; try again".to_string(),
+                            )
                         })?;
                     providers.push(provider);
                     added += 1;
@@ -747,7 +748,8 @@ pub struct BuiltinRefresh {
 const REFRESHED_PROVIDER_FIELDS: [&str; 4] = ["models", "endpoints", "endpoint_parameters", "description"];
 
 /// The stored provider with [`REFRESHED_PROVIDER_FIELDS`] replaced by the
-/// download's values; a field the download omits is removed.
+/// download's values; a field the download omits is removed. Model `enabled`
+/// switches follow [`carry_model_switches`].
 fn merge_refreshed_provider(
     stored: &Value,
     downloaded: &Value,
@@ -764,8 +766,66 @@ fn merge_refreshed_provider(
                 }
             }
         }
+        if let Some(models) = fields.get_mut("models") {
+            carry_model_switches(stored, models);
+        }
     }
     merged
+}
+
+/// Give each downloaded model the `enabled` switch of the stored model with the
+/// same `value`, and disable a model new to a provider stored with
+/// `"enabled": false`. A refresh therefore never turns on a model an
+/// administrator, or the refresh that added the provider, turned off.
+fn carry_model_switches(
+    stored: &Value,
+    models: &mut Value,
+) {
+    let provider_enabled = stored
+        .get("enabled")
+        .and_then(Value::as_bool)
+        != Some(false);
+    let stored_models = stored
+        .get("models")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let Some(models) = models.as_array_mut() else {
+        return;
+    };
+    for model in models
+        .iter_mut()
+        .filter_map(Value::as_object_mut)
+    {
+        let value = model
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let stored_model = value
+            .as_deref()
+            .and_then(|value| {
+                stored_models
+                    .iter()
+                    .find(|stored| {
+                        stored
+                            .get("value")
+                            .and_then(Value::as_str)
+                            == Some(value)
+                    })
+            });
+        match stored_model.map(|stored| stored.get("enabled")) {
+            Some(Some(enabled)) => {
+                model.insert("enabled".to_string(), enabled.clone());
+            }
+            Some(None) => {
+                model.remove("enabled");
+            }
+            None if !provider_enabled => {
+                model.insert("enabled".to_string(), Value::Bool(false));
+            }
+            None => {}
+        }
+    }
 }
 
 /// Mark a provider the download added as disabled, together with each of its
@@ -794,8 +854,11 @@ fn disable_added_provider(provider: &mut Value) {
 fn validate_models_present(doc: &Value) -> Result<(), CatalogError> {
     match extract_providers(doc)
         .iter()
-        .find(|provider| !provider.get("models").is_some_and(Value::is_array))
-    {
+        .find(|provider| {
+            !provider
+                .get("models")
+                .is_some_and(Value::is_array)
+        }) {
         Some(provider) => Err(CatalogError::Validation(format!(
             "provider '{}' in the refreshed catalog has no models array",
             provider_enum_value(provider).unwrap_or_default()
@@ -1987,6 +2050,73 @@ mod tests {
             .find(|p| provider_enum_value(p) == Some("acme"))
             .unwrap();
         assert_eq!(acme_offered["models"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn an_added_provider_stays_disabled_across_later_refreshes() {
+        let (store, _custom) = store_with_builtin("refresh_added_twice");
+        let acme = |models: Value| with_base_url(provider_with_models("acme", models), "https://93.184.216.34/v1");
+        store
+            .refresh_builtin(
+                json!({ "providers": [provider("openai"), acme(json!([{ "name": "One", "value": "acme-1" }]))] }),
+            )
+            .await
+            .unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [
+                provider("openai"),
+                acme(json!([
+                    { "name": "One", "value": "acme-1", "enabled": true },
+                    { "name": "Two", "value": "acme-2" }
+                ]))
+            ] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("acme", "acme-1"), Some(false));
+        assert_eq!(store.model_enabled("acme", "acme-2"), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_keeps_each_stored_model_switch() {
+        let catalog = temp_path("refresh_model_switches");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let mut openai = provider_with_models(
+            "openai",
+            json!([
+                { "name": "Off", "value": "off", "enabled": false },
+                { "name": "On", "value": "on" }
+            ]),
+        );
+        openai["enabled"] = json!(true);
+        let mut azure = provider_with_models("azure", json!([{ "name": "Kept", "value": "kept" }]));
+        azure["enabled"] = json!(false);
+        std::fs::write(&catalog, json!({ "providers": [openai, azure] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [
+                provider_with_models("openai", json!([
+                    { "name": "Off", "value": "off", "enabled": true },
+                    { "name": "On", "value": "on", "enabled": false },
+                    { "name": "New", "value": "new" }
+                ])),
+                provider_with_models("azure", json!([
+                    { "name": "Kept", "value": "kept" },
+                    { "name": "Added", "value": "added" }
+                ]))
+            ] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("openai", "off"), Some(false), "an administrator's switch-off is kept");
+        assert_eq!(store.model_enabled("openai", "on"), Some(true), "a stored model with no switch stays on");
+        assert_eq!(store.model_enabled("openai", "new"), Some(true), "a new model of an enabled provider is on");
+        assert_eq!(
+            store.model_enabled("azure", "kept"),
+            Some(true),
+            "a disabled provider's stored model keeps working"
+        );
+        assert_eq!(store.model_enabled("azure", "added"), Some(false), "a new model of a disabled provider is off");
     }
 
     #[tokio::test]

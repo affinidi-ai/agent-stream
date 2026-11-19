@@ -3,16 +3,20 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use tracing::info;
 
-use super::refresh::{CatalogRefresher, RefreshFailure, RefreshFailureKind, RefreshOutcome, rollback_catalog};
+use super::refresh::{
+    CatalogRefresher, RefreshFailure, RefreshFailureKind, RefreshOutcome, reset_sequence, rollback_catalog,
+};
 use super::store::{CatalogError, LlmProviderCatalog};
+use crate::auth_manager::middleware::AuthGuardOk;
 
 #[derive(Clone)]
 pub struct LlmCatalogState {
@@ -246,6 +250,48 @@ pub async fn rollback_builtin(State(state): State<LlmCatalogState>) -> impl Into
     }
 }
 
+#[derive(Deserialize)]
+pub struct ResetSequenceRequest {
+    publication_sequence: u64,
+}
+
+/// POST /api/v1/llm-providers/refresh/reset
+///
+/// Lower the accepted publication sequence for an appliance a wrong or hostile
+/// publication pinned, so the next refresh accepts a new publication from
+/// `publication_sequence` up. Publications already seen stay refused. Logged
+/// as an `audit` event.
+pub async fn reset_refresh_sequence(
+    State(state): State<LlmCatalogState>,
+    caller: Option<Extension<AuthGuardOk>>,
+    Json(request): Json<ResetSequenceRequest>,
+) -> impl IntoResponse {
+    match reset_sequence(&state.catalog, request.publication_sequence).await {
+        Ok(previous) => {
+            tracing::warn!(
+                target: "audit",
+                event = "llm_catalog.refresh_sequence_reset",
+                user_id = caller
+                    .as_ref()
+                    .map(|Extension(AuthGuardOk(user_id))| user_id.as_str())
+                    .unwrap_or("unknown"),
+                previous_sequence = previous,
+                publication_sequence = request.publication_sequence,
+                "Built-in LLM catalog refresh sequence reset"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "previous_sequence": previous,
+                    "publication_sequence": request.publication_sequence,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => catalog_error_response(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +311,10 @@ mod tests {
             RefreshFailureKind::Rollback,
             RefreshFailureKind::HashMismatch,
         ] {
-            let response = refresh_failure_response(RefreshFailure { kind, message: "upstream detail".to_string() });
+            let response = refresh_failure_response(RefreshFailure {
+                kind,
+                message: "upstream detail".to_string(),
+            });
             assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{kind:?}");
             assert_eq!(body(response).await["error"], "upstream detail", "{kind:?}");
         }

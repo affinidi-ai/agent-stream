@@ -16,7 +16,9 @@
 //! record, so an older publication stays refused, but marks it rolled back, so
 //! the next refresh installs the accepted publication again. Refreshes and
 //! rollbacks hold [`LlmProviderCatalog::refresh_lock`], so they run one at a
-//! time.
+//! time. A publication may not jump more than [`MAX_SEQUENCE_STEP`] past the
+//! accepted sequence; an appliance pinned by a wrong sequence is recovered
+//! with [`reset_sequence`], which keeps every `version_id` seen refused.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -37,6 +39,11 @@ const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// The furthest a publication may move past the accepted sequence. A bigger
+/// jump is a typo or a hostile publication that would refuse every later one.
+const MAX_SEQUENCE_STEP: u64 = 1_000_000;
+/// The highest sequence a first publication may carry.
+const MAX_FIRST_SEQUENCE: u64 = 1 << 32;
 
 /// The published manifest at `llm_catalog.refresh_url`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +70,8 @@ struct RefreshState {
     rolled_back: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     installed_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sequence_floor: Option<u64>,
 }
 
 impl RefreshState {
@@ -188,7 +197,9 @@ impl CatalogRefresher {
                     RefreshFailureKind::HashMismatch | RefreshFailureKind::Rollback => {
                         tracing::error!(outcome = label, error = %failure.message, "Built-in LLM catalog refresh refused");
                     }
-                    _ => tracing::warn!(outcome = label, error = %failure.message, "Built-in LLM catalog refresh refused"),
+                    _ => {
+                        tracing::warn!(outcome = label, error = %failure.message, "Built-in LLM catalog refresh refused")
+                    }
                 }
                 None
             }
@@ -260,7 +271,7 @@ impl CatalogRefresher {
             serde_json::from_slice(&body).map_err(|e| validation(format!("the catalog manifest is not valid: {e}")))?;
         let catalog_url =
             validate_manifest(&candidate, &manifest_url, self.allow_insecure_source).map_err(validation)?;
-        validate_history(state.manifest.as_ref(), &candidate, &state.seen_version_ids)
+        validate_history(state.manifest.as_ref(), &candidate, &state.seen_version_ids, state.sequence_floor)
             .map_err(|message| RefreshFailure::new(RefreshFailureKind::Rollback, message))?;
 
         if in_step && state.manifest.as_ref() == Some(&candidate) {
@@ -314,6 +325,7 @@ impl CatalogRefresher {
             .seen_version_ids
             .insert(candidate.version_id.clone());
         state.manifest = Some(candidate.clone());
+        state.sequence_floor = None;
         state.etag = None;
         state.rolled_back = true;
         save_state(&state_path, &state)?;
@@ -377,6 +389,42 @@ pub(crate) async fn rollback_catalog(catalog: &LlmProviderCatalog) -> Result<usi
         }
     }
     restored
+}
+
+/// Let a lower publication sequence in again, for an appliance a wrong or
+/// hostile publication pinned: the next refresh accepts a sequence of `floor`
+/// or more. Every `version_id` seen, the accepted one included, stays refused,
+/// so no publication accepted before can be installed again. Waits for a
+/// running refresh. Returns the sequence that was accepted.
+pub(crate) async fn reset_sequence(
+    catalog: &LlmProviderCatalog,
+    floor: u64,
+) -> Result<u64, CatalogError> {
+    let _guard = catalog
+        .refresh_lock()
+        .lock()
+        .await;
+    let path = catalog.refresh_state_path();
+    let record = |failure: RefreshFailure| CatalogError::Io(failure.message);
+    let mut state = load_state(&path).map_err(record)?;
+    let Some(accepted) = state.manifest.take() else {
+        return Err(CatalogError::NotFound("no catalog publication has been accepted".to_string()));
+    };
+    if floor == 0 || floor >= accepted.publication_sequence {
+        return Err(CatalogError::Validation(format!(
+            "publication_sequence must be positive and lower than the accepted publication {}",
+            accepted.publication_sequence
+        )));
+    }
+    state
+        .seen_version_ids
+        .insert(accepted.version_id);
+    state.etag = None;
+    state.rolled_back = false;
+    state.sequence_floor = Some(floor);
+    save_state(&path, &state).map_err(record)?;
+    crate::metrics::backends::prometheus::LLM_CATALOG_PUBLICATION_SEQUENCE.set(floor as f64);
+    Ok(accepted.publication_sequence)
 }
 
 fn transport(message: String) -> RefreshFailure {
@@ -457,14 +505,39 @@ fn validate_manifest(
 }
 
 /// Refuse a publication older than the accepted one, a changed manifest under
-/// the accepted sequence, and a `version_id` already used by another
-/// publication.
+/// the accepted sequence, a `version_id` already used by another publication,
+/// and a sequence that jumps implausibly far. Without an accepted publication,
+/// `floor` (set by [`reset_sequence`]) is the lowest sequence accepted.
 fn validate_history(
     current: Option<&CatalogManifest>,
     candidate: &CatalogManifest,
     seen_version_ids: &BTreeSet<String>,
+    floor: Option<u64>,
 ) -> Result<(), String> {
+    let sequence = candidate.publication_sequence;
+    match current
+        .map(|current| current.publication_sequence)
+        .or(floor)
+    {
+        Some(base) if sequence > base.saturating_add(MAX_SEQUENCE_STEP) => {
+            return Err(format!(
+                "catalog publication {sequence} jumps more than {MAX_SEQUENCE_STEP} past the accepted publication {base}"
+            ));
+        }
+        None if sequence > MAX_FIRST_SEQUENCE => {
+            return Err(format!(
+                "catalog publication {sequence} is above {MAX_FIRST_SEQUENCE}, the most a first publication may carry"
+            ));
+        }
+        _ => {}
+    }
     let Some(current) = current else {
+        if let Some(floor) = floor.filter(|floor| sequence < *floor) {
+            return Err(format!("catalog publication {sequence} is older than the reset sequence {floor}"));
+        }
+        if seen_version_ids.contains(&candidate.version_id) {
+            return Err(format!("catalog version_id '{}' was already used", candidate.version_id));
+        }
         return Ok(());
     };
     if candidate.publication_sequence < current.publication_sequence {
@@ -543,11 +616,7 @@ fn warn_if_unrecorded(
     catalog: &LlmProviderCatalog,
     state: &RefreshState,
 ) {
-    if state
-        .manifest
-        .is_none()
-        && catalog.has_backup()
-    {
+    if state.manifest.is_none() && state.sequence_floor.is_none() && catalog.has_backup() {
         tracing::warn!(
             "Built-in LLM catalog was refreshed before but llm_catalog_refresh.json holds no accepted publication; the next refresh accepts any publication"
         );
@@ -881,7 +950,10 @@ mod tests {
             .refresh(&catalog)
             .await
             .unwrap();
-        assert!(matches!(edited, RefreshOutcome::Updated { ref manifest, .. } if manifest.publication_sequence == 1), "{edited:?}");
+        assert!(
+            matches!(edited, RefreshOutcome::Updated { ref manifest, .. } if manifest.publication_sequence == 1),
+            "{edited:?}"
+        );
         assert_eq!(models(&catalog), vec!["gpt-5"]);
 
         let again = refresher
@@ -1196,7 +1268,13 @@ mod tests {
         });
         let larger = refused(&refresher, &catalog).await;
         assert_eq!(larger.kind, RefreshFailureKind::HashMismatch, "{}", larger.message);
-        assert!(larger.message.contains("larger than"), "{}", larger.message);
+        assert!(
+            larger
+                .message
+                .contains("larger than"),
+            "{}",
+            larger.message
+        );
 
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
         assert!(
@@ -1255,12 +1333,24 @@ mod tests {
 
         let manifest = refused(&refresher(&source), &catalog).await;
         assert_eq!(manifest.kind, RefreshFailureKind::Validation, "{}", manifest.message);
-        assert!(manifest.message.starts_with("catalog source rejected"), "{}", manifest.message);
+        assert!(
+            manifest
+                .message
+                .starts_with("catalog source rejected"),
+            "{}",
+            manifest.message
+        );
 
         let _manifest_only = crate::url_validation::test_service_endpoints::allow(&[source.manifest_url()]);
         let catalog_source = refused(&refresher(&source), &catalog).await;
         assert_eq!(catalog_source.kind, RefreshFailureKind::Validation, "{}", catalog_source.message);
-        assert!(catalog_source.message.starts_with("catalog source rejected"), "{}", catalog_source.message);
+        assert!(
+            catalog_source
+                .message
+                .starts_with("catalog source rejected"),
+            "{}",
+            catalog_source.message
+        );
 
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
         assert!(
@@ -1280,7 +1370,13 @@ mod tests {
 
         let failure = refused(&refresher(&source), &catalog).await;
         assert_eq!(failure.kind, RefreshFailureKind::Transport, "{}", failure.message);
-        assert!(failure.message.contains(&format!("{MAX_MANIFEST_BYTES} byte limit")), "{}", failure.message);
+        assert!(
+            failure
+                .message
+                .contains(&format!("{MAX_MANIFEST_BYTES} byte limit")),
+            "{}",
+            failure.message
+        );
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
     }
 
@@ -1295,7 +1391,13 @@ mod tests {
 
         let failure = refused(&refresher(&source), &catalog).await;
         assert_eq!(failure.kind, RefreshFailureKind::Transport, "{}", failure.message);
-        assert!(failure.message.contains("404"), "{}", failure.message);
+        assert!(
+            failure
+                .message
+                .contains("404"),
+            "{}",
+            failure.message
+        );
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
         assert!(
             !catalog
@@ -1317,7 +1419,13 @@ mod tests {
 
         let failure = refused(&refresher, &catalog).await;
         assert_eq!(failure.kind, RefreshFailureKind::Validation, "{}", failure.message);
-        assert!(failure.message.contains("no publication was accepted yet"), "{}", failure.message);
+        assert!(
+            failure
+                .message
+                .contains("no publication was accepted yet"),
+            "{}",
+            failure.message
+        );
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
     }
 
@@ -1339,9 +1447,27 @@ mod tests {
 
         let failure = refused(&refresher, &catalog).await;
         assert_eq!(failure.kind, RefreshFailureKind::Transport, "{}", failure.message);
-        assert!(failure.message.starts_with("failed to fetch the catalog manifest"), "{}", failure.message);
-        assert!(!failure.message.contains("query-credential"), "{}", failure.message);
-        assert!(!failure.message.contains(&address.to_string()), "{}", failure.message);
+        assert!(
+            failure
+                .message
+                .starts_with("failed to fetch the catalog manifest"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            !failure
+                .message
+                .contains("query-credential"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            !failure
+                .message
+                .contains(&address.to_string()),
+            "{}",
+            failure.message
+        );
     }
 
     #[tokio::test]
@@ -1499,6 +1625,74 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&custom_path).unwrap(), custom);
     }
 
+    #[tokio::test]
+    async fn a_reset_lets_a_lower_new_publication_in_but_no_used_one() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+
+        let none = reset_sequence(&catalog, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(none, CatalogError::NotFound(_)), "{none}");
+
+        source.publish(5, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        source.publish(900, "1.0.4", &catalog_with("gpt-pinned"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        source.publish(6, "1.0.5", &catalog_with("gpt-6"), |_| {});
+        let pinned = refused(&refresher, &catalog).await;
+        assert_eq!(pinned.kind, RefreshFailureKind::Rollback, "{}", pinned.message);
+
+        for floor in [0, 900, 901] {
+            let refused = reset_sequence(&catalog, floor)
+                .await
+                .unwrap_err();
+            assert!(matches!(refused, CatalogError::Validation(_)), "{floor}: {refused}");
+        }
+        assert_eq!(
+            reset_sequence(&catalog, 6)
+                .await
+                .unwrap(),
+            900
+        );
+        let state = load_state(&catalog.refresh_state_path()).unwrap();
+        assert_eq!(state.manifest, None);
+        assert_eq!(state.sequence_floor, Some(6));
+
+        source.publish(900, "1.0.4", &catalog_with("gpt-pinned"), |_| {});
+        let replayed = refused(&refresher, &catalog).await;
+        assert_eq!(replayed.kind, RefreshFailureKind::Rollback, "{}", replayed.message);
+        source.publish(5, "1.0.2", &catalog_with("gpt-old"), |_| {});
+        let older = refused(&refresher, &catalog).await;
+        assert_eq!(older.kind, RefreshFailureKind::Rollback, "{}", older.message);
+
+        source.publish(6, "1.0.5", &catalog_with("gpt-6"), |_| {});
+        let outcome = refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, RefreshOutcome::Updated { ref manifest, .. } if manifest.publication_sequence == 6),
+            "{outcome:?}"
+        );
+        assert_eq!(models(&catalog), vec!["gpt-6"]);
+        assert_eq!(
+            load_state(&catalog.refresh_state_path())
+                .unwrap()
+                .sequence_floor,
+            None
+        );
+    }
+
     fn manifest() -> CatalogManifest {
         CatalogManifest {
             schema_version: 1,
@@ -1624,14 +1818,14 @@ mod tests {
         };
         let seen = BTreeSet::from(["agent-stream:1.0.2".to_string(), current.version_id.clone()]);
 
-        assert!(validate_history(None, &manifest(), &BTreeSet::new()).is_ok());
-        assert!(validate_history(Some(&current), &current, &seen).is_ok());
+        assert!(validate_history(None, &manifest(), &BTreeSet::new(), None).is_ok());
+        assert!(validate_history(Some(&current), &current, &seen, None).is_ok());
         let next = CatalogManifest {
             publication_sequence: 3,
             version_id: "agent-stream:1.0.4".to_string(),
             ..manifest()
         };
-        assert!(validate_history(Some(&current), &next, &seen).is_ok());
+        assert!(validate_history(Some(&current), &next, &seen, None).is_ok());
 
         for (expected, candidate) in [
             (
@@ -1665,9 +1859,51 @@ mod tests {
                 },
             ),
         ] {
-            let error = validate_history(Some(&current), &candidate, &seen).unwrap_err();
+            let error = validate_history(Some(&current), &candidate, &seen, None).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");
         }
+    }
+
+    #[test]
+    fn history_refuses_an_implausible_sequence_jump() {
+        let current = CatalogManifest {
+            publication_sequence: 2,
+            ..manifest()
+        };
+        let seen = BTreeSet::from([current.version_id.clone()]);
+        let at = |publication_sequence: u64| CatalogManifest {
+            publication_sequence,
+            version_id: format!("agent-stream:{publication_sequence}"),
+            ..manifest()
+        };
+
+        assert!(validate_history(Some(&current), &at(2 + MAX_SEQUENCE_STEP), &seen, None).is_ok());
+        for sequence in [3 + MAX_SEQUENCE_STEP, u64::MAX] {
+            let error = validate_history(Some(&current), &at(sequence), &seen, None).unwrap_err();
+            assert!(error.contains("jumps more than"), "{error}");
+        }
+
+        assert!(validate_history(None, &at(MAX_FIRST_SEQUENCE), &BTreeSet::new(), None).is_ok());
+        let first = validate_history(None, &at(MAX_FIRST_SEQUENCE + 1), &BTreeSet::new(), None).unwrap_err();
+        assert!(first.contains("first publication"), "{first}");
+    }
+
+    #[test]
+    fn history_after_a_reset_keeps_the_floor_and_the_seen_ids() {
+        let seen = BTreeSet::from(["agent-stream:pinned".to_string()]);
+        let at = |publication_sequence: u64, version_id: &str| CatalogManifest {
+            publication_sequence,
+            version_id: version_id.to_string(),
+            ..manifest()
+        };
+
+        assert!(validate_history(None, &at(5, "agent-stream:new"), &seen, Some(5)).is_ok());
+        let older = validate_history(None, &at(4, "agent-stream:new"), &seen, Some(5)).unwrap_err();
+        assert!(older.contains("older than the reset sequence"), "{older}");
+        let replayed = validate_history(None, &at(6, "agent-stream:pinned"), &seen, Some(5)).unwrap_err();
+        assert!(replayed.contains("already used"), "{replayed}");
+        let jump = validate_history(None, &at(6 + MAX_SEQUENCE_STEP, "agent-stream:new"), &seen, Some(5)).unwrap_err();
+        assert!(jump.contains("jumps more than"), "{jump}");
     }
 
     #[test]

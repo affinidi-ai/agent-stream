@@ -192,9 +192,9 @@ Refresh is on demand only; nothing polls for a new catalog.
   `HTTPS_PROXY` are honoured. Over plain http the refresh also loses its
   integrity check: the `sha256` and `size_bytes` come from a manifest on the
   same host and channel, so anyone on the network path can serve a catalog of
-  their own, or a manifest with a very high `publication_sequence` that
-  refuses every later publication until `llm_catalog_refresh.json` is
-  removed. Use it only for a mirror on a network you trust.
+  their own, or a manifest with a high `publication_sequence` that refuses
+  every later publication until the sequence is reset. Use it only for a
+  mirror on a network you trust.
   1. It downloads the manifest (10-second timeout, 64 KiB cap), sending the
      stored `ETag` as `If-None-Match`. A `304` reports `unchanged`. The `ETag`
      is not sent while the record is marked rolled back or `llm.json` no
@@ -204,7 +204,7 @@ Refresh is on demand only; nothing polls for a new catalog.
      | Field | Rule |
      | --- | --- |
      | `schema_version` | `1` |
-     | `publication_sequence` | Positive. Lower than the accepted one, or equal with any other field changed: refused. Equal and unchanged: `unchanged`, unless the record is marked rolled back or `llm.json` no longer matches the installed SHA-256; then the publication installs again. |
+     | `publication_sequence` | Positive. Lower than the accepted one, or equal with any other field changed: refused. More than 1,000,000 above the accepted one, or above 2^32 for a first publication: refused. Equal and unchanged: `unchanged`, unless the record is marked rolled back or `llm.json` no longer matches the installed SHA-256; then the publication installs again. |
      | `version_id` | Not empty. One already used by another publication: refused. |
      | `version` | Not empty. The release the catalog comes from, shown to the administrator. |
      | `catalogue_url` | https (http only with `allow_insecure_source`), same host and port as `refresh_url`, no credentials |
@@ -235,11 +235,17 @@ Refresh is on demand only; nothing polls for a new catalog.
        `api_schema`, the `api_key_*` fields and
        `requires_forward_caller_token`, so a published file cannot change
        where or how a provider key is sent. Administrator changes to models
-       and prices of a built-in provider are replaced; keep them in the custom
+       and prices of a built-in provider are replaced, apart from each
+       model's `enabled` switch; keep them in the custom
        catalog, which a refresh never touches.
-     - A provider only in the download is added with `enabled: false`, after
-       its `default_base_url` passes the public-address check a new provider
-       gets.
+     - Each model keeps the `enabled` switch of the stored model with the
+       same `value`, so a refresh never turns on a model that was turned off
+       and never turns off one an administrator has. A model new to a
+       provider stored with `enabled: false` is added with `enabled: false`.
+     - A provider only in the download is added with `enabled: false`, and
+       each of its models too, after its `default_base_url` passes the
+       public-address check a new provider gets. Its models stay off across
+       later refreshes until an administrator enables them.
      - A provider only in `llm.json` is kept.
   6. It completes the record: the accepted manifest, its `ETag`, every
      `version_id` seen and the SHA-256 of the installed `llm.json`, no longer
@@ -254,7 +260,8 @@ Refresh is on demand only; nothing polls for a new catalog.
   `error` at startup. Removing the record resets rollback protection: the
   next refresh accepts any publication, older ones included. Restore a
   known-good copy from backup, or remove it only after confirming the
-  current publication at the source. A refreshed catalog (`llm.json.bak` present) with no
+  current publication at the source. To recover from a wrong
+  `publication_sequence`, use the reset route below instead. A refreshed catalog (`llm.json.bak` present) with no
   accepted publication on record logs a warning, since any publication is
   then accepted. If the record cannot be written in step 4, the refresh
   fails with `storage_failure` and nothing changes. If step 5 fails, the
@@ -296,6 +303,17 @@ Refresh is on demand only; nothing polls for a new catalog.
   again instead of reporting `unchanged`. It does so whether or not
   `refresh_url` is set. If the record cannot be read or updated, the rollback
   fails and the catalog stays as it was.
+- `POST /api/v1/llm-providers/refresh/reset` with
+  `{"publication_sequence": N}` recovers an appliance that a wrong or hostile
+  publication pinned to a high sequence. N must be positive and lower than
+  the accepted sequence. The next refresh then accepts a publication with a
+  sequence of N or more, within the same 1,000,000 step. Every `version_id`
+  already seen stays refused, the pinned one included, so the reset cannot
+  install an earlier publication again; the publisher issues a new one. The
+  catalog itself is unchanged. The answer is
+  `{"previous_sequence", "publication_sequence"}`; `404` when no publication
+  was accepted, `400` for an N out of range. Each reset is logged as an
+  `audit` event (`llm_catalog.refresh_sequence_reset`) with the caller.
 
 ### Routes and permissions
 
@@ -319,6 +337,7 @@ and the dashboard shows the **Models** page only to holders of
 | `GET /api/v1/llm-providers/refresh` | Whether refresh is configured | `llm_catalog.edit` |
 | `POST /api/v1/llm-providers/refresh` | Refresh from `refresh_url` | `llm_catalog.edit` |
 | `POST /api/v1/llm-providers/refresh/rollback` | Restore the backup | `llm_catalog.edit` |
+| `POST /api/v1/llm-providers/refresh/reset` | Lower the accepted publication sequence | `llm_catalog.edit` |
 
 Every write checks each model's and endpoint's `cost_per_1k_input` and
 `cost_per_1k_output` (`validate_catalog_prices` in
