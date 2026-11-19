@@ -3,7 +3,7 @@
 //! Every route either names the permission it needs (`RbacGuard::gate`,
 //! `maybe_gate`, `require_feature`, [`scope_gate`]), is public under the session
 //! guard, or declares here why it needs none. The route-coverage test below
-//! fails the build for a route that does neither, so a management access token
+//! fails the build for a `.route(...)` registration that does neither, so a management access token
 //! with explicit scopes never reaches a route none of its scopes covers.
 
 use crate::auth_manager::pat::{PatContext, PatDelegationContext};
@@ -40,8 +40,9 @@ where
     mr.layer(axum::middleware::from_fn(scoped_token_refusal))
 }
 
-/// The route reads only the caller's own data, so it is open to any
-/// authenticated caller, including an access token with explicit scopes.
+/// The route reads only the caller's own data, or data the appliance also
+/// publishes without authentication, so it is open to any authenticated
+/// caller, including an access token with explicit scopes.
 pub fn self_service<S>(mr: MethodRouter<S>) -> MethodRouter<S> {
     mr
 }
@@ -320,6 +321,42 @@ mod route_coverage {
         methods.0
     }
 
+    /// The declaration function called outermost around a method router, and
+    /// the `Feature` variant it names, such as `("scope_gate", Some("PipesView"))`.
+    fn wrapper_of(expr: &syn::Expr) -> Option<(String, Option<String>)> {
+        let syn::Expr::Call(call) = expr else {
+            return None;
+        };
+        let syn::Expr::Path(callee) = call.func.as_ref() else {
+            return None;
+        };
+        let name = callee
+            .path
+            .segments
+            .last()?
+            .ident
+            .to_string();
+        let feature = call
+            .args
+            .iter()
+            .find_map(|arg| match arg {
+                syn::Expr::Path(path)
+                    if path
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|segment| segment.ident == "Feature") =>
+                {
+                    path.path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string())
+                }
+                _ => None,
+            });
+        Some((name, feature))
+    }
+
     struct Route {
         /// The literal path, or `None` when the path is computed.
         path: Option<String>,
@@ -327,6 +364,7 @@ mod route_coverage {
         wrapped: bool,
         layered: bool,
         methods: Vec<Method>,
+        wrapper: Option<(String, Option<String>)>,
     }
 
     impl Route {
@@ -443,6 +481,7 @@ mod route_coverage {
                     wrapped: is_wrapped(&call.args[1]),
                     layered: self.layer_depth > 0,
                     methods: methods_of(&call.args[1]),
+                    wrapper: wrapper_of(&call.args[1]),
                 });
             }
             visit::visit_expr_method_call(self, call);
@@ -495,12 +534,12 @@ mod route_coverage {
             .collect()
     }
 
-    #[test]
-    fn every_route_declares_its_access() {
+    /// Every route registered by the modules compiled into the binary, with the
+    /// file that registers it, relative to `src/`.
+    fn crate_routes() -> Vec<(PathBuf, Route)> {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut pending = vec![src.join("main.rs")];
-        let mut findings = Vec::new();
-        let mut checked = 0;
+        let mut routes = Vec::new();
         while let Some(file) = pending.pop() {
             let source = std::fs::read_to_string(&file).expect("read source file");
             let syntax = syn::parse_file(&source).unwrap_or_else(|error| panic!("parse {}: {error}", file.display()));
@@ -511,26 +550,108 @@ mod route_coverage {
                     .iter()
                     .map(|module| module_file(module)),
             );
-            for route in &scan.routes {
-                checked += 1;
-                if !route.declares_access() {
-                    findings.push(format!(
-                        "{}:{}",
-                        file.strip_prefix(&src)
-                            .unwrap_or(&file)
-                            .display(),
-                        route.describe()
-                    ));
-                }
-            }
+            let relative = file
+                .strip_prefix(&src)
+                .unwrap_or(&file)
+                .to_path_buf();
+            routes.extend(
+                scan.routes
+                    .into_iter()
+                    .map(|route| (relative.clone(), route)),
+            );
         }
+        routes
+    }
 
-        assert!(checked > 100, "the scan found only {checked} routes; it is missing route registrations");
+    #[test]
+    fn every_route_declares_its_access() {
+        let routes = crate_routes();
+        let findings: Vec<String> = routes
+            .iter()
+            .filter(|(_, route)| !route.declares_access())
+            .map(|(file, route)| format!("{}:{}", file.display(), route.describe()))
+            .collect();
+
+        assert!(routes.len() > 100, "the scan found only {} routes; it is missing route registrations", routes.len());
         assert!(
             findings.is_empty(),
             "routes declare no access rule; wrap each in a permission guard (gate, maybe_gate, require_feature, scope_gate) or a declaration (refuse_scoped_tokens, self_service, handler_checked, public, source_authenticated):\n{}",
             findings.join("\n")
         );
+    }
+
+    /// Which scope an access token with explicit scopes needs on each route that
+    /// every signed-in user may call, and which of those routes it may never or
+    /// always reach. A route rewired to another permission, or added to or
+    /// dropped from these groups, fails here until this table changes with it.
+    const SCOPED_TOKEN_RULES: &[(&str, &str, &str, Option<&str>)] = &[
+        ("DELETE", "/v1/user-settings", "refuse_scoped_tokens", None),
+        ("GET", "/v1/config/networking", "scope_gate", Some("SettingsView")),
+        ("GET", "/v1/config/surface-routing", "scope_gate", Some("PipesView")),
+        ("GET", "/v1/gateways", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/gateways/{id}", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/gateways/{id}/integrations", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/gateways/{id}/marketplace", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/gateways/{id}/policy", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/gateways/{id}/surfaces", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/identity/did-document", "self_service", None),
+        ("GET", "/v1/identity/resolve-did", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/identity/resolve-did-document", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/integrations/config", "scope_gate", Some("IntegrationsView")),
+        ("GET", "/v1/integrations/runtime-variables", "scope_gate", Some("IntegrationsView")),
+        ("GET", "/v1/limits", "scope_gate", Some("MetricsView")),
+        ("GET", "/v1/marketplace/models", "scope_gate", Some("GatewaysView")),
+        ("GET", "/v1/marketplace/purchased", "scope_gate", Some("PaymentsView")),
+        ("GET", "/v1/mediators", "scope_gate", Some("MediatorsView")),
+        ("GET", "/v1/mediators/compatible", "scope_gate", Some("MediatorsView")),
+        ("GET", "/v1/mediators/{id}", "scope_gate", Some("MediatorsView")),
+        ("GET", "/v1/notifications", "self_service", None),
+        ("GET", "/v1/notifications/unread/count", "self_service", None),
+        ("GET", "/v1/notifications/user-welcome-template", "scope_gate", Some("NotificationsView")),
+        ("GET", "/v1/notifications/{id}", "self_service", None),
+        ("GET", "/v1/permissions", "self_service", None),
+        ("GET", "/v1/pipes/config", "scope_gate", Some("PipesView")),
+        ("GET", "/v1/profile", "self_service", None),
+        ("GET", "/v1/prompt-guard/config", "scope_gate", Some("PipesView")),
+        ("GET", "/v1/terms/status", "self_service", None),
+        ("GET", "/v1/user-settings", "self_service", None),
+        ("GET", "/v1/user-settings/overrides", "self_service", None),
+        ("GET", "/v1/users/integrations", "scope_gate", Some("IntegrationsView")),
+        ("POST", "/v1/gateways/{id}/ping", "scope_gate", Some("GatewaysView")),
+        ("POST", "/v1/profile/avatar", "refuse_scoped_tokens", None),
+        ("POST", "/v1/terms/acceptances", "refuse_scoped_tokens", None),
+        ("POST", "/v1/uploads/image", "scope_gate", Some("PipesEdit")),
+        ("POST", "/v1/user-settings", "refuse_scoped_tokens", None),
+        ("POST", "/v1/verify/{did}", "scope_gate", Some("GatewaysView")),
+        ("PUT", "/v1/profile", "refuse_scoped_tokens", None),
+    ];
+
+    #[test]
+    fn each_scoped_token_rule_names_the_expected_permission() {
+        let mut found: Vec<(String, String, String, Option<String>)> = crate_routes()
+            .into_iter()
+            .filter_map(|(_, route)| {
+                let (wrapper, feature) = route.wrapper?;
+                if !matches!(wrapper.as_str(), "scope_gate" | "refuse_scoped_tokens" | "self_service") {
+                    return None;
+                }
+                let methods: Vec<String> = route
+                    .methods
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                Some((methods.join(","), route.path?, wrapper, feature))
+            })
+            .collect();
+        found.sort();
+        let mut expected: Vec<(String, String, String, Option<String>)> = SCOPED_TOKEN_RULES
+            .iter()
+            .map(|(method, path, wrapper, feature)| {
+                (method.to_string(), path.to_string(), wrapper.to_string(), feature.map(str::to_string))
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(found, expected);
     }
 
     #[test]

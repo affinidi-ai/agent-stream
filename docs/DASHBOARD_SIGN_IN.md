@@ -392,13 +392,15 @@ variables are set; see [`development/TESTING.md`](development/TESTING.md).
 ## Profile and avatar
 
 These routes act on the caller's own user record, taken from the session (or, for an access
-token, its bound user). They need no permission beyond an approved user.
+token, its bound user). They need no permission beyond an approved user, but an access token
+with explicit scopes may only read them (see
+[`RBAC.md`](RBAC.md#route-access-declarations)).
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
 | `GET /v1/profile` | Any signed-in user | The caller's username, role, status, profile fields, avatar path and last sign-in |
-| `PUT /v1/profile` | Any signed-in user | Update `first_name`, `last_name`, `email`, `department` and `job_title`; omitted fields are kept |
-| `POST /v1/profile/avatar` | Any signed-in user | Upload an avatar as multipart field `avatar`; returns the updated profile |
+| `PUT /v1/profile` | Any signed-in user; refused to an access token with explicit scopes | Update `first_name`, `last_name`, `email`, `department` and `job_title`; omitted fields are kept |
+| `POST /v1/profile/avatar` | Any signed-in user; refused to an access token with explicit scopes | Upload an avatar as multipart field `avatar`; returns the updated profile |
 | `GET /v1/permissions` | Any signed-in user | The caller's permissions (see [`RBAC.md`](RBAC.md#permissions-response)) |
 
 In SAML mode the identity provider overwrites the profile fields at each sign-in; in OIDC
@@ -413,7 +415,7 @@ API prefix without a session.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
-| `POST /v1/uploads/image` | Any signed-in user | Store a dashboard image, such as an LLM provider logo, sent as multipart field `file`; returns `{"path": "uploads/<id>.<ext>"}` |
+| `POST /v1/uploads/image` | Any signed-in user; an access token with explicit scopes needs `pipes.edit` | Store a dashboard image, such as an LLM provider logo, sent as multipart field `file`; returns `{"path": "uploads/<id>.<ext>"}` |
 
 Avatars and uploads share the same checks:
 
@@ -454,8 +456,8 @@ stored per user under `[storage_paths] settings` in `users/<user_id>.json`.
 | Route | Permission | Purpose |
 | --- | --- | --- |
 | `GET /v1/user-settings` | Any signed-in user | The effective settings: the caller's overrides applied over the system settings |
-| `POST /v1/user-settings` | Any signed-in user | Set overrides for the fields supplied; returns the effective settings |
-| `DELETE /v1/user-settings` | Any signed-in user | Remove all the caller's overrides |
+| `POST /v1/user-settings` | Any signed-in user; refused to an access token with explicit scopes | Set overrides for the fields supplied; returns the effective settings |
+| `DELETE /v1/user-settings` | Any signed-in user; refused to an access token with explicit scopes | Remove all the caller's overrides |
 | `GET /v1/user-settings/overrides` | Any signed-in user | Only the caller's overrides |
 
 A user can override `refresh_interval_seconds` (1 to 300), `log_timestamp_format` (`utc`,

@@ -254,33 +254,41 @@ or carries one of these declarations:
 | --- | --- |
 | `scope_gate` | Every signed-in user may call it; an access token with explicit scopes needs the named permission in its scopes. |
 | `refuse_scoped_tokens` | A write to the caller's own account. An access token with explicit scopes gets `403`. |
-| `self_service` | A read of the caller's own data, open to any authenticated caller. |
+| `self_service` | A read of the caller's own data, or of data the appliance also publishes without authentication, open to any authenticated caller. |
 | `handler_checked` | The handler checks role and scope itself, as described above. |
 | `public` | Needs no authentication: a public document such as a DID document or revocation list, a redirect, or the OAuth provider's callback. |
 | `source_authenticated` | Surface traffic on a listener, authenticated by the Surface's source authentication. |
 
-A unit test parses the source and fails when a route has none of these, or when the
-declaration does not wrap every method the route registers, so an access token
-with explicit scopes never reaches a route that none of its scopes covers. Routes that use
-`scope_gate`:
+A unit test parses the source and fails when a `.route(...)` registration has none of these,
+or when the declaration does not wrap every method the route registers, so an access token
+with explicit scopes never reaches a route that none of its scopes covers. The test does not
+inspect static file services (`nest_service`, `fallback_service`) or fallbacks, which serve
+files and `404` answers rather than management handlers. Routes that use `scope_gate`:
 
 | Routes | Permission a scoped token needs |
 | --- | --- |
 | Gateway reads (`GET /v1/gateways`, `/v1/gateways/{id}`, `/integrations`, `/policy`, `/surfaces`, `/marketplace`), `POST /v1/gateways/{id}/ping`, `GET /v1/marketplace/models` | `gateways.view` |
 | `GET /v1/mediators`, `/v1/mediators/compatible`, `/v1/mediators/{id}` | `mediators.view` |
 | `GET /v1/marketplace/purchased` | `payments.view` |
-| `GET /v1/config/surface-routing`, `/v1/config/networking`, `/v1/pipes/config`, `/v1/prompt-guard/config`, `/v1/integrations/config`, `/v1/integrations/runtime-variables` | `settings.view` |
+| `GET /v1/config/surface-routing`, `/v1/pipes/config`, `/v1/prompt-guard/config` (the catalogs the Surface editor reads) | `pipes.view` |
+| `GET /v1/config/networking` | `settings.view` |
+| `GET /v1/integrations/config`, `/v1/integrations/runtime-variables`, `/v1/users/integrations` | `integrations.view` |
 | `GET /v1/limits` | `metrics.view` |
 | `POST /v1/uploads/image` | `pipes.edit` |
-| `GET /v1/identity/did-document`, `/v1/identity/resolve-did`, `/v1/identity/resolve-did-document`, `POST /v1/verify/{did}` | `gateways.view` |
-| `GET /v1/users/integrations` | `integrations.view` |
+| `GET /v1/identity/resolve-did`, `/v1/identity/resolve-did-document`, `POST /v1/verify/{did}` | `gateways.view` |
 | `GET /v1/notifications/user-welcome-template` | `notifications.view` |
+
+A token holds only scopes its bound user's role holds, and `settings.view` and
+`integrations.view` are administrator-only by default. So a scoped token reaches the
+networking read and the integration catalogs only when it is bound to an administrator; a
+base user who needs them uses a token without explicit scopes.
 
 Writes to the caller's own account (`PUT /v1/profile`, `POST /v1/profile/avatar`,
 `POST` and `DELETE /v1/user-settings`, `POST /v1/terms/acceptances`) refuse an access token
 with explicit scopes. Reads of the caller's own data (`GET /v1/profile`, `/v1/permissions`,
 `/v1/user-settings`, `/v1/user-settings/overrides`, `/v1/terms/status`, and the caller's own
-notifications) stay open to it.
+notifications) stay open to it, as does `GET /v1/identity/did-document`, whose document is
+also published at `/.well-known/did.json`.
 
 ### Surface ownership
 

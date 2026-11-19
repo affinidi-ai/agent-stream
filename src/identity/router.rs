@@ -168,7 +168,8 @@ where
 }
 
 /// Appliance routing, networking and resource limits. Every signed-in user
-/// reads them; an access token with explicit scopes needs `settings.view`, or
+/// reads them; an access token with explicit scopes needs `pipes.view` for the
+/// routing the Surface editor reads, `settings.view` for networking, and
 /// `metrics.view` for the limits.
 fn create_appliance_config_read_router<S>() -> Router<S>
 where
@@ -176,10 +177,7 @@ where
     IdentityApiState: axum::extract::FromRef<S>,
 {
     Router::new()
-        .route(
-            "/v1/config/surface-routing",
-            scope_gate(get(handlers::get_surface_routing_config), Feature::SettingsView),
-        )
+        .route("/v1/config/surface-routing", scope_gate(get(handlers::get_surface_routing_config), Feature::PipesView))
         .route("/v1/config/networking", scope_gate(get(handlers::get_networking_config), Feature::SettingsView))
         .route("/v1/limits", scope_gate(get(handlers::list_limits), Feature::MetricsView))
 }
@@ -609,7 +607,7 @@ pub fn create_identity_api_router(
         .route("/didcomm/ws", get(handlers::didcomm_ws_endpoint))
         // Identity credential routes
         .route("/v1/identity/issue", rbac_guard.gate(post(handlers::issue_credential), Feature::IdentityIssue))
-        .route("/v1/identity/did-document", scope_gate(get(handlers::get_did_document), Feature::GatewaysView))
+        .route("/v1/identity/did-document", self_service(get(handlers::get_did_document)))
         .route("/v1/identity/resolve-did", scope_gate(get(handlers::resolve_did_document), Feature::GatewaysView))
         .route(
             "/v1/identity/resolve-did-document",
@@ -1113,10 +1111,7 @@ pub fn create_identity_api_router(
     // Create gateway routes if store is provided
     let gateway_router = if let Some(ref store) = gateway_store {
         let mut router = Router::new()
-            .route(
-                "/v1/pipes/config",
-                scope_gate(get(crate::gateways::handlers::get_pipes_config), Feature::SettingsView),
-            )
+            .route("/v1/pipes/config", scope_gate(get(crate::gateways::handlers::get_pipes_config), Feature::PipesView))
             .route(
                 "/v1/marketplace/purchase/{model_id}",
                 rbac_guard.gate(post(crate::gateways::handlers::post_marketplace_purchase), Feature::PaymentsEdit),
@@ -1135,7 +1130,7 @@ pub fn create_identity_api_router(
             )
             .route(
                 "/v1/prompt-guard/config",
-                scope_gate(get(crate::gateways::handlers::get_prompt_guard_config), Feature::SettingsView),
+                scope_gate(get(crate::gateways::handlers::get_prompt_guard_config), Feature::PipesView),
             )
             .route(
                 "/v1/gateways",
@@ -2174,14 +2169,14 @@ mod pipe_connection_test_route_tests {
     }
 
     #[tokio::test]
-    async fn integration_settings_reads_need_settings_view_on_a_scoped_token() {
+    async fn integration_catalogs_need_integrations_view_on_a_scoped_token() {
         let cases = [
             (
-                "scoped without settings.view",
-                Some(vec!["integrations.view".to_string()]),
+                "scoped without integrations.view",
+                Some(vec!["settings.view".to_string()]),
                 axum::http::StatusCode::FORBIDDEN,
             ),
-            ("scoped to settings.view", Some(vec!["settings.view".to_string()]), axum::http::StatusCode::OK),
+            ("scoped to integrations.view", Some(vec!["integrations.view".to_string()]), axum::http::StatusCode::OK),
             ("unscoped", None, axum::http::StatusCode::OK),
         ];
 
@@ -4118,17 +4113,17 @@ mod token_scope_route_tests {
             .layer(middleware::from_fn_with_state(auth_layer(&fixture), require_session_auth))
             .with_state(GateOnlyState);
 
-        for (path, passed) in [
-            ("/v1/config/surface-routing", Err(())),
-            ("/v1/config/networking", Err(())),
-            ("/v1/limits", Ok(StatusCode::OK)),
+        for (path, holder, other, passed) in [
+            ("/v1/config/surface-routing", "aspat_pipes_view", "aspat_metrics_view", Err(())),
+            ("/v1/config/networking", "aspat_settings_view", "aspat_pipes_view", Err(())),
+            ("/v1/limits", "aspat_metrics_view", "aspat_pipes_view", Ok(StatusCode::OK)),
         ] {
             assert_eq!(
-                gate_outcome(&app, "GET", path, "aspat_pipes_view").await,
+                gate_outcome(&app, "GET", path, other).await,
                 Ok(StatusCode::FORBIDDEN),
-                "a pipes.view token must not GET {path}"
+                "{other} must not GET {path}"
             );
-            for token in ["aspat_settings_view", "aspat_unscoped", fixture.session_token.as_str()] {
+            for token in [holder, "aspat_unscoped", fixture.session_token.as_str()] {
                 assert_eq!(
                     gate_outcome(&app, "GET", path, token).await,
                     passed,
@@ -4136,16 +4131,6 @@ mod token_scope_route_tests {
                 );
             }
         }
-        assert_eq!(
-            gate_outcome(&app, "GET", "/v1/limits", "aspat_metrics_view").await,
-            Ok(StatusCode::OK),
-            "a metrics.view token must pass the gate on the limits read"
-        );
-        assert_eq!(
-            gate_outcome(&app, "GET", "/v1/config/networking", "aspat_metrics_view").await,
-            Ok(StatusCode::FORBIDDEN),
-            "the networking read needs settings.view, not metrics.view"
-        );
     }
 
     async fn status_of(

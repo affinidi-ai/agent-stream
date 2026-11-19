@@ -37,7 +37,7 @@ the root of the listener, outside the `/api` prefix:
 
 The DIDComm endpoints `POST /didcomm` and `GET /didcomm/ws` are on the management router.
 `GET /api/v1/identity/did-document` returns the appliance DID document to any signed-in
-caller (an access token with explicit scopes needs `gateways.view`): the `did:webvh`
+caller, including an access token with explicit scopes: the `did:webvh`
 document once the DID has migrated, otherwise the `did:web` one.
 
 The gateway store keeps a **self gateway** record for this appliance

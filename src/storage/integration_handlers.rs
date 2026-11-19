@@ -38,8 +38,8 @@ pub fn integration_api_router(
         .route("/v1/integrations", maybe_gate(rbac_guard, get(list_notifiers), Feature::IntegrationsView))
         .route("/v1/integrations", maybe_gate(rbac_guard, post(create_notifier), Feature::IntegrationsEdit))
         // Specific routes must come before parameterized routes
-        .route("/v1/integrations/config", scope_gate(get(get_notifier_config), Feature::SettingsView))
-        .route("/v1/integrations/runtime-variables", scope_gate(get(get_runtime_variables), Feature::SettingsView))
+        .route("/v1/integrations/config", scope_gate(get(get_notifier_config), Feature::IntegrationsView))
+        .route("/v1/integrations/runtime-variables", scope_gate(get(get_runtime_variables), Feature::IntegrationsView))
         .route(
             "/v1/integrations/test",
             maybe_gate(

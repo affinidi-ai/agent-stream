@@ -88,7 +88,7 @@ defines these categories:
 | `POST /v1/integrations/trigger-multiple` | Deliver `subject` and `message` to several integrations (`integrations.edit`) |
 
 The `config` and `runtime-variables` catalogues hold no stored data and need no permission;
-an access token with explicit scopes needs `settings.view`.
+an access token with explicit scopes needs `integrations.view`.
 `trigger`, `trigger-multiple`, and `test` when it loads a saved integration by
 `integration_id`, additionally check the caller's tenant, token scope and, for an `audit`
 integration, `audit.view`.

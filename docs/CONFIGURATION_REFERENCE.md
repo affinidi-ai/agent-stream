@@ -271,7 +271,8 @@ The example also carries `oob_connection` and `_note_*` keys, which nothing read
 by `[encryption]` in `config.toml`.
 
 Two management reads expose this configuration to any signed-in caller, with no
-permission (an access token with explicit scopes needs `settings.view`):
+permission (an access token with explicit scopes needs `pipes.view` for the routing read and
+`settings.view` for networking):
 
 | Route (under `/api`) | Returns |
 | --- | --- |
