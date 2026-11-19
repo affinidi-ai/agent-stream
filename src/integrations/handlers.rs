@@ -3,30 +3,17 @@ use axum::{Extension, Json, extract::Path, http::StatusCode};
 use super::NotificationStore;
 use super::types::{CreateNotificationRequest, Notification, UpdateNotificationRequest, WelcomeTemplate};
 use crate::auth::session::SessionManager;
-use crate::auth_manager::middleware::extract_session_token_from_headers;
+use crate::auth_manager::middleware::{AuthGuardOk, extract_session_token_from_headers};
 
-/// List all notifications for the current user
+/// List all notifications for the caller: the session user, or the user an
+/// access token is bound to.
 pub async fn list_notifications<S: NotificationStore>(
     Extension(store): Extension<std::sync::Arc<S>>,
-    Extension(session_manager): Extension<std::sync::Arc<SessionManager>>,
-    headers: axum::http::HeaderMap,
+    caller: Option<Extension<AuthGuardOk>>,
 ) -> Result<Json<Vec<Notification>>, (StatusCode, String)> {
-    // Get session token - if missing, return empty array
-    let session_token = match extract_session_token_from_headers(&headers) {
-        Some(token) => token,
-        None => return Ok(Json(vec![])),
-    };
-
-    // Validate session and get user_id - if invalid, return empty array
-    let (_username, user_id) = match session_manager
-        .validate_session(&session_token)
-        .await
-    {
-        Some(user) => user,
-        None => {
-            tracing::warn!("Invalid session token for notifications list");
-            return Ok(Json(vec![]));
-        }
+    let Some(Extension(AuthGuardOk(user_id))) = caller else {
+        tracing::warn!("No authenticated caller for notifications list");
+        return Ok(Json(vec![]));
     };
 
     tracing::info!("Listing notifications for user_id: {}", user_id);
@@ -42,20 +29,15 @@ pub async fn list_notifications<S: NotificationStore>(
     Ok(Json(notifications))
 }
 
-/// Get a notification by ID
+/// Get one of the caller's notifications by ID
 pub async fn get_notification<S: NotificationStore>(
     Extension(store): Extension<std::sync::Arc<S>>,
-    Extension(session_manager): Extension<std::sync::Arc<SessionManager>>,
-    headers: axum::http::HeaderMap,
+    caller: Option<Extension<AuthGuardOk>>,
     Path(id): Path<String>,
 ) -> Result<Json<Notification>, (StatusCode, String)> {
-    let session_token = extract_session_token_from_headers(&headers)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing session token".to_string()))?;
-
-    let (_username, user_id) = session_manager
-        .validate_session(&session_token)
-        .await
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid session".to_string()))?;
+    let Some(Extension(AuthGuardOk(user_id))) = caller else {
+        return Err((StatusCode::UNAUTHORIZED, "Not authenticated".to_string()));
+    };
 
     let notification = store
         .get(&user_id, &id)
@@ -161,25 +143,13 @@ pub async fn delete_notification<S: NotificationStore>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Get count of unread notifications for the current user
+/// Get the count of the caller's unread notifications
 pub async fn get_unread_count<S: NotificationStore>(
     Extension(store): Extension<std::sync::Arc<S>>,
-    Extension(session_manager): Extension<std::sync::Arc<SessionManager>>,
-    headers: axum::http::HeaderMap,
+    caller: Option<Extension<AuthGuardOk>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Get session token - if missing, return 0
-    let session_token = match extract_session_token_from_headers(&headers) {
-        Some(token) => token,
-        None => return Ok(Json(serde_json::json!({ "unread_count": 0 }))),
-    };
-
-    // Validate session and get user_id - if invalid, return 0
-    let (_username, user_id) = match session_manager
-        .validate_session(&session_token)
-        .await
-    {
-        Some(user) => user,
-        None => return Ok(Json(serde_json::json!({ "unread_count": 0 }))),
+    let Some(Extension(AuthGuardOk(user_id))) = caller else {
+        return Ok(Json(serde_json::json!({ "unread_count": 0 })));
     };
 
     let count = store

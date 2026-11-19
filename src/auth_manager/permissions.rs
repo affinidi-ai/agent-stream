@@ -101,14 +101,20 @@ fn permission_features() -> Vec<(&'static str, Feature)> {
     ]
 }
 
-/// Build the `{ feature: bool }` permission map for `role`.
+/// Build the `{ feature: bool }` permission map for `role`, narrowed to the
+/// scopes of the access token the request used, if it has explicit scopes.
 fn permissions_for_role(
     rbac: &RbacConfig,
     role: &UserRole,
+    pat: Option<&crate::auth_manager::pat::PatContext>,
 ) -> serde_json::Map<String, serde_json::Value> {
     permission_features()
         .into_iter()
-        .map(|(name, feature)| (name.to_string(), serde_json::Value::Bool(rbac.has_permission(role, &feature))))
+        .map(|(name, feature)| {
+            let held =
+                rbac.has_permission(role, &feature) && crate::auth_manager::middleware::pat_scope_allows(pat, &feature);
+            (name.to_string(), serde_json::Value::Bool(held))
+        })
         .collect()
 }
 
@@ -136,7 +142,7 @@ pub async fn get_permissions_optional(
                 .load_user_by_id(&uid)
                 .await
             {
-                Ok(Some(user_data)) => permissions_for_role(&rbac, &user_data.role),
+                Ok(Some(user_data)) => permissions_for_role(&rbac, &user_data.role, None),
                 _ => denied_permissions(),
             }
         }
@@ -146,11 +152,13 @@ pub async fn get_permissions_optional(
     Ok(Json(serde_json::Value::Object(permissions)))
 }
 
-/// Get user permissions based on RBAC config (authenticated only)
+/// The caller's effective permissions: their role, narrowed to the scopes of
+/// the access token the request used (authenticated only).
 pub async fn get_permissions(
     Extension(user_id): Extension<String>,
     Extension(storage): Extension<std::sync::Arc<PasskeyStorage>>,
     Extension(rbac_config): Extension<std::sync::Arc<crate::rbac::RbacConfig>>,
+    pat: Option<Extension<crate::auth_manager::pat::PatContext>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user_data = storage
         .load_user_by_id(&user_id)
@@ -158,7 +166,12 @@ pub async fn get_permissions(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load user: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(serde_json::Value::Object(permissions_for_role(&rbac_config, &user_data.role))))
+    Ok(Json(serde_json::Value::Object(permissions_for_role(
+        &rbac_config,
+        &user_data.role,
+        pat.as_ref()
+            .map(|Extension(pat)| pat),
+    ))))
 }
 
 /// Get public permissions (for unauthenticated users during registration).
@@ -189,15 +202,36 @@ mod tests {
     fn admin_map_exposes_monitoring_features() {
         // A missing key hides the corresponding Monitoring page in the dashboard,
         // so every gated page's feature must be present AND true for an admin.
-        let map = permissions_for_role(&RbacConfig::default(), &UserRole::Administrator);
+        let map = permissions_for_role(&RbacConfig::default(), &UserRole::Administrator, None);
         for key in ["drift.view", "drift.manage", "governance.view"] {
             assert_eq!(map.get(key), Some(&serde_json::Value::Bool(true)), "admin missing {key}");
         }
     }
 
     #[test]
+    fn a_scoped_token_sees_only_the_permissions_its_scopes_and_role_both_hold() {
+        use crate::auth_manager::pat::PatContext;
+        let scoped = PatContext(Some(vec!["metrics.view".to_string(), "settings.edit".to_string()]));
+        let map = permissions_for_role(&RbacConfig::default(), &UserRole::User, Some(&scoped));
+        assert_eq!(map.get("metrics.view"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            map.get("pipes.execute"),
+            Some(&serde_json::Value::Bool(false)),
+            "the role holds it, the scopes do not"
+        );
+        assert_eq!(
+            map.get("settings.edit"),
+            Some(&serde_json::Value::Bool(false)),
+            "the scopes name it, the role does not"
+        );
+
+        let unscoped = permissions_for_role(&RbacConfig::default(), &UserRole::User, Some(&PatContext(None)));
+        assert_eq!(unscoped, permissions_for_role(&RbacConfig::default(), &UserRole::User, None));
+    }
+
+    #[test]
     fn plain_user_lacks_admin_only_monitoring_features() {
-        let map = permissions_for_role(&RbacConfig::default(), &UserRole::User);
+        let map = permissions_for_role(&RbacConfig::default(), &UserRole::User, None);
         for key in ["drift.view", "drift.manage", "governance.view"] {
             assert_eq!(map.get(key), Some(&serde_json::Value::Bool(false)), "user should not have {key}");
         }

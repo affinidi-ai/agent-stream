@@ -294,6 +294,8 @@ ts-rs = "11.0"
 tokio = { version = "1.49.0", features = ["full", "test-util"] }
 rcgen = "0.14"
 time = "0.3"
+syn = { version = "2.0.114", features = ["full", "visit"] }
+proc-macro2 = { version = "1.0.106", features = ["span-locations"] }
 
 [features]
 default = ["didwebvh"]

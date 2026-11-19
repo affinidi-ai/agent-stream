@@ -44,7 +44,11 @@ it. A stored
 resource scope that no longer compiles makes the token unusable rather than unscoped.
 
 Effective permissions on a feature-gated route are the bound user's role intersected with
-the token's scopes; see [`RBAC.md`](RBAC.md#access-tokens-and-roles). When Terms are
+the token's scopes; see [`RBAC.md`](RBAC.md#access-tokens-and-roles). A token with explicit
+scopes is refused with `403` on any route none of its scopes covers, apart from public routes,
+reads of the bound user's own data, and reads of data the appliance also publishes, such as
+the DID document; [`RBAC.md`](RBAC.md#route-access-declarations) lists
+the scope each such route needs. Running a Surface needs `pipes.execute`. When Terms are
 enabled, the bound user must have accepted the current Terms, or every call answers `403`
 `TERMS_ACCEPTANCE_REQUIRED` (see [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md)).
 
@@ -102,8 +106,10 @@ create a token bound to it and scoped to `["metrics.view"]`, as in the example a
 token reads `GET /v1/pipes-metrics` (under the management API prefix, `/api` in the
 example configuration) and is refused with `403` on feature-gated routes that
 need another permission. Binding to a service account rather than a person means the token
-survives staff changes; demoting or disabling the service account takes effect on the next
-request.
+survives staff changes; disabling the service account takes effect on the next request, and
+so does demoting it on routes behind a permission guard. On the `scope_gate` routes a
+demotion does not withdraw scopes already issued, so revoke or re-issue the token (see
+[`RBAC.md`](RBAC.md#route-access-declarations)).
 
 ### Expiry
 

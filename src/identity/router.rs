@@ -11,6 +11,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{debug, error, info};
 
 use crate::auth_manager::middleware::RbacGuard;
+use crate::auth_manager::route_declarations::{handler_checked, refuse_scoped_tokens, scope_gate, self_service};
 use crate::identity::handlers;
 use crate::identity::state::IdentityApiState;
 use crate::rbac::Feature;
@@ -27,10 +28,10 @@ fn user_management_routes(
     metrics_store: std::sync::Arc<crate::metrics::MetricsStore>,
 ) -> Router {
     Router::new()
-        .route("/v1/users", get(crate::auth_manager::handlers::list_users))
-        .route("/v1/users/{user_id}", get(crate::auth_manager::handlers::get_user))
-        .route("/v1/users/{user_id}", put(crate::auth_manager::handlers::update_user))
-        .route("/v1/users/{user_id}", delete(crate::auth_manager::handlers::delete_user))
+        .route("/v1/users", handler_checked(get(crate::auth_manager::handlers::list_users)))
+        .route("/v1/users/{user_id}", handler_checked(get(crate::auth_manager::handlers::get_user)))
+        .route("/v1/users/{user_id}", handler_checked(put(crate::auth_manager::handlers::update_user)))
+        .route("/v1/users/{user_id}", handler_checked(delete(crate::auth_manager::handlers::delete_user)))
         .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
         .layer(Extension(pat_authenticator))
         .layer(Extension(sess_mgr))
@@ -112,6 +113,85 @@ where
             gate.gate(get(handlers::preview_ide_bootstrap), Feature::PipesView),
         )
         .route("/v1/pipes/{pipe_id}/budget", gate.gate(get(crate::pipes::get_budget_usage), Feature::MetricsView))
+}
+
+/// The caller's own profile and permissions. An access token with explicit
+/// scopes may read them but not change the profile.
+fn account_routes() -> Router {
+    Router::new()
+        .route("/v1/profile", self_service(get(crate::auth_manager::handlers::get_profile)))
+        .route("/v1/profile", refuse_scoped_tokens(put(crate::auth_manager::handlers::update_profile)))
+        .route("/v1/profile/avatar", refuse_scoped_tokens(post(crate::auth_manager::handlers::upload_avatar)))
+        .route("/v1/permissions", self_service(get(crate::auth_manager::permissions::get_permissions)))
+}
+
+/// The caller's dashboard settings. The effective settings carry system
+/// fields as `GET /v1/settings` does, so an access token with explicit scopes
+/// needs `settings.view` to read them; it may read its own overrides, and may
+/// change neither.
+fn user_settings_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    IdentityApiState: axum::extract::FromRef<S>,
+{
+    Router::new()
+        .route("/v1/user-settings", scope_gate(get(handlers::get_user_settings), Feature::SettingsView))
+        .route("/v1/user-settings", refuse_scoped_tokens(post(handlers::update_user_settings)))
+        .route("/v1/user-settings", refuse_scoped_tokens(delete(handlers::reset_user_settings)))
+        .route("/v1/user-settings/overrides", self_service(get(handlers::get_user_settings_overrides)))
+}
+
+/// The caller's own notifications, for the session user or the user an access
+/// token is bound to.
+fn notification_read_routes() -> Router {
+    use crate::integrations::{FileSystemNotificationStore as Store, handlers};
+    Router::new()
+        .route("/v1/notifications", self_service(get(handlers::list_notifications::<Store>)))
+        .route("/v1/notifications/{id}", self_service(get(handlers::get_notification::<Store>)))
+        .route("/v1/notifications/unread/count", self_service(get(handlers::get_unread_count::<Store>)))
+}
+
+/// Mediator reads. Every signed-in user reads mediators to set up connections;
+/// an access token with explicit scopes needs `mediators.view`.
+fn mediator_read_routes() -> Router {
+    use crate::mediators::{FileSystemMediatorStore as Store, handlers};
+    Router::new()
+        .route("/v1/mediators", scope_gate(get(handlers::list_mediators::<Store>), Feature::MediatorsView))
+        .route(
+            "/v1/mediators/compatible",
+            scope_gate(get(handlers::list_compatible_mediators::<Store>), Feature::MediatorsView),
+        )
+        .route("/v1/mediators/{id}", scope_gate(get(handlers::get_mediator::<Store>), Feature::MediatorsView))
+}
+
+/// Running a Surface makes model calls on its provider credentials and spends
+/// its budget, so both run routes need `pipes.execute`.
+fn create_pipe_execute_router<S>(gate: RbacGuard) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    IdentityApiState: axum::extract::FromRef<S>,
+{
+    Router::new()
+        .route("/v1/pipes/{pipe_id}/execute", gate.gate(post(crate::pipes::execute_pipe), Feature::PipesExecute))
+        .route(
+            "/v1/pipes/{pipe_id}/execute/stream",
+            gate.gate(post(crate::pipes::execute_pipe_stream), Feature::PipesExecute),
+        )
+}
+
+/// Appliance routing, networking and resource limits. Every signed-in user
+/// reads them; an access token with explicit scopes needs `pipes.view` for the
+/// routing the Surface editor reads, `settings.view` for networking, and
+/// `metrics.view` for the limits.
+fn create_appliance_config_read_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    IdentityApiState: axum::extract::FromRef<S>,
+{
+    Router::new()
+        .route("/v1/config/surface-routing", scope_gate(get(handlers::get_surface_routing_config), Feature::PipesView))
+        .route("/v1/config/networking", scope_gate(get(handlers::get_networking_config), Feature::SettingsView))
+        .route("/v1/limits", scope_gate(get(handlers::list_limits), Feature::MetricsView))
 }
 
 /// The telemetry export configuration names the collector appliance telemetry
@@ -539,9 +619,12 @@ pub fn create_identity_api_router(
         .route("/didcomm/ws", get(handlers::didcomm_ws_endpoint))
         // Identity credential routes
         .route("/v1/identity/issue", rbac_guard.gate(post(handlers::issue_credential), Feature::IdentityIssue))
-        .route("/v1/identity/did-document", get(handlers::get_did_document))
-        .route("/v1/identity/resolve-did", get(handlers::resolve_did_document))
-        .route("/v1/identity/resolve-did-document", get(handlers::resolve_did_document_spec))
+        .route("/v1/identity/did-document", self_service(get(handlers::get_did_document)))
+        .route("/v1/identity/resolve-did", scope_gate(get(handlers::resolve_did_document), Feature::GatewaysView))
+        .route(
+            "/v1/identity/resolve-did-document",
+            scope_gate(get(handlers::resolve_did_document_spec), Feature::GatewaysView),
+        )
         // Health check
         .route("/v1/health", get(handlers::health_check))
         .route("/v1/alive", get(handlers::alive_check))
@@ -551,8 +634,8 @@ pub fn create_identity_api_router(
         .route("/v1/settings", rbac_guard.gate(get(handlers::get_settings), Feature::SettingsView))
         .route("/v1/terms/applicable", get(crate::terms::handlers::applicable))
         .route("/v1/terms/provider-health", get(crate::terms::handlers::provider_health))
-        .route("/v1/terms/status", get(crate::terms::handlers::status))
-        .route("/v1/terms/acceptances", post(crate::terms::handlers::accept))
+        .route("/v1/terms/status", self_service(get(crate::terms::handlers::status)))
+        .route("/v1/terms/acceptances", refuse_scoped_tokens(post(crate::terms::handlers::accept)))
         .route("/v1/terms", rbac_guard.gate(get(crate::terms::handlers::definitions), Feature::TermsView))
         .route("/v1/terms/customer/draft", rbac_guard.gate(put(crate::terms::handlers::save_draft), Feature::TermsEdit))
         .route("/v1/terms/customer/publish", rbac_guard.gate(post(crate::terms::handlers::publish), Feature::TermsEdit))
@@ -574,10 +657,7 @@ pub fn create_identity_api_router(
             "/v1/config/reload/{config_id}",
             rbac_guard.gate(post(handlers::reload_single_channel), Feature::ConfigReload),
         )
-        .route("/v1/config/surface-routing", get(handlers::get_surface_routing_config))
-        .route("/v1/config/networking", get(handlers::get_networking_config))
-        // Appliance resource limits (name/description/limit/current per dimension)
-        .route("/v1/limits", get(handlers::list_limits))
+        .merge(create_appliance_config_read_router())
         // Policy validation
         .route("/v1/surfaces/validate-policy", rbac_guard.gate(post(handlers::validate_policy), Feature::PoliciesEdit))
         .merge(create_pipe_template_router(rbac_guard.clone()))
@@ -610,8 +690,7 @@ pub fn create_identity_api_router(
             rbac_guard.gate(post(handlers::delete_test_surfaces), Feature::PipesDelete),
         )
         .route("/v1/test-support/purge", rbac_guard.gate(post(handlers::purge_test_fixtures), Feature::PipesDelete))
-        .route("/v1/pipes/{pipe_id}/execute", post(crate::pipes::execute_pipe))
-        .route("/v1/pipes/{pipe_id}/execute/stream", post(crate::pipes::execute_pipe_stream))
+        .merge(create_pipe_execute_router(rbac_guard.clone()))
         .route(
             "/v1/pipes-metrics",
             rbac_guard.gate(get(handlers::pipe_metrics::get_pipe_metrics), Feature::MetricsView),
@@ -797,11 +876,7 @@ pub fn create_identity_api_router(
         // The body limit caps the avatar multipart upload so an oversized file
         // is rejected before it is fully buffered into memory.
         router = router.merge(
-            Router::new()
-                .route("/v1/profile", get(crate::auth_manager::handlers::get_profile))
-                .route("/v1/profile", put(crate::auth_manager::handlers::update_profile))
-                .route("/v1/profile/avatar", post(crate::auth_manager::handlers::upload_avatar))
-                .route("/v1/permissions", get(crate::auth_manager::permissions::get_permissions))
+            account_routes()
                 .layer(axum::extract::DefaultBodyLimit::max(crate::uploads::MAX_UPLOAD_SIZE + 1024 * 1024))
                 .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
                 .layer(Extension(sess_mgr.clone()))
@@ -814,7 +889,7 @@ pub fn create_identity_api_router(
         // rejected before it is fully read into memory.
         router = router.merge(
             Router::new()
-                .route("/v1/uploads/image", post(crate::uploads::upload_image))
+                .route("/v1/uploads/image", scope_gate(post(crate::uploads::upload_image), Feature::PipesEdit))
                 .layer(axum::extract::DefaultBodyLimit::max(crate::uploads::MAX_UPLOAD_SIZE + 1024 * 1024))
                 .layer(Extension(crate::uploads::UploadsDir(uploads_path.clone()))),
         );
@@ -829,11 +904,7 @@ pub fn create_identity_api_router(
 
         // Add per-user settings routes with session auth middleware
         router = router.merge(
-            Router::new()
-                .route("/v1/user-settings", get(handlers::get_user_settings))
-                .route("/v1/user-settings", post(handlers::update_user_settings))
-                .route("/v1/user-settings", delete(handlers::reset_user_settings))
-                .route("/v1/user-settings/overrides", get(handlers::get_user_settings_overrides))
+            user_settings_routes()
                 .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
                 .layer(Extension(sess_mgr.clone()))
                 .layer(Extension(storage.clone()))
@@ -845,14 +916,14 @@ pub fn create_identity_api_router(
         // PasskeyStorage + RbacConfig; team data lives on IdentityApiState.
         router = router.merge(
             Router::new()
-                .route("/v1/teams", get(handlers::list_teams))
-                .route("/v1/teams", post(handlers::create_team))
-                .route("/v1/teams/{team_id}", get(handlers::get_team))
-                .route("/v1/teams/{team_id}", put(handlers::update_team))
-                .route("/v1/teams/{team_id}", delete(handlers::delete_team))
-                .route("/v1/teams/{team_id}/members", post(handlers::add_member))
-                .route("/v1/teams/{team_id}/members/{member_id}", delete(handlers::remove_member))
-                .route("/v1/teams/{team_id}/usage", get(handlers::team_usage))
+                .route("/v1/teams", handler_checked(get(handlers::list_teams)))
+                .route("/v1/teams", handler_checked(post(handlers::create_team)))
+                .route("/v1/teams/{team_id}", handler_checked(get(handlers::get_team)))
+                .route("/v1/teams/{team_id}", handler_checked(put(handlers::update_team)))
+                .route("/v1/teams/{team_id}", handler_checked(delete(handlers::delete_team)))
+                .route("/v1/teams/{team_id}/members", handler_checked(post(handlers::add_member)))
+                .route("/v1/teams/{team_id}/members/{member_id}", handler_checked(delete(handlers::remove_member)))
+                .route("/v1/teams/{team_id}/usage", handler_checked(get(handlers::team_usage)))
                 .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
                 .layer(Extension(sess_mgr.clone()))
                 .layer(Extension(storage.clone()))
@@ -865,12 +936,12 @@ pub fn create_identity_api_router(
         // IdentityApiState via the member store.
         router = router.merge(
             Router::new()
-                .route("/v1/members", get(handlers::list_members))
-                .route("/v1/members", post(handlers::create_member))
-                .route("/v1/members/{member_id}", get(handlers::get_member))
-                .route("/v1/members/{member_id}/usage", get(handlers::get_member_usage))
-                .route("/v1/members/{member_id}", put(handlers::update_member))
-                .route("/v1/members/{member_id}", delete(handlers::delete_member))
+                .route("/v1/members", handler_checked(get(handlers::list_members)))
+                .route("/v1/members", handler_checked(post(handlers::create_member)))
+                .route("/v1/members/{member_id}", handler_checked(get(handlers::get_member)))
+                .route("/v1/members/{member_id}/usage", handler_checked(get(handlers::get_member_usage)))
+                .route("/v1/members/{member_id}", handler_checked(put(handlers::update_member)))
+                .route("/v1/members/{member_id}", handler_checked(delete(handlers::delete_member)))
                 .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
                 .layer(Extension(sess_mgr.clone()))
                 .layer(Extension(storage.clone()))
@@ -883,9 +954,9 @@ pub fn create_identity_api_router(
         // team assignment; gated on the `enrolment.*` RBAC features.
         router = router.merge(
             Router::new()
-                .route("/v1/member-provisioning", get(handlers::get_provisioning_config))
-                .route("/v1/member-provisioning", put(handlers::update_provisioning_config))
-                .route("/v1/member-provisioning/preview", post(handlers::preview_provisioning))
+                .route("/v1/member-provisioning", handler_checked(get(handlers::get_provisioning_config)))
+                .route("/v1/member-provisioning", handler_checked(put(handlers::update_provisioning_config)))
+                .route("/v1/member-provisioning/preview", handler_checked(post(handlers::preview_provisioning)))
                 .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
                 .layer(Extension(sess_mgr.clone()))
                 .layer(Extension(storage.clone()))
@@ -898,12 +969,12 @@ pub fn create_identity_api_router(
         // prompt store. `/render` is the playground preview.
         router = router.merge(
             Router::new()
-                .route("/v1/prompts", get(handlers::list_prompts))
-                .route("/v1/prompts", post(handlers::create_prompt))
-                .route("/v1/prompts/{id}", get(handlers::get_prompt))
-                .route("/v1/prompts/{id}", put(handlers::update_prompt))
-                .route("/v1/prompts/{id}", delete(handlers::delete_prompt))
-                .route("/v1/prompts/{id}/render", post(handlers::render_prompt))
+                .route("/v1/prompts", handler_checked(get(handlers::list_prompts)))
+                .route("/v1/prompts", handler_checked(post(handlers::create_prompt)))
+                .route("/v1/prompts/{id}", handler_checked(get(handlers::get_prompt)))
+                .route("/v1/prompts/{id}", handler_checked(put(handlers::update_prompt)))
+                .route("/v1/prompts/{id}", handler_checked(delete(handlers::delete_prompt)))
+                .route("/v1/prompts/{id}/render", handler_checked(post(handlers::render_prompt)))
                 .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
                 .layer(Extension(sess_mgr.clone()))
                 .layer(Extension(storage.clone()))
@@ -916,26 +987,29 @@ pub fn create_identity_api_router(
         // telemetry store via a global accessor, so no state threading needed.
         router = router.merge(
             Router::new()
-                .route("/v1/telemetry/series", get(handlers::telemetry_series))
-                .route("/v1/telemetry/rejections", get(handlers::telemetry_rejections))
-                .route("/v1/dashboard/ops-series", get(handlers::ops_series))
-                .route("/v1/cache/stats", get(handlers::cache_stats))
-                .route("/v1/prompt-guard/detector-stats", get(handlers::detector_stats))
-                .route("/v1/spend-report", get(handlers::spend_report))
-                .route("/v1/governance/surfaces", get(handlers::governance_surfaces))
-                .route("/v1/governance/coverage", get(handlers::governance_coverage))
-                .route("/v1/governance/records", get(handlers::governance_records))
-                .route("/v1/governance/records/{id}", get(handlers::governance_record))
-                .route("/v1/governance/verify", get(handlers::governance_verify))
-                .route("/v1/drift/series", get(handlers::drift_series))
-                .route("/v1/drift/dimensions", get(handlers::drift_dimensions))
-                .route("/v1/drift/verdict", get(handlers::drift_verdict))
-                .route("/v1/drift/baseline", get(handlers::drift_baseline).post(handlers::drift_capture_baseline))
-                .route("/v1/drift/sessions", get(handlers::drift_list_sessions))
-                .route("/v1/drift/eval/run", post(handlers::drift_run_eval))
-                .route("/v1/drift/eval/cancel", post(handlers::drift_cancel_eval))
-                .route("/v1/drift/runs", get(handlers::drift_list_runs))
-                .route("/v1/drift/runs/{id}", get(handlers::drift_get_run))
+                .route("/v1/telemetry/series", handler_checked(get(handlers::telemetry_series)))
+                .route("/v1/telemetry/rejections", handler_checked(get(handlers::telemetry_rejections)))
+                .route("/v1/dashboard/ops-series", handler_checked(get(handlers::ops_series)))
+                .route("/v1/cache/stats", handler_checked(get(handlers::cache_stats)))
+                .route("/v1/prompt-guard/detector-stats", handler_checked(get(handlers::detector_stats)))
+                .route("/v1/spend-report", handler_checked(get(handlers::spend_report)))
+                .route("/v1/governance/surfaces", handler_checked(get(handlers::governance_surfaces)))
+                .route("/v1/governance/coverage", handler_checked(get(handlers::governance_coverage)))
+                .route("/v1/governance/records", handler_checked(get(handlers::governance_records)))
+                .route("/v1/governance/records/{id}", handler_checked(get(handlers::governance_record)))
+                .route("/v1/governance/verify", handler_checked(get(handlers::governance_verify)))
+                .route("/v1/drift/series", handler_checked(get(handlers::drift_series)))
+                .route("/v1/drift/dimensions", handler_checked(get(handlers::drift_dimensions)))
+                .route("/v1/drift/verdict", handler_checked(get(handlers::drift_verdict)))
+                .route(
+                    "/v1/drift/baseline",
+                    handler_checked(get(handlers::drift_baseline).post(handlers::drift_capture_baseline)),
+                )
+                .route("/v1/drift/sessions", handler_checked(get(handlers::drift_list_sessions)))
+                .route("/v1/drift/eval/run", handler_checked(post(handlers::drift_run_eval)))
+                .route("/v1/drift/eval/cancel", handler_checked(post(handlers::drift_cancel_eval)))
+                .route("/v1/drift/runs", handler_checked(get(handlers::drift_list_runs)))
+                .route("/v1/drift/runs/{id}", handler_checked(get(handlers::drift_get_run)))
                 .layer(middleware::from_fn(crate::auth_manager::middleware::extract_user_id))
                 .layer(Extension(sess_mgr.clone()))
                 .layer(Extension(storage.clone()))
@@ -1049,12 +1123,15 @@ pub fn create_identity_api_router(
     // Create gateway routes if store is provided
     let gateway_router = if let Some(ref store) = gateway_store {
         let mut router = Router::new()
-            .route("/v1/pipes/config", get(crate::gateways::handlers::get_pipes_config))
+            .route("/v1/pipes/config", scope_gate(get(crate::gateways::handlers::get_pipes_config), Feature::PipesView))
             .route(
                 "/v1/marketplace/purchase/{model_id}",
                 rbac_guard.gate(post(crate::gateways::handlers::post_marketplace_purchase), Feature::PaymentsEdit),
             )
-            .route("/v1/marketplace/purchased", get(crate::gateways::handlers::list_purchased_models))
+            .route(
+                "/v1/marketplace/purchased",
+                scope_gate(get(crate::gateways::handlers::list_purchased_models), Feature::PaymentsView),
+            )
             .route(
                 "/v1/marketplace/purchased",
                 rbac_guard.gate(post(crate::gateways::handlers::save_purchased_model), Feature::PaymentsEdit),
@@ -1063,10 +1140,16 @@ pub fn create_identity_api_router(
                 "/v1/marketplace/purchased/{id}",
                 rbac_guard.gate(delete(crate::gateways::handlers::delete_purchased_model), Feature::PaymentsDelete),
             )
-            .route("/v1/prompt-guard/config", get(crate::gateways::handlers::get_prompt_guard_config))
+            .route(
+                "/v1/prompt-guard/config",
+                scope_gate(get(crate::gateways::handlers::get_prompt_guard_config), Feature::PipesView),
+            )
             .route(
                 "/v1/gateways",
-                get(crate::gateways::handlers::list_gateways::<crate::gateways::FileSystemGatewayStore>),
+                scope_gate(
+                    get(crate::gateways::handlers::list_gateways::<crate::gateways::FileSystemGatewayStore>),
+                    Feature::GatewaysView,
+                ),
             )
             .route(
                 "/v1/gateways",
@@ -1090,7 +1173,10 @@ pub fn create_identity_api_router(
             )
             .route(
                 "/v1/gateways/{id}",
-                get(crate::gateways::handlers::get_gateway::<crate::gateways::FileSystemGatewayStore>),
+                scope_gate(
+                    get(crate::gateways::handlers::get_gateway::<crate::gateways::FileSystemGatewayStore>),
+                    Feature::GatewaysView,
+                ),
             )
             .route(
                 "/v1/gateways/{id}",
@@ -1101,7 +1187,10 @@ pub fn create_identity_api_router(
             )
             .route(
                 "/v1/gateways/{id}/integrations",
-                get(crate::integrations::gateway_integrations_handlers::get_gateway_integrations),
+                scope_gate(
+                    get(crate::integrations::gateway_integrations_handlers::get_gateway_integrations),
+                    Feature::GatewaysView,
+                ),
             )
             .route(
                 "/v1/gateways/{id}/integrations",
@@ -1112,7 +1201,10 @@ pub fn create_identity_api_router(
             )
             .route(
                 "/v1/gateways/{id}/policy",
-                get(crate::gateways::handlers::get_gateway_policy::<crate::gateways::FileSystemGatewayStore>),
+                scope_gate(
+                    get(crate::gateways::handlers::get_gateway_policy::<crate::gateways::FileSystemGatewayStore>),
+                    Feature::GatewaysView,
+                ),
             )
             .route(
                 "/v1/gateways/{id}/policy",
@@ -1180,48 +1272,67 @@ pub fn create_identity_api_router(
 
         // Add ping route only if we have listener manager
         if let Some(listener_mgr) = &listener_manager {
-            router = router
-                .route(
-                    "/v1/marketplace/models",
-                    get(crate::gateways::handlers::get_marketplace_models::<crate::gateways::FileSystemGatewayStore>),
-                )
-                .route(
-                    "/v1/gateways/{id}/ping",
-                    post(crate::gateways::handlers::ping_gateway::<crate::gateways::FileSystemGatewayStore>),
-                )
-                .route(
-                    "/v1/gateways/{id}/surfaces",
-                    get(crate::gateways::handlers::get_gateway_surfaces::<crate::gateways::FileSystemGatewayStore>),
-                )
-                .route(
-                    "/v1/gateways/{id}/marketplace",
-                    get(crate::gateways::handlers::get_gateway_marketplace::<crate::gateways::FileSystemGatewayStore>),
-                )
-                .route(
-                    "/v1/gateways/{id}/exposed-surfaces",
-                    rbac_guard.gate(
-                        put(crate::gateways::handlers::update_gateway_exposed_surfaces::<
-                            crate::gateways::FileSystemGatewayStore,
-                        >),
-                        Feature::GatewaysEdit,
-                    ),
-                )
-                .route(
-                    "/v1/gateways/refresh-surfaces",
-                    rbac_guard.gate(
-                        post(
-                            crate::gateways::handlers::refresh_gateway_surfaces_cache::<
+            router =
+                router
+                    .route(
+                        "/v1/marketplace/models",
+                        scope_gate(
+                            get(crate::gateways::handlers::get_marketplace_models::<
                                 crate::gateways::FileSystemGatewayStore,
-                            >,
+                            >),
+                            Feature::GatewaysView,
                         ),
-                        Feature::GatewaysEdit,
-                    ),
-                )
-                .layer(Extension(store.clone()))
-                .layer(Extension(Some(listener_mgr.clone())))
-                .layer(Extension(gateway_channel_cache.clone()))
-                .layer(Extension(marketplace_cache.clone()))
-                .layer(Extension(state.bootstrap_config.clone()));
+                    )
+                    .route(
+                        "/v1/gateways/{id}/ping",
+                        scope_gate(
+                            post(crate::gateways::handlers::ping_gateway::<crate::gateways::FileSystemGatewayStore>),
+                            Feature::GatewaysView,
+                        ),
+                    )
+                    .route(
+                        "/v1/gateways/{id}/surfaces",
+                        scope_gate(
+                            get(crate::gateways::handlers::get_gateway_surfaces::<
+                                crate::gateways::FileSystemGatewayStore,
+                            >),
+                            Feature::GatewaysView,
+                        ),
+                    )
+                    .route(
+                        "/v1/gateways/{id}/marketplace",
+                        scope_gate(
+                            get(crate::gateways::handlers::get_gateway_marketplace::<
+                                crate::gateways::FileSystemGatewayStore,
+                            >),
+                            Feature::GatewaysView,
+                        ),
+                    )
+                    .route(
+                        "/v1/gateways/{id}/exposed-surfaces",
+                        rbac_guard.gate(
+                            put(crate::gateways::handlers::update_gateway_exposed_surfaces::<
+                                crate::gateways::FileSystemGatewayStore,
+                            >),
+                            Feature::GatewaysEdit,
+                        ),
+                    )
+                    .route(
+                        "/v1/gateways/refresh-surfaces",
+                        rbac_guard.gate(
+                            post(
+                                crate::gateways::handlers::refresh_gateway_surfaces_cache::<
+                                    crate::gateways::FileSystemGatewayStore,
+                                >,
+                            ),
+                            Feature::GatewaysEdit,
+                        ),
+                    )
+                    .layer(Extension(store.clone()))
+                    .layer(Extension(Some(listener_mgr.clone())))
+                    .layer(Extension(gateway_channel_cache.clone()))
+                    .layer(Extension(marketplace_cache.clone()))
+                    .layer(Extension(state.bootstrap_config.clone()));
         }
 
         // Add approve route only if we have listener manager, connection point store, and mediator store
@@ -1421,11 +1532,7 @@ pub fn create_identity_api_router(
 
     // Create mediator routes if store is provided
     let mediator_router = if let Some(store) = mediator_store {
-        Router::new()
-            .route(
-                "/v1/mediators",
-                get(crate::mediators::handlers::list_mediators::<crate::mediators::FileSystemMediatorStore>),
-            )
+        mediator_read_routes()
             .route(
                 "/v1/mediators",
                 rbac_guard.gate(
@@ -1434,16 +1541,8 @@ pub fn create_identity_api_router(
                 ),
             )
             .route(
-                "/v1/mediators/compatible",
-                get(crate::mediators::handlers::list_compatible_mediators::<crate::mediators::FileSystemMediatorStore>),
-            )
-            .route(
                 "/v1/mediators/check-auth",
                 rbac_guard.gate(post(crate::mediators::handlers::check_auth_compatibility), Feature::MediatorsEdit),
-            )
-            .route(
-                "/v1/mediators/{id}",
-                get(crate::mediators::handlers::get_mediator::<crate::mediators::FileSystemMediatorStore>),
             )
             .route(
                 "/v1/mediators/{id}",
@@ -1496,7 +1595,13 @@ pub fn create_identity_api_router(
 
     // Create user integrations routes
     let user_integrations_router = Router::new()
-        .route("/v1/users/integrations", get(crate::integrations::user_integrations_handlers::get_user_integrations))
+        .route(
+            "/v1/users/integrations",
+            scope_gate(
+                get(crate::integrations::user_integrations_handlers::get_user_integrations),
+                Feature::IntegrationsView,
+            ),
+        )
         .route(
             "/v1/users/integrations",
             rbac_guard.gate(
@@ -1514,13 +1619,7 @@ pub fn create_identity_api_router(
 
     // Create notification routes if store is provided
     let notification_router = if let Some(store) = notification_store {
-        let router = Router::new()
-            .route(
-                "/v1/notifications",
-                get(crate::integrations::handlers::list_notifications::<
-                    crate::integrations::FileSystemNotificationStore,
-                >),
-            )
+        let router = notification_read_routes()
             .route(
                 "/v1/notifications",
                 rbac_guard.gate(
@@ -1530,12 +1629,6 @@ pub fn create_identity_api_router(
                         >,
                     ),
                     Feature::NotificationsEdit,
-                ),
-            )
-            .route(
-                "/v1/notifications/{id}",
-                get(
-                    crate::integrations::handlers::get_notification::<crate::integrations::FileSystemNotificationStore>,
                 ),
             )
             .route(
@@ -1559,16 +1652,13 @@ pub fn create_identity_api_router(
                 ),
             )
             .route(
-                "/v1/notifications/unread/count",
-                get(
-                    crate::integrations::handlers::get_unread_count::<crate::integrations::FileSystemNotificationStore>,
-                ),
-            )
-            .route(
                 "/v1/notifications/user-welcome-template",
-                get(crate::integrations::handlers::get_user_welcome_template::<
-                    crate::integrations::FileSystemNotificationStore,
-                >),
+                scope_gate(
+                    get(crate::integrations::handlers::get_user_welcome_template::<
+                        crate::integrations::FileSystemNotificationStore,
+                    >),
+                    Feature::NotificationsView,
+                ),
             )
             .route(
                 "/v1/notifications/user-welcome-template",
@@ -1730,7 +1820,10 @@ pub fn create_did_router(state: IdentityApiState) -> Router {
         .route("/.well-known/did.jsonl", get(handlers::serve_gateway_did_jsonl))
         .route("/surface/{surface_id}/did.json", get(handlers::serve_agent_did_document))
         .route("/surface/{surface_id}/did.jsonl", get(handlers::serve_surface_did_jsonl))
-        .route(crate::identity::status_list::STATUS_LIST_PATH, get(handlers::serve_status_list));
+        .route(
+            crate::identity::status_list::STATUS_LIST_PATH,
+            crate::auth_manager::route_declarations::public(get(handlers::serve_status_list)),
+        );
 
     // NOTE: Root-level /{*path} catch-all for spec-standard DID-to-HTTPS URLs
     // is NOT added here — it would intercept all requests (static assets, API, etc.)
@@ -1787,7 +1880,8 @@ fn didwebvh_routes(
 ) -> Router {
     // Identity management reads and writes DID key material, so the whole
     // group requires identities.manage. DID resolution and log serving below
-    // are public; DID verification needs a session but no permission.
+    // are public; DID verification needs a session, and an access token with
+    // explicit scopes needs gateways.view.
     let management = Router::new()
         .route("/v1/identities", post(crate::identity::didwebvh::create_identity))
         .route("/v1/identities", get(crate::identity::didwebvh::list_identities))
@@ -1807,7 +1901,7 @@ fn didwebvh_routes(
 
     management
         .route("/v1/resolve", get(crate::identity::didwebvh::resolve_did))
-        .route("/v1/verify/{did}", post(crate::identity::didwebvh::verify_identity))
+        .route("/v1/verify/{did}", scope_gate(post(crate::identity::didwebvh::verify_identity), Feature::GatewaysView))
         .route("/dids/{*path}", get(crate::identity::didwebvh::serve_did_log))
         .with_state(didwebvh_state)
 }
@@ -2064,6 +2158,27 @@ mod pipe_connection_test_route_tests {
                 let (status, response) = send(&app, "GET", &path, INTEGRATION_PAT, "").await;
                 assert_eq!(status, expected, "{case}: GET {path}");
                 assert!(!response.contains("smtp-pass-123"), "{case}: {response}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_catalogs_need_integrations_view_on_a_scoped_token() {
+        let cases = [
+            (
+                "scoped without integrations.view",
+                Some(vec!["settings.view".to_string()]),
+                axum::http::StatusCode::FORBIDDEN,
+            ),
+            ("scoped to integrations.view", Some(vec!["integrations.view".to_string()]), axum::http::StatusCode::OK),
+            ("unscoped", None, axum::http::StatusCode::OK),
+        ];
+
+        for (case, scopes, expected) in cases {
+            let (app, _token, _id, _dirs) = integration_app_with_pat(UserRole::User, Some(scopes)).await;
+            for path in ["/v1/integrations/config", "/v1/integrations/runtime-variables"] {
+                let (status, _) = send(&app, "GET", path, INTEGRATION_PAT, "").await;
+                assert_eq!(status, expected, "{case}: GET {path}");
             }
         }
     }
@@ -3382,6 +3497,9 @@ mod token_scope_route_tests {
                 "aspat_pipes_edit" => Some(&["pipes.view", "pipes.edit"]),
                 "aspat_metrics_view" => Some(&["metrics.view"]),
                 "aspat_connection_points_view" => Some(&["connection_points.view"]),
+                "aspat_pipes_execute" => Some(&["pipes.execute"]),
+                "aspat_settings_view" => Some(&["settings.view", "metrics.view"]),
+                "aspat_mediators_view" => Some(&["mediators.view"]),
                 _ => return None,
             };
             Some(PatPrincipal {
@@ -3905,6 +4023,295 @@ mod token_scope_route_tests {
                 assert!(
                     answered != StatusCode::UNAUTHORIZED && answered != StatusCode::FORBIDDEN,
                     "{token} must pass the gate on GET {path}: {answered}"
+                );
+            }
+        }
+    }
+
+    const SURFACE_RUNS: [&str; 2] = ["/v1/pipes/p1/execute", "/v1/pipes/p1/execute/stream"];
+
+    fn pipe_execute_app(
+        fixture: &Fixture,
+        rbac_config: crate::rbac::RbacConfig,
+    ) -> Router {
+        let guard = RbacGuard::new(fixture.storage.clone(), Arc::new(rbac_config));
+        create_pipe_execute_router::<GateOnlyState>(guard)
+            .layer(middleware::from_fn_with_state(auth_layer(fixture), require_session_auth))
+            .with_state(GateOnlyState)
+    }
+
+    #[tokio::test]
+    async fn surface_runs_enforce_the_token_scope_list() {
+        let fixture = admin_fixture().await;
+        let app = pipe_execute_app(&fixture, crate::rbac::RbacConfig::default());
+
+        for path in SURFACE_RUNS {
+            for token in ["aspat_metrics_view", "aspat_pipes_edit"] {
+                assert_eq!(
+                    gate_outcome(&app, "POST", path, token).await,
+                    Ok(StatusCode::FORBIDDEN),
+                    "{token} must not run a Surface: POST {path}"
+                );
+            }
+            for token in ["aspat_pipes_execute", "aspat_unscoped", fixture.session_token.as_str()] {
+                assert_eq!(
+                    gate_outcome(&app, "POST", path, token).await,
+                    Err(()),
+                    "{token} must pass the gate on POST {path}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn surface_runs_enforce_the_role() {
+        let fixture = admin_fixture().await;
+        let mut rbac_config = crate::rbac::RbacConfig::default();
+        rbac_config
+            .permissions
+            .insert("pipes.execute".to_string(), "administrator".to_string());
+        let mut base_user = fixture
+            .storage
+            .load_user_by_id(ADMIN)
+            .await
+            .unwrap()
+            .unwrap();
+        base_user.user_id = "user-1".to_string();
+        base_user.username = "user".to_string();
+        base_user.role = UserRole::User;
+        base_user.is_primary = false;
+        fixture
+            .storage
+            .save_user(&base_user)
+            .await
+            .unwrap();
+        let user_session = fixture
+            .sessions
+            .create_session("user".to_string(), "user-1".to_string())
+            .await;
+        let app = pipe_execute_app(&fixture, rbac_config);
+
+        for path in SURFACE_RUNS {
+            assert_eq!(
+                gate_outcome(&app, "POST", path, &user_session).await,
+                Ok(StatusCode::FORBIDDEN),
+                "a role without pipes.execute must not run a Surface: POST {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn appliance_config_reads_enforce_the_token_scope_list() {
+        let fixture = admin_fixture().await;
+        let app = create_appliance_config_read_router::<GateOnlyState>()
+            .layer(middleware::from_fn_with_state(auth_layer(&fixture), require_session_auth))
+            .with_state(GateOnlyState);
+
+        for (path, holder, other, passed) in [
+            ("/v1/config/surface-routing", "aspat_pipes_view", "aspat_metrics_view", Err(())),
+            ("/v1/config/networking", "aspat_settings_view", "aspat_pipes_view", Err(())),
+            ("/v1/limits", "aspat_metrics_view", "aspat_pipes_view", Ok(StatusCode::OK)),
+        ] {
+            assert_eq!(
+                gate_outcome(&app, "GET", path, other).await,
+                Ok(StatusCode::FORBIDDEN),
+                "{other} must not GET {path}"
+            );
+            for token in [holder, "aspat_unscoped", fixture.session_token.as_str()] {
+                assert_eq!(
+                    gate_outcome(&app, "GET", path, token).await,
+                    passed,
+                    "{token} must pass the gate on GET {path}"
+                );
+            }
+        }
+    }
+
+    async fn status_of(
+        app: &Router,
+        method: &str,
+        path: &str,
+        token: &str,
+    ) -> StatusCode {
+        app.clone()
+            .oneshot(request(method, path, token))
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn a_scoped_token_reads_but_does_not_change_its_own_account() {
+        let fixture = admin_fixture().await;
+        let app = account_routes()
+            .layer(middleware::from_fn(extract_user_id))
+            .layer(Extension(fixture.sessions.clone()))
+            .layer(Extension(fixture.storage.clone()))
+            .layer(Extension(Arc::new(crate::rbac::RbacConfig::default())))
+            .layer(middleware::from_fn_with_state(auth_layer(&fixture), require_session_auth));
+
+        for (method, path) in [("PUT", "/v1/profile"), ("POST", "/v1/profile/avatar")] {
+            assert_eq!(
+                status_of(&app, method, path, "aspat_pipes_view").await,
+                StatusCode::FORBIDDEN,
+                "a scoped token must not {method} {path}"
+            );
+        }
+        for token in ["aspat_pipes_view", "aspat_unscoped", fixture.session_token.as_str()] {
+            for path in ["/v1/profile", "/v1/permissions"] {
+                assert_eq!(status_of(&app, "GET", path, token).await, StatusCode::OK, "{token} must read GET {path}");
+            }
+        }
+        for token in ["aspat_unscoped", fixture.session_token.as_str()] {
+            assert_eq!(
+                status_of(&app, "PUT", "/v1/profile", token).await,
+                StatusCode::OK,
+                "{token} must still change the profile"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scoped_token_reads_but_does_not_change_its_own_settings() {
+        let fixture = admin_fixture().await;
+        let app = user_settings_routes::<GateOnlyState>()
+            .layer(middleware::from_fn_with_state(auth_layer(&fixture), require_session_auth))
+            .with_state(GateOnlyState);
+
+        for method in ["POST", "DELETE"] {
+            assert_eq!(
+                gate_outcome(&app, method, "/v1/user-settings", "aspat_pipes_view").await,
+                Ok(StatusCode::FORBIDDEN),
+                "a scoped token must not {method} /v1/user-settings"
+            );
+            for token in ["aspat_unscoped", fixture.session_token.as_str()] {
+                assert_eq!(
+                    gate_outcome(&app, method, "/v1/user-settings", token).await,
+                    Err(()),
+                    "{token} must still {method} /v1/user-settings"
+                );
+            }
+        }
+        assert_eq!(
+            gate_outcome(&app, "GET", "/v1/user-settings/overrides", "aspat_pipes_view").await,
+            Err(()),
+            "a scoped token reads its own overrides"
+        );
+        assert_eq!(
+            gate_outcome(&app, "GET", "/v1/user-settings", "aspat_pipes_view").await,
+            Ok(StatusCode::FORBIDDEN),
+            "the effective settings carry system fields, so a scoped token needs settings.view"
+        );
+        for token in ["aspat_settings_view", "aspat_unscoped", fixture.session_token.as_str()] {
+            assert_eq!(
+                gate_outcome(&app, "GET", "/v1/user-settings", token).await,
+                Err(()),
+                "{token} must read GET /v1/user-settings"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_caller_reads_its_own_notifications_with_a_session_or_a_scoped_token() {
+        use crate::integrations::NotificationStore;
+        let fixture = admin_fixture().await;
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::integrations::FileSystemNotificationStore::new(
+                store_dir
+                    .path()
+                    .join("notifications"),
+                store_dir
+                    .path()
+                    .join("templates"),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let mut notification = crate::integrations::types::Notification::new(
+            crate::integrations::types::NotificationType::General,
+            "Welcome".to_string(),
+            "Hello".to_string(),
+            serde_json::json!({}),
+        );
+        notification.user_id = ADMIN.to_string();
+        store
+            .create(&notification)
+            .await
+            .unwrap();
+        let app = notification_read_routes()
+            .layer(Extension(store))
+            .layer(middleware::from_fn_with_state(auth_layer(&fixture), require_session_auth));
+
+        for token in ["aspat_pipes_view", "aspat_unscoped", fixture.session_token.as_str()] {
+            let list = app
+                .clone()
+                .oneshot(request("GET", "/v1/notifications", token))
+                .await
+                .unwrap();
+            assert_eq!(list.status(), StatusCode::OK, "{token}: list");
+            let body = axum::body::to_bytes(list.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                listed
+                    .as_array()
+                    .map(Vec::len),
+                Some(1),
+                "{token} must see the bound user's notification"
+            );
+
+            let one = status_of(&app, "GET", &format!("/v1/notifications/{}", notification.id), token).await;
+            assert_eq!(one, StatusCode::OK, "{token}: get by id");
+
+            let count = app
+                .clone()
+                .oneshot(request("GET", "/v1/notifications/unread/count", token))
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(count.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let count: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(count["unread_count"], 1, "{token}: unread count");
+        }
+        assert_eq!(
+            status_of(&app, "GET", "/v1/notifications/missing", "aspat_pipes_view").await,
+            StatusCode::NOT_FOUND,
+            "another id is not found, not leaked"
+        );
+    }
+
+    #[tokio::test]
+    async fn mediator_reads_enforce_the_token_scope_list() {
+        let fixture = admin_fixture().await;
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::mediators::FileSystemMediatorStore::new(store_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let app = mediator_read_routes()
+            .layer(Extension(store))
+            .layer(middleware::from_fn_with_state(auth_layer(&fixture), require_session_auth));
+
+        for (path, found) in [
+            ("/v1/mediators", StatusCode::OK),
+            ("/v1/mediators/compatible", StatusCode::OK),
+            ("/v1/mediators/missing", StatusCode::NOT_FOUND),
+        ] {
+            assert_eq!(
+                status_of(&app, "GET", path, "aspat_pipes_view").await,
+                StatusCode::FORBIDDEN,
+                "a pipes.view token must not GET {path}"
+            );
+            for token in ["aspat_mediators_view", "aspat_unscoped", fixture.session_token.as_str()] {
+                assert_eq!(
+                    status_of(&app, "GET", path, token).await,
+                    found,
+                    "{token} must pass the gate on GET {path}"
                 );
             }
         }

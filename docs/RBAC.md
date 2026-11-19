@@ -135,7 +135,10 @@ like `GET /v1/pipes-metrics`. The Surface template routes use the `pipes.*` keys
 read and export (`GET /v1/pipe-templates`, `GET /v1/pipe-templates/{id}`,
 `GET /v1/pipe-templates/{id}/export`), `pipes.edit` to create, import and update
 (`POST /v1/pipe-templates`, `POST /v1/pipe-templates/import`, `PUT /v1/pipe-templates/{id}`),
-and `pipes.delete` to delete (`DELETE /v1/pipe-templates/{id}`). Testing a saved Surface's
+and `pipes.delete` to delete (`DELETE /v1/pipe-templates/{id}`). Running a Surface from the
+Admin API (`POST /v1/pipes/{pipe_id}/execute` and `POST /v1/pipes/{pipe_id}/execute/stream`)
+needs `pipes.execute`, because it makes model calls on the Surface's provider credentials and
+spends its budget. Testing a saved Surface's
 upstream connection (`POST /v1/pipes/{pipe_id}/test`) needs `pipes.execute`, because it
 sends the saved key only to the saved endpoint. The pre-save connection test
 (`POST /v1/pipes/test-llm-connection`) needs `pipes.edit` and refuses a stored-secret
@@ -240,6 +243,68 @@ a module-local role-only check. The users handlers, and the extra `policies.publ
 check for updating a policy definition that an appliance-wide assignment references,
 check role and scope inline.
 
+### Route access declarations
+
+Every management route declares its access rule where it is registered, using
+`src/auth_manager/route_declarations.rs`. A route either names its permission (`gate`,
+`maybe_gate`, `require_feature`, or `scope_gate`), is on the session guard's public path list,
+or carries one of these declarations:
+
+| Declaration | Meaning |
+| --- | --- |
+| `scope_gate` | Every signed-in user may call it; an access token with explicit scopes needs the named permission in its scopes. A request the session guard did not authenticate gets `401`. |
+| `refuse_scoped_tokens` | A write to the caller's own account. An access token with explicit scopes gets `403`; a request the session guard did not authenticate gets `401`. |
+| `self_service` | A read of the caller's own data, or of data the appliance also publishes without authentication, open to any authenticated caller. |
+| `handler_checked` | The handler checks role and scope itself, as described above. |
+| `public` | Needs no authentication: a public document such as a DID document or revocation list, a redirect, or the OAuth provider's callback. |
+| `source_authenticated` | Surface traffic on a listener, authenticated by the Surface's source authentication. |
+
+A unit test parses the source and fails the test suite when a `.route(...)` registration
+names none of these, or when the declaration does not wrap every method the route registers.
+A literal path counts as public only on an exact match or at a `/` boundary of a public
+prefix. The test proves that every registration names an access rule, not that the rule
+holds: `self_service`, `handler_checked`, `public` and `source_authenticated` enforce
+nothing themselves, so a second test pins every route that carries a declaration, with its
+methods and permission, to a table in the same file. Adding a route under a declaration, or
+moving one onto another, fails until that table (and the table below, for `scope_gate`)
+changes with it. The scan does not inspect `route_service`, static file services or
+fallbacks (`nest_service`, `fallback_service`, `fallback`), or routes registered inside a
+macro: today these are the `/avatars` and `/uploads` file services, the dashboard's static
+bundle, and the `404` answers for unknown routes, none of which is a management handler.
+Routes that use `scope_gate`:
+
+| Routes | Permission a scoped token needs |
+| --- | --- |
+| Gateway reads (`GET /v1/gateways`, `/v1/gateways/{id}`, `/integrations`, `/policy`, `/surfaces`, `/marketplace`), `POST /v1/gateways/{id}/ping`, `GET /v1/marketplace/models` | `gateways.view` |
+| `GET /v1/mediators`, `/v1/mediators/compatible`, `/v1/mediators/{id}` | `mediators.view` |
+| `GET /v1/marketplace/purchased` | `payments.view` |
+| `GET /v1/config/surface-routing`, `/v1/pipes/config`, `/v1/prompt-guard/config` (the catalogs the Surface editor reads) | `pipes.view` |
+| `GET /v1/config/networking`, `GET /v1/user-settings` (the effective settings carry system fields, as `GET /v1/settings` does) | `settings.view` |
+| `GET /v1/integrations/config`, `/v1/integrations/runtime-variables`, `/v1/users/integrations` | `integrations.view` |
+| `GET /v1/limits` | `metrics.view` |
+| `POST /v1/uploads/image` | `pipes.edit` |
+| `GET /v1/identity/resolve-did`, `/v1/identity/resolve-did-document`, `POST /v1/verify/{did}` | `gateways.view` |
+| `GET /v1/notifications/user-welcome-template` | `notifications.view` |
+
+`scope_gate` checks a token's scopes only, not its bound user's current role. A token's
+scopes are checked against that role when the token is created or updated, and
+`settings.view` and `integrations.view` are administrator-only by default, so a scoped token
+reaches the networking read, the effective user settings and the integration catalogs only
+if it was issued while bound to an administrator; a base user who needs them uses a token
+without explicit scopes.
+Demoting a user ends their sessions but does not withdraw scopes already issued to their
+access tokens, so revoke or re-issue those tokens. This is an accepted risk on the
+`scope_gate` routes only, which before this check needed no permission at all; routes
+behind `gate` or `require_feature` test the live role.
+
+Writes to the caller's own account (`PUT /v1/profile`, `POST /v1/profile/avatar`,
+`POST` and `DELETE /v1/user-settings`, `POST /v1/terms/acceptances`) refuse an access token
+with explicit scopes. Reads of the caller's own data (`GET /v1/profile`, `/v1/permissions`,
+`/v1/user-settings/overrides`, `/v1/terms/status`, and the caller's own notifications) stay
+open to it, as does `GET /v1/identity/did-document`, whose document is
+also published at `/.well-known/did.json` and, as its `did:webvh` log, at
+`/.well-known/did/did.jsonl`.
+
 ### Surface ownership
 
 The base role keeps `pipes.edit`, `pipes.delete` and `pipes.execute`: base users create,
@@ -272,7 +337,9 @@ permission only when:
 - the bound user's current role grants it, and
 - the token has no scopes, or its `scopes` list contains that permission key.
 
-Scopes therefore narrow a role and never widen it. Create and update refuse a scope that
+Scopes therefore narrow a role and never widen it. A token with explicit scopes reaches a
+route only when one of its scopes covers it, or the route is public or reads the caller's
+own data; see [Route access declarations](#route-access-declarations). Create and update refuse a scope that
 is not a permission key, or that the issuer's or the bound user's role does not hold.
 Resource patterns and tenant ownership limit which records a token can reach, not which
 permissions it holds. See [`ACCESS_TOKENS.md`](ACCESS_TOKENS.md).
@@ -294,8 +361,9 @@ mapped to a boolean for the caller.
 
 There is no wrapper object and no `role` field. The key set comes from one list,
 `permission_features`, so every key is present for every caller. Each value is the
-caller's role tested against the configuration; it does not apply an access token's
-scopes. An unknown user answers `404`.
+caller's role tested against the configuration and, for an access token with explicit
+scopes, narrowed to those scopes, so a token scoped to `metrics.view` sees `pipes.execute`
+as `false`. An unknown user answers `404`.
 
 `GET /v1/permissions/public` returns the same shape with every key `false`, for the
 registration flow before anyone is signed in.

@@ -10,17 +10,19 @@ For the operator view, see the hosted
 
 In-dashboard notifications (`/api/v1/notifications`, the bell in the dashboard) are a
 separate store; a pending Fabric connection, for example, raises one there. Each route
-reads and changes only the signed-in caller's own notifications, except the welcome routes:
+reads and changes only the signed-in caller's own notifications, except the welcome routes.
+For an access token the caller is the user the token is bound to, and the reads below need
+no scope:
 
 | Route (under `/api`) | Purpose | Permission |
 | --- | --- | --- |
-| `GET /v1/notifications` | List the caller's notifications | Session, no permission |
+| `GET /v1/notifications` | List the caller's notifications | Signed in, no permission |
 | `POST /v1/notifications` | Create a notification for the caller | `notifications.edit` |
-| `GET /v1/notifications/{id}` | Read one | Session, no permission |
+| `GET /v1/notifications/{id}` | Read one | Signed in, no permission |
 | `PUT /v1/notifications/{id}` | Change one's `status` (for example, mark it read); `title` and `message` cannot be changed | `notifications.edit` |
 | `DELETE /v1/notifications/{id}` | Delete one | `notifications.delete` |
-| `GET /v1/notifications/unread/count` | The caller's unread count | Session, no permission |
-| `GET /v1/notifications/user-welcome-template` | The welcome notification template | Session, no permission |
+| `GET /v1/notifications/unread/count` | The caller's unread count | Signed in, no permission |
+| `GET /v1/notifications/user-welcome-template` | The welcome notification template | Session; a scoped access token needs `notifications.view` |
 | `PUT /v1/notifications/user-welcome-template` | Replace the welcome template | `notifications.edit` |
 | `POST /v1/notifications/send-welcome` | Send a welcome notification with `title` and `message` to the user named by `user_id` | `notifications.edit` |
 
@@ -87,7 +89,8 @@ defines these categories:
 | `POST /v1/integrations/{id}/trigger` | Deliver `subject`, `message` and `variables` to one integration (`integrations.edit`) |
 | `POST /v1/integrations/trigger-multiple` | Deliver `subject` and `message` to several integrations (`integrations.edit`) |
 
-The `config` and `runtime-variables` catalogues hold no stored data and need no permission.
+The `config` and `runtime-variables` catalogues hold no stored data and need no permission;
+an access token with explicit scopes needs `integrations.view`.
 `trigger`, `trigger-multiple`, and `test` when it loads a saved integration by
 `integration_id`, additionally check the caller's tenant, token scope and, for an `audit`
 integration, `audit.view`.
@@ -476,8 +479,8 @@ its values are `RECORD_ID`, `SURFACE_ID`, `SURFACE_NAME`, `CONTENT_HASH`, `PREV_
 
 | Resource | Events | Trigger configuration |
 | --- | --- | --- |
-| Gateway record | `gateway.created`, `gateway.updated`, `gateway.deleted`, `gateway.status_changed`, `gateway.accessed` | `GET`, `PUT /api/v1/gateways/{id}/integrations` (`PUT` needs `gateways.edit`) |
-| Dashboard user | `user.created`, `user.approved`, `user.updated`, `user.deleted`, `user.login`, `user.accessed` | `GET`, `PUT /api/v1/users/integrations` (`PUT` needs `integrations.edit`) |
+| Gateway record | `gateway.created`, `gateway.updated`, `gateway.deleted`, `gateway.status_changed`, `gateway.accessed` | `GET`, `PUT /api/v1/gateways/{id}/integrations` (`GET` needs `gateways.view` from an access token with explicit scopes; `PUT` needs `gateways.edit`) |
+| Dashboard user | `user.created`, `user.approved`, `user.updated`, `user.deleted`, `user.login`, `user.accessed` | `GET`, `PUT /api/v1/users/integrations` (`GET` needs `integrations.view` from an access token with explicit scopes; `PUT` needs `integrations.edit`) |
 
 `user.approved` fires when a new user is approved with a role other than administrator, and
 when an administrator approves a deleted user's kept record again, together with `user.updated`
