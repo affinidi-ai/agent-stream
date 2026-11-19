@@ -218,7 +218,9 @@ Refresh is on demand only; nothing polls for a new catalog.
   5. It records the accepted manifest, its `ETag` and every `version_id` seen
      in `llm_catalog_refresh.json` next to `llm.json`, written to a temporary
      file and renamed into place. An unreadable record refuses every refresh
-     until it is fixed or removed.
+     until it is fixed or removed. If the record cannot be saved, the
+     previous catalog is restored from `llm.json.bak` and the refresh fails
+     with `storage_failure`.
 
   Any refusal or failed download leaves the catalog and the record
   untouched. One refresh runs at a time. Each attempt counts in
@@ -230,7 +232,9 @@ Refresh is on demand only; nothing polls for a new catalog.
   keeps the accepted publication in `llm_catalog_refresh.json`, so a later
   refresh still refuses an older one, but marks it rolled back and drops its
   `ETag`, so the next refresh downloads and installs the accepted publication
-  again instead of reporting `unchanged`.
+  again instead of reporting `unchanged`. It does so whether or not
+  `refresh_url` is set. If the record cannot be read or updated, the rollback
+  fails and the catalog stays as it was.
 
 ### Routes and permissions
 

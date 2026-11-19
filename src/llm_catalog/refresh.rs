@@ -152,32 +152,13 @@ impl CatalogRefresher {
         result
     }
 
-    /// Restore `llm.json.bak` and mark the accepted publication rolled back,
-    /// keeping its sequence. Returns the restored provider count.
+    /// [`rollback_catalog`], one at a time with refreshes.
     pub(crate) async fn rollback(
         &self,
         catalog: &LlmProviderCatalog,
     ) -> Result<usize, CatalogError> {
         let _guard = self.lock.lock().await;
-        let count = catalog
-            .rollback_builtin()
-            .await?;
-        let path = catalog.refresh_state_path();
-        let marked = load_state(&path).and_then(|mut state| {
-            if state.manifest.is_none() {
-                return Ok(());
-            }
-            state.rolled_back = true;
-            state.etag = None;
-            save_state(&path, &state)
-        });
-        if let Err(failure) = marked {
-            tracing::warn!(
-                error = %failure.message,
-                "Built-in LLM catalog rolled back, but the refresh record was not updated; the next refresh may report it unchanged"
-            );
-        }
-        Ok(count)
+        rollback_catalog(catalog).await
     }
 
     fn client(
@@ -292,9 +273,58 @@ impl CatalogRefresher {
         state.manifest = Some(candidate.clone());
         state.etag = etag;
         state.rolled_back = false;
-        save_state(&state_path, &state)?;
+        if let Err(failure) = save_state(&state_path, &state) {
+            return Err(
+                match catalog
+                    .rollback_builtin()
+                    .await
+                {
+                    Ok(_) => failure,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Built-in LLM catalog refresh record was not saved and the previous catalog could not be restored"
+                        );
+                        RefreshFailure::new(
+                            RefreshFailureKind::Storage,
+                            format!("{}; restoring the previous catalog also failed: {e}", failure.message),
+                        )
+                    }
+                },
+            );
+        }
         Ok(RefreshOutcome::Updated { manifest: candidate, refresh })
     }
+}
+
+/// Restore `llm.json.bak` and mark the accepted publication rolled back,
+/// keeping its sequence. The record is marked first and put back if the
+/// catalog cannot be restored, so a record that cannot be written refuses the
+/// rollback. Returns the restored provider count.
+pub(crate) async fn rollback_catalog(catalog: &LlmProviderCatalog) -> Result<usize, CatalogError> {
+    let path = catalog.refresh_state_path();
+    let record = |failure: RefreshFailure| CatalogError::Io(failure.message);
+    let mut state = load_state(&path).map_err(record)?;
+    let previous = (state.etag.clone(), state.rolled_back);
+    let marked = state.manifest.is_some();
+    if marked {
+        state.rolled_back = true;
+        state.etag = None;
+        save_state(&path, &state).map_err(record)?;
+    }
+    let restored = catalog
+        .rollback_builtin()
+        .await;
+    if restored.is_err() && marked {
+        (state.etag, state.rolled_back) = previous;
+        if let Err(failure) = save_state(&path, &state) {
+            tracing::warn!(
+                error = %failure.message,
+                "Built-in LLM catalog rollback failed and the refresh record stays marked rolled back; the next refresh installs the accepted publication again"
+            );
+        }
+    }
+    restored
 }
 
 fn transport(message: String) -> RefreshFailure {
@@ -833,6 +863,145 @@ mod tests {
                 .map(|m| m.publication_sequence),
             Some(2)
         );
+    }
+
+    fn block_record_writes(catalog: &LlmProviderCatalog) -> std::path::PathBuf {
+        let temporary = catalog
+            .refresh_state_path()
+            .with_extension("json.tmp");
+        std::fs::create_dir(&temporary).unwrap();
+        temporary
+    }
+
+    #[tokio::test]
+    async fn a_record_that_cannot_be_saved_restores_the_previous_catalog() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        let blocked = block_record_writes(&catalog);
+
+        let failure = refused(&refresher, &catalog).await;
+        assert_eq!(failure.kind, RefreshFailureKind::Storage, "{}", failure.message);
+        assert_eq!(models(&catalog), vec!["gpt-4o"]);
+        assert!(
+            !catalog
+                .refresh_state_path()
+                .exists()
+        );
+
+        std::fs::remove_dir(&blocked).unwrap();
+        let retried = refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        assert!(matches!(retried, RefreshOutcome::Updated { ref manifest, .. } if manifest.publication_sequence == 1));
+        assert_eq!(models(&catalog), vec!["gpt-5"]);
+        refresher
+            .rollback(&catalog)
+            .await
+            .unwrap();
+        assert_eq!(models(&catalog), vec!["gpt-4o"]);
+    }
+
+    #[tokio::test]
+    async fn a_rollback_without_a_refresh_source_marks_the_record() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rollback_catalog(&catalog)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(models(&catalog), vec!["gpt-4o"]);
+        let state = load_state(&catalog.refresh_state_path()).unwrap();
+        assert!(state.rolled_back);
+        assert_eq!(state.etag, None);
+
+        let again = refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        assert!(matches!(again, RefreshOutcome::Updated { ref manifest, .. } if manifest.publication_sequence == 1));
+        assert_eq!(models(&catalog), vec!["gpt-5"]);
+    }
+
+    #[tokio::test]
+    async fn a_rollback_that_cannot_mark_the_record_changes_nothing() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        block_record_writes(&catalog);
+
+        let error = refresher
+            .rollback(&catalog)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CatalogError::Io(_)), "{error}");
+        assert_eq!(models(&catalog), vec!["gpt-5"]);
+        assert!(
+            directory
+                .path()
+                .join("llm.json.bak")
+                .exists()
+        );
+        assert!(
+            !load_state(&catalog.refresh_state_path())
+                .unwrap()
+                .rolled_back
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rollback_without_a_backup_leaves_the_record_as_it_was() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        std::fs::remove_file(
+            directory
+                .path()
+                .join("llm.json.bak"),
+        )
+        .unwrap();
+        let etag = load_state(&catalog.refresh_state_path())
+            .unwrap()
+            .etag;
+
+        let error = refresher
+            .rollback(&catalog)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CatalogError::NotFound(_)), "{error}");
+        let state = load_state(&catalog.refresh_state_path()).unwrap();
+        assert!(!state.rolled_back);
+        assert!(etag.is_some());
+        assert_eq!(state.etag, etag);
     }
 
     #[tokio::test]

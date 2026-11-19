@@ -11,7 +11,7 @@ use axum::{
 use serde_json::Value;
 use tracing::info;
 
-use super::refresh::{CatalogRefresher, RefreshFailureKind, RefreshOutcome};
+use super::refresh::{CatalogRefresher, RefreshFailureKind, RefreshOutcome, rollback_catalog};
 use super::store::{CatalogError, LlmProviderCatalog};
 
 #[derive(Clone)]
@@ -230,12 +230,7 @@ pub async fn rollback_builtin(State(state): State<LlmCatalogState>) -> impl Into
                 .rollback(&state.catalog)
                 .await
         }
-        None => {
-            state
-                .catalog
-                .rollback_builtin()
-                .await
-        }
+        None => rollback_catalog(&state.catalog).await,
     };
     match restored {
         Ok(count) => {
