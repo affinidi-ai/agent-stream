@@ -32,7 +32,7 @@ const STORAGE_ERROR: &str = "The LLM catalog could not be read or written. See t
 /// log and the caller gets [`STORAGE_ERROR`].
 fn catalog_error_response(err: CatalogError) -> axum::response::Response {
     let status = match err {
-        CatalogError::Duplicate(_) => StatusCode::CONFLICT,
+        CatalogError::Duplicate(_) | CatalogError::Conflict(_) => StatusCode::CONFLICT,
         CatalogError::Validation(_) => StatusCode::BAD_REQUEST,
         CatalogError::NotFound(_) => StatusCode::NOT_FOUND,
         CatalogError::Io(_) => {
@@ -44,12 +44,14 @@ fn catalog_error_response(err: CatalogError) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": err.to_string() }))).into_response()
 }
 
-/// Every refusal except storage comes from what the refresh source served
-/// (or what its host resolves to), so it is a bad gateway. A storage failure
-/// is already logged with its detail by [`CatalogRefresher::refresh`].
+/// A refusal caused by what the refresh source served (or what its host
+/// resolves to) is a bad gateway; one caused by the stored catalog is a
+/// conflict. A storage failure is already logged with its detail by
+/// [`CatalogRefresher::refresh`].
 fn refresh_failure_response(failure: RefreshFailure) -> axum::response::Response {
     let (status, message) = match failure.kind {
         RefreshFailureKind::Storage => (StatusCode::INTERNAL_SERVER_ERROR, STORAGE_ERROR.to_string()),
+        RefreshFailureKind::Conflict => (StatusCode::CONFLICT, failure.message),
         RefreshFailureKind::Transport
         | RefreshFailureKind::Validation
         | RefreshFailureKind::Rollback
@@ -216,6 +218,7 @@ pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoR
                 "outcome": "updated",
                 "providers": refresh.providers,
                 "added": refresh.added,
+                "skipped": refresh.skipped,
                 "version": manifest.version,
                 "publication_sequence": manifest.publication_sequence,
                 "backup": true,
@@ -259,22 +262,24 @@ pub struct ResetSequenceRequest {
 ///
 /// Lower the accepted publication sequence for an appliance a wrong or hostile
 /// publication pinned, so the next refresh accepts a new publication from
-/// `publication_sequence` up. Publications already seen stay refused. Logged
-/// as an `audit` event.
+/// `publication_sequence` up. Publications already seen stay refused. Every
+/// attempt, refused or not, is a `security_audit` event with the caller.
 pub async fn reset_refresh_sequence(
     State(state): State<LlmCatalogState>,
     caller: Option<Extension<AuthGuardOk>>,
     Json(request): Json<ResetSequenceRequest>,
 ) -> impl IntoResponse {
+    let actor_id = caller
+        .as_ref()
+        .map(|Extension(AuthGuardOk(user_id))| user_id.as_str())
+        .unwrap_or("unknown");
     match reset_sequence(&state.catalog, request.publication_sequence).await {
         Ok(previous) => {
             tracing::warn!(
-                target: "audit",
-                event = "llm_catalog.refresh_sequence_reset",
-                user_id = caller
-                    .as_ref()
-                    .map(|Extension(AuthGuardOk(user_id))| user_id.as_str())
-                    .unwrap_or("unknown"),
+                target: "security_audit",
+                event = "llm_catalog_sequence_reset",
+                outcome = "reset",
+                actor_id,
                 previous_sequence = previous,
                 publication_sequence = request.publication_sequence,
                 "Built-in LLM catalog refresh sequence reset"
@@ -288,7 +293,18 @@ pub async fn reset_refresh_sequence(
             )
                 .into_response()
         }
-        Err(e) => catalog_error_response(e),
+        Err(e) => {
+            tracing::warn!(
+                target: "security_audit",
+                event = "llm_catalog_sequence_reset",
+                outcome = "refused",
+                actor_id,
+                publication_sequence = request.publication_sequence,
+                reason = %e,
+                "Built-in LLM catalog refresh sequence reset refused"
+            );
+            catalog_error_response(e)
+        }
     }
 }
 
@@ -318,6 +334,20 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{kind:?}");
             assert_eq!(body(response).await["error"], "upstream detail", "{kind:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_caused_by_the_stored_catalog_is_a_conflict() {
+        let refresh = refresh_failure_response(RefreshFailure {
+            kind: RefreshFailureKind::Conflict,
+            message: "the built-in LLM catalog changed during the refresh; try again".to_string(),
+        });
+        assert_eq!(refresh.status(), StatusCode::CONFLICT);
+        assert_eq!(body(refresh).await["error"], "the built-in LLM catalog changed during the refresh; try again");
+
+        let crud = catalog_error_response(CatalogError::Conflict("custom_llm.json is not valid JSON".to_string()));
+        assert_eq!(crud.status(), StatusCode::CONFLICT);
+        assert_eq!(body(crud).await["error"], "custom_llm.json is not valid JSON");
     }
 
     #[tokio::test]

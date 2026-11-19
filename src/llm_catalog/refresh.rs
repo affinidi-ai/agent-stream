@@ -109,6 +109,8 @@ pub(crate) enum RefreshFailureKind {
     Rollback,
     HashMismatch,
     Storage,
+    /// The stored catalog, not the source, stops the install.
+    Conflict,
 }
 
 #[derive(Debug)]
@@ -136,6 +138,7 @@ fn result_label(result: &Result<RefreshOutcome, RefreshFailure>) -> &'static str
             RefreshFailureKind::Rollback => "rollback_rejection",
             RefreshFailureKind::HashMismatch => "hash_mismatch",
             RefreshFailureKind::Storage => "storage_failure",
+            RefreshFailureKind::Conflict => "conflict",
         },
     }
 }
@@ -339,6 +342,7 @@ impl CatalogRefresher {
                 restore_state(&state_path, previous.as_ref());
                 return Err(match e {
                     CatalogError::Validation(message) => validation(message),
+                    CatalogError::Conflict(message) => RefreshFailure::new(RefreshFailureKind::Conflict, message),
                     other => RefreshFailure::new(RefreshFailureKind::Storage, other.to_string()),
                 });
             }
@@ -440,7 +444,10 @@ fn validation(message: String) -> RefreshFailure {
 async fn checked_source(raw: &str) -> Result<Url, RefreshFailure> {
     crate::url_validation::validate_service_endpoint_url(raw)
         .await
-        .map_err(|reason| validation(format!("catalog source rejected: {reason}")))
+        .map_err(|reason| {
+            tracing::warn!(reason = %reason, "Built-in LLM catalog source refused by the outbound address policy");
+            validation("catalog source refused by the outbound address policy".to_string())
+        })
 }
 
 /// Check the manifest fields on their own. Returns the catalog URL, which
@@ -852,7 +859,7 @@ mod tests {
             panic!("expected an update, got {outcome:?}");
         };
         assert_eq!(manifest.publication_sequence, 1);
-        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0 });
+        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0, skipped: vec![] });
         assert_eq!(models(&catalog), vec!["gpt-5"]);
         assert_eq!(
             catalog
@@ -1333,26 +1340,46 @@ mod tests {
 
         let manifest = refused(&refresher(&source), &catalog).await;
         assert_eq!(manifest.kind, RefreshFailureKind::Validation, "{}", manifest.message);
-        assert!(
-            manifest
-                .message
-                .starts_with("catalog source rejected"),
-            "{}",
-            manifest.message
-        );
+        assert_eq!(manifest.message, "catalog source refused by the outbound address policy");
 
         let _manifest_only = crate::url_validation::test_service_endpoints::allow(&[source.manifest_url()]);
         let catalog_source = refused(&refresher(&source), &catalog).await;
         assert_eq!(catalog_source.kind, RefreshFailureKind::Validation, "{}", catalog_source.message);
-        assert!(
-            catalog_source
-                .message
-                .starts_with("catalog source rejected"),
-            "{}",
-            catalog_source.message
-        );
+        assert_eq!(catalog_source.message, "catalog source refused by the outbound address policy");
+        assert!(!catalog_source.message.contains("127.0.0.1"), "{}", catalog_source.message);
 
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
+        assert!(
+            !catalog
+                .refresh_state_path()
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_catalog_that_fails_after_the_merge_is_a_conflict() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let path = directory
+            .path()
+            .join("llm.json");
+        std::fs::write(
+            &path,
+            json!({ "providers": [
+                { "enum_value": "openai", "name": "OpenAI", "models": [{ "name": "gpt-4o", "value": "gpt-4o" }] },
+                { "enum_value": "OpenAI", "name": "Copy", "models": [{ "name": "gpt-4o", "value": "gpt-4o" }] }
+            ] })
+            .to_string(),
+        )
+        .unwrap();
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+
+        let failure = refused(&refresher(&source), &catalog).await;
+        assert_eq!(failure.kind, RefreshFailureKind::Conflict, "{}", failure.message);
+        assert!(failure.message.contains("more than once"), "{}", failure.message);
+        assert_eq!(result_label(&Err(failure)), "conflict");
         assert!(
             !catalog
                 .refresh_state_path()
@@ -1621,7 +1648,7 @@ mod tests {
         let RefreshOutcome::Updated { refresh, .. } = outcome else {
             panic!("expected an update, got {outcome:?}");
         };
-        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0 });
+        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0, skipped: vec!["Acme".to_string()] });
         assert_eq!(std::fs::read_to_string(&custom_path).unwrap(), custom);
     }
 
@@ -1914,6 +1941,7 @@ mod tests {
             (RefreshFailureKind::Rollback, "rollback_rejection"),
             (RefreshFailureKind::HashMismatch, "hash_mismatch"),
             (RefreshFailureKind::Storage, "storage_failure"),
+            (RefreshFailureKind::Conflict, "conflict"),
         ] {
             assert_eq!(result_label(&Err(RefreshFailure::new(kind, "test"))), expected);
         }

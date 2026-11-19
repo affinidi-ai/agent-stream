@@ -54,7 +54,11 @@ Surface), plus `ide_pipe_id` when the Surface was being listed in an IDE Surface
 Catalogue. Each inline integration credential moved to the secrets store logs an `INFO`
 event `integration_credential_migrated` with `integration_id`, `tenant_id`, `field`,
 `action` and `secret_id`, never the value
-([INTEGRATIONS.md](INTEGRATIONS.md#secrets-in-integration-configuration)). An `oidc.json` that opts out of the
+([INTEGRATIONS.md](INTEGRATIONS.md#secrets-in-integration-configuration)). Each
+`POST /api/v1/llm-providers/refresh/reset` logs a `WARN` event `llm_catalog_sequence_reset`
+with `actor_id`, `outcome` (`reset` or `refused`) and `publication_sequence`, plus
+`previous_sequence` on a reset and `reason` on a refusal
+([PROVIDERS_AND_CREDENTIALS.md](PROVIDERS_AND_CREDENTIALS.md#refreshing-the-built-in-catalog)). An `oidc.json` that opts out of the
 tenant binding with `allow_any_account` logs a `WARN` event `oidc_tenant_binding_disabled` with
 `issuer` and `unmapped` at startup. At startup it also
 logs one `stored_secret_binding` line per stored secret binding (see

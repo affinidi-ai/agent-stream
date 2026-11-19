@@ -9,9 +9,27 @@ describe('refreshMessage', () => {
         publication_sequence: 4,
         providers: 12,
         added: 2,
+        skipped: [],
         backup: true,
       })
     ).toBe('Built-in models refreshed to catalog 1.0.3 — 12 providers, 2 added disabled.');
+  });
+
+  it('names the providers skipped for matching a custom provider', () => {
+    expect(
+      refreshMessage({
+        outcome: 'updated',
+        version: '1.0.3',
+        publication_sequence: 4,
+        providers: 12,
+        added: 0,
+        skipped: ['acme', 'globex'],
+        backup: true,
+      })
+    ).toBe(
+      'Built-in models refreshed to catalog 1.0.3 — 12 providers, 0 added disabled. ' +
+        'Skipped because a custom provider uses the same id: acme, globex.'
+    );
   });
 
   it('reports an unchanged publication without counts', () => {

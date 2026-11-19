@@ -171,6 +171,129 @@ mod tests {
             .status()
     }
 
+    async fn call(
+        app: &Router,
+        method: Method,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    type AuditEvent = std::collections::HashMap<String, String>;
+
+    /// The `security_audit` events logged on this thread while `run` runs.
+    async fn security_audit_events<T>(run: impl std::future::Future<Output = T>) -> (T, Vec<AuditEvent>) {
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+        struct Fields(AuditEvent);
+        impl Visit for Fields {
+            fn record_debug(
+                &mut self,
+                field: &Field,
+                value: &dyn std::fmt::Debug,
+            ) {
+                self.0
+                    .insert(field.name().into(), format!("{value:?}"));
+            }
+            fn record_str(
+                &mut self,
+                field: &Field,
+                value: &str,
+            ) {
+                self.0
+                    .insert(field.name().into(), value.into());
+            }
+        }
+        struct Capture(Arc<Mutex<Vec<AuditEvent>>>);
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: Context<'_, S>,
+            ) {
+                if event.metadata().target() == "security_audit" {
+                    let mut fields = Fields(AuditEvent::new());
+                    event.record(&mut fields);
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .push(fields.0);
+                }
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(Capture(events.clone())));
+        let output = run.await;
+        let captured = std::mem::take(&mut *events.lock().unwrap());
+        (output, captured)
+    }
+
+    #[tokio::test]
+    async fn an_administrator_resets_the_refresh_sequence() {
+        let (app, catalog, _temp) = app(UserRole::Administrator, None).await;
+        let reset = "/api/v1/llm-providers/refresh/reset";
+
+        let ((status, body), events) =
+            security_audit_events(call(&app, Method::POST, reset, json!({ "publication_sequence": 3 }))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["outcome"], "refused");
+        assert_eq!(events[0]["actor_id"], "user-1");
+
+        std::fs::write(
+            catalog.refresh_state_path(),
+            json!({
+                "manifest": {
+                    "schema_version": 1,
+                    "publication_sequence": 5,
+                    "version_id": "agent-stream:1.0.3",
+                    "version": "1.0.3",
+                    "catalogue_url": "https://well.example/llm/v1/catalogues/1.0.3.json",
+                    "sha256": "a".repeat(64),
+                    "size_bytes": 1024,
+                    "published_at": "2026-11-19T00:00:00Z"
+                },
+                "seen_version_ids": ["agent-stream:1.0.3"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (status, body) = call(&app, Method::POST, reset, json!({ "publication_sequence": 5 })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let ((status, body), events) =
+            security_audit_events(call(&app, Method::POST, reset, json!({ "publication_sequence": 3 }))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({ "previous_sequence": 5, "publication_sequence": 3 }));
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "llm_catalog_sequence_reset");
+        assert_eq!(events[0]["outcome"], "reset");
+        assert_eq!(events[0]["actor_id"], "user-1");
+        assert_eq!(events[0]["previous_sequence"], "5");
+        assert_eq!(events[0]["publication_sequence"], "3");
+    }
+
     fn catalog_price(catalog: &LlmProviderCatalog) -> Option<f64> {
         catalog
             .resolve_model_pricing("openai", "gpt-4o", None)

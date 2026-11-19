@@ -245,7 +245,14 @@ Refresh is on demand only; nothing polls for a new catalog.
      - A provider only in the download is added with `enabled: false`, and
        each of its models too, after its `default_base_url` passes the
        public-address check a new provider gets. Its models stay off across
-       later refreshes until an administrator enables them.
+       later refreshes until an administrator enables them. One that lists no
+       models is refused, since a provider without listed models accepts any
+       model name.
+     - A provider only in the download whose `enum_value` matches any entry
+       of `custom_llm.json` (ignoring case, valid or not) is skipped with a
+       warning and named in `skipped`. While `custom_llm.json` exists but
+       cannot be read or parsed, a download that adds providers is refused
+       with `409`.
      - A provider only in `llm.json` is kept.
   6. It completes the record: the accepted manifest, its `ETag`, every
      `version_id` seen and the SHA-256 of the installed `llm.json`, no longer
@@ -273,29 +280,44 @@ Refresh is on demand only; nothing polls for a new catalog.
   running refresh. Each attempt counts in
   `agent_stream_llm_catalog_refresh_total` by `result` (`updated`,
   `unchanged`, `transport_failure`, `validation_failure`,
-  `rollback_rejection`, `hash_mismatch`, `storage_failure`);
+  `rollback_rejection`, `hash_mismatch`, `storage_failure`, `conflict`);
   `agent_stream_llm_catalog_publication_sequence` is the accepted sequence.
   A refusal caused by what the source served, or by what its host resolves
   to, answers `502` with the reason; `hash_mismatch` and `rollback_rejection`
-  are logged at `error`, the rest at `warn`. A `storage_failure` answers `500`
-  with a fixed message and logs the file and cause. No error names the
-  manifest or catalog URL, so a credential in its query string stays out of
-  the response and the log. Without `refresh_url` the refresh answers `400`.
+  are logged at `error`, the rest at `warn`. A source refused by the address
+  policy answers a fixed message; the host and address go only to the log.
+  A refusal caused by the stored catalog (`conflict`: `llm.json` not valid
+  after the merge, for example two ids that differ only in case; the catalog
+  changed during the refresh; an unreadable `custom_llm.json`) answers `409`
+  with the reason. A `storage_failure` answers `500` with a fixed message and
+  logs the file and cause. No error names the manifest or catalog URL, so a
+  credential in its query string stays out of the response and the log.
+  Without `refresh_url` the refresh answers `400`.
 
   A successful refresh answers `200` with the catalog `version` and
   `publication_sequence`, and `outcome`:
 
   | `outcome` | Other fields |
   | --- | --- |
-  | `updated` | `providers` (built-in providers after the merge), `added` (providers added disabled), `backup` (`true`) |
+  | `updated` | `providers` (built-in providers after the merge), `added` (providers added disabled), `skipped` (ids skipped for matching a custom provider), `backup` (`true`) |
   | `unchanged` | None |
 
   Upgrading from 1.0.2 or earlier: a refresh on those versions replaced
   `llm.json` whole, so it could have changed where a built-in provider's key
-  is sent, and later refreshes keep what it wrote. Compare each built-in
-  provider's `default_base_url` with the shipped seed
+  is sent, and later refreshes keep what it wrote. Before sending traffic,
+  compare `llm.json` with the shipped seed
   ([`config/examples/llm.example.json`](../config/examples/llm.example.json))
-  and correct any that differ before sending traffic.
+  and correct:
+  - a built-in provider's `default_base_url` that differs from the seed;
+  - an `endpoints[].path` that does not start with a single `/` (it is used
+    as a full URL);
+  - a built-in provider not in the seed that you did not add yourself,
+    including any whose `enum_value` matches a provider in `custom_llm.json`
+    (it hides the custom one), and its enabled models.
+
+  At startup the appliance logs a warning for each built-in provider with a
+  non-relative endpoint path or an `enum_value` that matches a custom
+  provider.
 - `POST /api/v1/llm-providers/refresh/rollback` restores `llm.json.bak`. It
   keeps the accepted publication in `llm_catalog_refresh.json`, so a later
   refresh still refuses an older one, but marks it rolled back and drops its
@@ -312,8 +334,9 @@ Refresh is on demand only; nothing polls for a new catalog.
   install an earlier publication again; the publisher issues a new one. The
   catalog itself is unchanged. The answer is
   `{"previous_sequence", "publication_sequence"}`; `404` when no publication
-  was accepted, `400` for an N out of range. Each reset is logged as an
-  `audit` event (`llm_catalog.refresh_sequence_reset`) with the caller.
+  was accepted, `400` for an N out of range. Every attempt, refused or not,
+  is logged as a `security_audit` event `llm_catalog_sequence_reset` with
+  the caller ([OBSERVABILITY.md](OBSERVABILITY.md)).
 
 ### Routes and permissions
 

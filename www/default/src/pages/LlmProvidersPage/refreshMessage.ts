@@ -5,6 +5,7 @@ export type RefreshResponse =
       publication_sequence: number;
       providers: number;
       added: number;
+      skipped: string[];
       backup: boolean;
     }
   | {
@@ -13,7 +14,12 @@ export type RefreshResponse =
       publication_sequence: number;
     };
 
-export const refreshMessage = (response: RefreshResponse): string =>
-  response.outcome === 'unchanged'
-    ? `Built-in models are already up to date (catalog ${response.version}).`
-    : `Built-in models refreshed to catalog ${response.version} — ${response.providers} providers, ${response.added} added disabled.`;
+export const refreshMessage = (response: RefreshResponse): string => {
+  if (response.outcome === 'unchanged') {
+    return `Built-in models are already up to date (catalog ${response.version}).`;
+  }
+  const refreshed = `Built-in models refreshed to catalog ${response.version} — ${response.providers} providers, ${response.added} added disabled.`;
+  return response.skipped.length > 0
+    ? `${refreshed} Skipped because a custom provider uses the same id: ${response.skipped.join(', ')}.`
+    : refreshed;
+};
