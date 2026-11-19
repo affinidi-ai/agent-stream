@@ -1,0 +1,31 @@
+name: CodeQL
+
+# Weekly-only CodeQL scan of main through pipeline-rust's reusable workflow.
+# PR and push scans are intentionally off: the Rust analysis is too slow to
+# gate PRs. Repo-level CodeQL "default setup" must stay disabled, or GitHub
+# rejects results from this workflow.
+on:
+  schedule:
+    # Mondays 02:00 UTC. Scheduled runs always use the default branch (main).
+    - cron: '0 2 * * 1'
+  # On-demand run from the Actions tab.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  # Queue instead of cancelling: a manual run must not kill a long scheduled
+  # scan (the Rust job) that is still in progress.
+  cancel-in-progress: false
+
+jobs:
+  codeql:
+    uses: affinidi/pipeline-rust/.github/workflows/codeql.yaml@0fb584f5fa8e4b5b96dd37613f25804e3b1623db # feat/codeql-workflow 2026-11-19
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    with:
+      languages: '["actions", "javascript-typescript", "python", "rust"]'
