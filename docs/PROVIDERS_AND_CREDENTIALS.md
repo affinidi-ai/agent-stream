@@ -199,9 +199,14 @@ Refresh is on demand only; nothing polls for a new catalog.
 
   3. It downloads `catalogue_url` (30-second timeout, 8 MiB cap) and refuses
      it unless its length equals `size_bytes` and its SHA-256 equals `sha256`.
-  4. It validates the catalog against the schema (at least one provider,
-     unique `enum_value`) and merges it into `llm.json`, keeping the previous
-     file as `llm.json.bak`:
+  4. It records the publication in `llm_catalog_refresh.json` next to
+     `llm.json`, marked rolled back, so a crash before step 6 installs it
+     again on the next refresh.
+  5. It validates the catalog against the schema (at least one provider,
+     unique `enum_value`) and merges it into `llm.json`, copying the previous
+     file to `llm.json.bak`. The new `llm.json` is written to a temporary
+     file, flushed to disk and renamed into place, so the runtime never sees
+     a partial catalog:
      - A provider already stored takes only `models`, `endpoints`,
        `endpoint_parameters` and `description` from the download. A field the
        download omits is removed. Everything else stays as stored, including
@@ -215,15 +220,23 @@ Refresh is on demand only; nothing polls for a new catalog.
        its `default_base_url` passes the public-address check a new provider
        gets.
      - A provider only in `llm.json` is kept.
-  5. It records the accepted manifest, its `ETag` and every `version_id` seen
-     in `llm_catalog_refresh.json` next to `llm.json`, written to a temporary
-     file and renamed into place. An unreadable record refuses every refresh
-     until it is fixed or removed. If the record cannot be saved, the
-     previous catalog is restored from `llm.json.bak` and the refresh fails
-     with `storage_failure`.
+  6. It completes the record: the accepted manifest, its `ETag` and every
+     `version_id` seen, no longer marked rolled back. If this write fails, the
+     catalog stays installed, a warning is logged, and the next refresh
+     installs the publication again.
+
+  The record is written the same way as `llm.json`. An unreadable record
+  refuses every refresh until it is fixed or removed, and is logged at
+  `error` at startup. A refreshed catalog (`llm.json.bak` present) with no
+  accepted publication on record logs a warning, since any publication is
+  then accepted. If the record cannot be written in step 4, the refresh
+  fails with `storage_failure` and nothing changes. If step 5 fails, the
+  record is put back as it was. While `llm.json` cannot be read, the runtime
+  keeps the last catalog it read.
 
   Any refusal or failed download leaves the catalog and the record
-  untouched. One refresh runs at a time. Each attempt counts in
+  untouched. One refresh or rollback runs at a time; a rollback waits for a
+  running refresh. Each attempt counts in
   `agent_stream_llm_catalog_refresh_total` by `result` (`updated`,
   `unchanged`, `transport_failure`, `validation_failure`,
   `rollback_rejection`, `hash_mismatch`, `storage_failure`);

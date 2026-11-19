@@ -33,11 +33,23 @@ changes:
     - timestamp: '2026-11-19T09:00:00.000Z'
       title: Keep the built-in catalog and its refresh record in step on failure
       description: >-
-        A refresh whose record llm_catalog_refresh.json cannot be saved now restores the previous catalog
-        and fails with storage_failure, instead of leaving the new catalog live with the old record. A
+        A refresh whose record llm_catalog_refresh.json cannot be saved now fails with storage_failure
+        and leaves the catalog unchanged, instead of leaving the new catalog live with the old record. A
         rollback now marks the accepted publication rolled back even when llm_catalog.refresh_url is not
         set, and fails without changing the catalog if the record cannot be updated, so the next refresh
         always installs the accepted publication again.
+    - timestamp: '2026-11-19T16:00:00.000Z'
+      title: Keep the built-in LLM catalog readable through a refresh or a crash
+      description: >-
+        llm.json and llm_catalog_refresh.json are now written to a temporary file, flushed to disk and
+        renamed into place, and llm.json.bak is a copy, so a refresh no longer leaves a moment with no
+        built-in catalog, during which costs were 0 and the model gate was off. The runtime keeps the
+        last catalog it read while llm.json cannot be read. The publication is recorded before the catalog
+        is installed, so a crash cannot let its version_id be reused, and a failed install puts the record
+        back. A refresh no longer undoes an administrator edit made while it ran. Refreshes and rollbacks,
+        with or without llm_catalog.refresh_url, now run one at a time. Base URL checks of added providers
+        no longer block other catalog edits. An unreadable record is logged at startup, and a refreshed
+        catalog with no record logs a warning.
   removed: []
   security:
     - timestamp: '2026-11-19T05:41:50.000Z'

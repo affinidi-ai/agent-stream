@@ -6,8 +6,9 @@
 //! parameters, rate limiting, capabilities) round-trips without loss. Providers
 //! are keyed by their machine-readable `enum_value`.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 
@@ -91,6 +92,9 @@ pub struct LlmProviderCatalog {
     /// custom providers".
     custom_path: PathBuf,
     write_lock: Mutex<()>,
+    /// Held by a built-in refresh and a rollback for their whole run, so they
+    /// change the catalog and its refresh record one at a time.
+    refresh_lock: Mutex<()>,
     /// Hot-path cache of the **merged** providers array (built-in + valid
     /// custom), keyed by both files' mtimes so that manual edits, reloads, and
     /// admin writes to either file invalidate it automatically.
@@ -150,6 +154,7 @@ impl LlmProviderCatalog {
             path,
             custom_path,
             write_lock: Mutex::new(()),
+            refresh_lock: Mutex::new(()),
             cache: RwLock::new(None),
         })
     }
@@ -200,7 +205,19 @@ impl LlmProviderCatalog {
             return Arc::clone(providers);
         }
 
-        let providers = Arc::new(self.merged_providers());
+        let builtin = match self.read_doc() {
+            Ok(builtin) => builtin,
+            Err(e) => {
+                if let Ok(guard) = self.cache.read()
+                    && let Some((_, _, providers)) = guard.as_ref()
+                {
+                    tracing::debug!(error = %e, "LLM catalog cannot be read; serving the last catalog read");
+                    return Arc::clone(providers);
+                }
+                Vec::new()
+            }
+        };
+        let providers = Arc::new(self.merge_custom(builtin));
         if let Some(bmt) = builtin_mtime
             && let Ok(mut guard) = self.cache.write()
         {
@@ -213,10 +230,10 @@ impl LlmProviderCatalog {
     /// Invalid custom providers (missing identity, colliding with a built-in
     /// `enum_value`, or duplicated) are silently dropped so a bad custom file
     /// can never break the runtime catalog.
-    fn merged_providers(&self) -> Vec<Value> {
-        let mut builtin = self
-            .read_doc()
-            .unwrap_or_default();
+    fn merge_custom(
+        &self,
+        mut builtin: Vec<Value>,
+    ) -> Vec<Value> {
         let builtin_enums: HashSet<String> = builtin
             .iter()
             .filter_map(|p| provider_enum_value(p).map(|e| e.to_ascii_lowercase()))
@@ -372,6 +389,18 @@ impl LlmProviderCatalog {
             .unwrap_or_else(|| PathBuf::from("llm_catalog_refresh.json"))
     }
 
+    /// Whether `llm.json.bak` exists, which means a refresh replaced the
+    /// built-in catalog and no rollback restored it since.
+    pub(crate) fn has_backup(&self) -> bool {
+        self.backup_path()
+            .exists()
+    }
+
+    /// Lock a built-in refresh or rollback holds for its whole run.
+    pub(crate) fn refresh_lock(&self) -> &Mutex<()> {
+        &self.refresh_lock
+    }
+
     /// Drop the mtime-gated merged-providers cache so the next read reflects the
     /// on-disk state.
     fn invalidate_cache(&self) {
@@ -392,29 +421,27 @@ impl LlmProviderCatalog {
     /// provider is skipped, so the download never takes over that id. A
     /// provider only in storage is kept.
     ///
-    /// The document is validated (schema + non-empty + unique ids + relative
-    /// endpoint paths) **before** anything on disk is touched, and the freshly
-    /// written file is re-verified after the write; any failure rolls the
-    /// previous file back so a bad refresh can never leave the appliance
-    /// without a working catalog.
+    /// The download and the merged result are validated (schema + non-empty +
+    /// unique ids + relative endpoint paths) **before** anything on disk is
+    /// touched. The previous file is copied to `llm.json.bak`, and the merged
+    /// catalog replaces `llm.json` through a temporary file renamed into
+    /// place, so readers and a crash see the old catalog or the new one.
+    /// Base URLs of added providers are checked before the write lock is
+    /// taken, so their DNS lookups never hold up other catalog writes.
     pub async fn refresh_builtin(
         &self,
         doc: Value,
     ) -> Result<BuiltinRefresh, CatalogError> {
         validate_catalog_document(&doc)?;
         validate_endpoint_paths(&doc)?;
+        let checked = self
+            .check_added_providers(&doc)
+            .await?;
 
         let _guard = self.write_lock.lock().await;
         let mut providers = self.read_doc()?;
-        let builtin_enums: HashSet<String> = providers
-            .iter()
-            .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
-            .collect();
-        let custom_enums: HashSet<String> = self
-            .valid_custom_providers(&builtin_enums)
-            .iter()
-            .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
-            .collect();
+        let builtin_enums = lowered_enum_values(&providers);
+        let custom_enums = lowered_enum_values(&self.valid_custom_providers(&builtin_enums));
         let mut added = 0;
         for downloaded in extract_providers(&doc) {
             let id = provider_enum_value(&downloaded).map(str::to_ascii_lowercase);
@@ -433,46 +460,31 @@ impl LlmProviderCatalog {
                     );
                 }
                 None => {
-                    let mut provider = downloaded;
-                    check_base_url(&mut provider, None).await?;
-                    disable_added_provider(&mut provider);
+                    let provider = id
+                        .and_then(|id| checked.get(&id))
+                        .cloned()
+                        .ok_or_else(|| {
+                            CatalogError::Io("the built-in LLM catalog changed during the refresh; try again".to_string())
+                        })?;
                     providers.push(provider);
                     added += 1;
                 }
             }
         }
-        let serialized = serde_json::to_string_pretty(&serde_json::json!({ "providers": &providers }))
+        let merged = serde_json::json!({ "providers": &providers });
+        validate_catalog_document(&merged)?;
+        let serialized = serde_json::to_vec_pretty(&merged)
             .map_err(|e| CatalogError::Io(format!("failed to serialize refreshed catalog: {}", e)))?;
 
         let backup = self.backup_path();
-
-        // Move the current catalog aside so we can restore it on any failure.
-        let had_original = self.path.exists();
-        if had_original {
-            let _ = std::fs::remove_file(&backup);
-            std::fs::rename(&self.path, &backup).map_err(|e| {
-                CatalogError::Io(format!("failed to back up existing catalog to {}: {}", backup.display(), e))
-            })?;
-        }
-
-        // Write the refreshed catalog; restore the backup on write failure.
-        if let Err(e) = std::fs::write(&self.path, &serialized) {
-            let _ = std::fs::remove_file(&self.path);
-            if had_original {
-                let _ = std::fs::rename(&backup, &self.path);
-            }
-            return Err(CatalogError::Io(format!("failed to write refreshed catalog {}: {}", self.path.display(), e)));
-        }
-
-        // Verify the freshly written file parses and validates; roll back if not.
-        if let Err(e) = self.verify_on_disk() {
-            let _ = std::fs::remove_file(&self.path);
-            if had_original {
-                let _ = std::fs::rename(&backup, &self.path);
-            }
-            self.invalidate_cache();
-            return Err(e);
-        }
+        let current = std::fs::read(&self.path)
+            .map_err(|e| CatalogError::Io(format!("failed to read LLM catalog {}: {}", self.path.display(), e)))?;
+        write_file_atomically(&backup, &current).map_err(|e| {
+            CatalogError::Io(format!("failed to back up existing catalog to {}: {}", backup.display(), e))
+        })?;
+        write_file_atomically(&self.path, &serialized).map_err(|e| {
+            CatalogError::Io(format!("failed to write refreshed catalog {}: {}", self.path.display(), e))
+        })?;
 
         self.invalidate_cache();
         info!(
@@ -487,28 +499,40 @@ impl LlmProviderCatalog {
         })
     }
 
-    /// Re-read the on-disk built-in catalog and re-validate it, for post-write
-    /// verification during a refresh.
-    fn verify_on_disk(&self) -> Result<(), CatalogError> {
-        let contents = std::fs::read_to_string(&self.path).map_err(|e| {
-            CatalogError::Io(format!("failed to re-read written catalog {}: {}", self.path.display(), e))
-        })?;
-        let doc: Value = serde_json::from_str(&contents)
-            .map_err(|e| CatalogError::Validation(format!("refreshed catalog is not valid JSON: {}", e)))?;
-        validate_catalog_document(&doc)
+    /// Check the `default_base_url` of every provider the download adds (not
+    /// stored, not matching a custom provider) and disable it. Returns the
+    /// checked providers keyed by lowercased `enum_value`.
+    async fn check_added_providers(
+        &self,
+        doc: &Value,
+    ) -> Result<HashMap<String, Value>, CatalogError> {
+        let builtin_enums = lowered_enum_values(&self.read_doc()?);
+        let custom_enums = lowered_enum_values(&self.valid_custom_providers(&builtin_enums));
+        let mut checked = HashMap::new();
+        for mut provider in extract_providers(doc) {
+            let Some(id) = provider_enum_value(&provider).map(str::to_ascii_lowercase) else {
+                continue;
+            };
+            if builtin_enums.contains(&id) || custom_enums.contains(&id) {
+                continue;
+            }
+            check_base_url(&mut provider, None).await?;
+            disable_added_provider(&mut provider);
+            checked.insert(id, provider);
+        }
+        Ok(checked)
     }
 
-    /// Restore the previous built-in catalog from `llm.json.bak`: delete the
-    /// current `llm.json`, rename the backup back into place, and reload. This
-    /// is the recovery path if a refreshed catalog turns out to be problematic.
-    /// Returns the restored provider count.
+    /// Restore the previous built-in catalog from `llm.json.bak` by renaming
+    /// the backup over `llm.json`. This is the recovery path if a refreshed
+    /// catalog turns out to be problematic. Returns the restored provider
+    /// count.
     pub async fn rollback_builtin(&self) -> Result<usize, CatalogError> {
         let _guard = self.write_lock.lock().await;
         let backup = self.backup_path();
         if !backup.exists() {
             return Err(CatalogError::NotFound("no llm.json.bak backup is available to restore".to_string()));
         }
-        let _ = std::fs::remove_file(&self.path);
         std::fs::rename(&backup, &self.path)
             .map_err(|e| CatalogError::Io(format!("failed to restore catalog from {}: {}", backup.display(), e)))?;
         self.invalidate_cache();
@@ -689,9 +713,9 @@ impl LlmProviderCatalog {
         providers: &[Value],
     ) -> Result<(), CatalogError> {
         let doc = serde_json::json!({ "providers": providers });
-        let serialized = serde_json::to_string_pretty(&doc)
+        let serialized = serde_json::to_vec_pretty(&doc)
             .map_err(|e| CatalogError::Io(format!("failed to serialize LLM catalog: {}", e)))?;
-        std::fs::write(&self.path, serialized)
+        write_file_atomically(&self.path, &serialized)
             .map_err(|e| CatalogError::Io(format!("failed to write LLM catalog {}: {}", self.path.display(), e)))?;
         if let Ok(mut guard) = self.cache.write() {
             *guard = None;
@@ -803,6 +827,45 @@ fn provider_enum_value(provider: &Value) -> Option<&str> {
     provider
         .get("enum_value")
         .and_then(|v| v.as_str())
+}
+
+/// The lowercased `enum_value` of every provider that has one.
+fn lowered_enum_values(providers: &[Value]) -> HashSet<String> {
+    providers
+        .iter()
+        .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
+        .collect()
+}
+
+/// Replace `path` with `contents` through `<path>.tmp`, flushed to disk before
+/// the rename, so a reader or a crash sees the old file or the new one, never
+/// a partial one. The temporary file is removed on failure.
+pub(crate) fn write_file_atomically(
+    path: &Path,
+    contents: &[u8],
+) -> std::io::Result<()> {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".tmp");
+    let temporary = path.with_file_name(name);
+    let written = std::fs::File::create(&temporary)
+        .and_then(|mut file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written?;
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = std::fs::File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
 /// Whether a model document is enabled. A missing or non-boolean `enabled`
@@ -1996,5 +2059,69 @@ mod tests {
     async fn rollback_without_backup_errors() {
         let (store, _custom) = store_with_builtin("rollback_none");
         assert!(matches!(store.rollback_builtin().await, Err(CatalogError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn refresh_leaves_no_temporary_file() {
+        let (store, _custom) = store_with_builtin("refresh_no_tmp");
+        store
+            .refresh_builtin(json!({ "providers": [provider("openai")] }))
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .path
+                .with_file_name("llm.json.tmp")
+                .exists()
+        );
+        assert!(
+            !store
+                .path
+                .with_file_name("llm.json.bak.tmp")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn cached_providers_keep_the_last_catalog_when_llm_json_cannot_be_read() {
+        let (store, _custom) = store_with_builtin("cache_unreadable");
+        let before = store.cached_providers();
+        assert_eq!(before.len(), 1);
+
+        std::fs::write(&store.path, "{ not json").unwrap();
+        assert_eq!(*store.cached_providers(), *before);
+
+        std::fs::remove_file(&store.path).unwrap();
+        assert_eq!(*store.cached_providers(), *before);
+    }
+
+    #[test]
+    fn write_file_atomically_replaces_the_file_and_cleans_up_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("record.json");
+        std::fs::write(&path, b"old").unwrap();
+        write_file_atomically(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(
+            !directory
+                .path()
+                .join("record.json.tmp")
+                .exists()
+        );
+
+        let occupied = directory
+            .path()
+            .join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("keep"), b"x").unwrap();
+        assert!(write_file_atomically(&occupied, b"new").is_err());
+        assert!(
+            !directory
+                .path()
+                .join("occupied.tmp")
+                .exists()
+        );
     }
 }

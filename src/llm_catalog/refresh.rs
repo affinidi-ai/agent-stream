@@ -7,9 +7,13 @@
 //! checks its size and hash, and merges it into `llm.json`
 //! ([`LlmProviderCatalog::refresh_builtin`]). The accepted manifest, its ETag
 //! and every `version_id` seen are kept in `llm_catalog_refresh.json` next to
-//! `llm.json`. A rollback of the catalog keeps that record, so an older
-//! publication stays refused, but marks it rolled back, so the next refresh
-//! installs the accepted publication again.
+//! `llm.json`. The publication is recorded, marked rolled back, before the
+//! catalog is installed and the mark is cleared after, so a crash in between
+//! installs it again on the next refresh. A rollback of the catalog keeps that
+//! record, so an older publication stays refused, but marks it rolled back, so
+//! the next refresh installs the accepted publication again. Refreshes and
+//! rollbacks hold [`LlmProviderCatalog::refresh_lock`], so they run one at a
+//! time.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -19,10 +23,9 @@ use chrono::{DateTime, Utc};
 use reqwest::header::{ETAG, IF_NONE_MATCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
 use url::Url;
 
-use super::store::{BuiltinRefresh, CatalogError, LlmProviderCatalog};
+use super::store::{BuiltinRefresh, CatalogError, LlmProviderCatalog, write_file_atomically};
 
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 /// The largest catalog the refresh accepts. The published catalog is a few
@@ -45,7 +48,7 @@ pub(crate) struct CatalogManifest {
     pub published_at: DateTime<Utc>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct RefreshState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest: Option<CatalogManifest>,
@@ -101,11 +104,10 @@ fn result_label(result: &Result<RefreshOutcome, RefreshFailure>) -> &'static str
     }
 }
 
-/// Runs one refresh at a time against the configured manifest URL.
+/// Runs refreshes against the configured manifest URL.
 pub(crate) struct CatalogRefresher {
     manifest_url: String,
     allow_insecure_source: bool,
-    lock: Mutex<()>,
 }
 
 impl CatalogRefresher {
@@ -114,14 +116,22 @@ impl CatalogRefresher {
         allow_insecure_source: bool,
         catalog: &LlmProviderCatalog,
     ) -> Self {
-        if let Ok(RefreshState { manifest: Some(manifest), .. }) = load_state(&catalog.refresh_state_path()) {
-            crate::metrics::backends::prometheus::LLM_CATALOG_PUBLICATION_SEQUENCE
-                .set(manifest.publication_sequence as f64);
+        match load_state(&catalog.refresh_state_path()) {
+            Ok(state) => {
+                if let Some(manifest) = &state.manifest {
+                    crate::metrics::backends::prometheus::LLM_CATALOG_PUBLICATION_SEQUENCE
+                        .set(manifest.publication_sequence as f64);
+                }
+                warn_if_unrecorded(catalog, &state);
+            }
+            Err(failure) => tracing::error!(
+                error = %failure.message,
+                "Built-in LLM catalog refresh record cannot be read; every refresh is refused until it is repaired"
+            ),
         }
         Self {
             manifest_url,
             allow_insecure_source,
-            lock: Mutex::new(()),
         }
     }
 
@@ -129,7 +139,10 @@ impl CatalogRefresher {
         &self,
         catalog: &LlmProviderCatalog,
     ) -> Result<RefreshOutcome, RefreshFailure> {
-        let _guard = self.lock.lock().await;
+        let _guard = catalog
+            .refresh_lock()
+            .lock()
+            .await;
         let result = self
             .refresh_inner(catalog)
             .await;
@@ -157,15 +170,6 @@ impl CatalogRefresher {
         result
     }
 
-    /// [`rollback_catalog`], one at a time with refreshes.
-    pub(crate) async fn rollback(
-        &self,
-        catalog: &LlmProviderCatalog,
-    ) -> Result<usize, CatalogError> {
-        let _guard = self.lock.lock().await;
-        rollback_catalog(catalog).await
-    }
-
     fn client(
         &self,
         timeout: Duration,
@@ -187,6 +191,7 @@ impl CatalogRefresher {
         let manifest_url = checked_source(&self.manifest_url).await?;
         let state_path = catalog.refresh_state_path();
         let mut state = load_state(&state_path)?;
+        warn_if_unrecorded(catalog, &state);
 
         let mut request = self
             .client(MANIFEST_TIMEOUT)?
@@ -264,38 +269,37 @@ impl CatalogRefresher {
         let doc: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|e| validation(format!("the catalog is not valid JSON: {e}")))?;
 
-        let refresh = catalog
-            .refresh_builtin(doc)
-            .await
-            .map_err(|e| match e {
-                CatalogError::Validation(message) => validation(message),
-                other => RefreshFailure::new(RefreshFailureKind::Storage, other.to_string()),
-            })?;
-
+        let previous = state_path
+            .exists()
+            .then(|| state.clone());
         state
             .seen_version_ids
             .insert(candidate.version_id.clone());
         state.manifest = Some(candidate.clone());
+        state.etag = None;
+        state.rolled_back = true;
+        save_state(&state_path, &state)?;
+
+        let refresh = match catalog
+            .refresh_builtin(doc)
+            .await
+        {
+            Ok(refresh) => refresh,
+            Err(e) => {
+                restore_state(&state_path, previous.as_ref());
+                return Err(match e {
+                    CatalogError::Validation(message) => validation(message),
+                    other => RefreshFailure::new(RefreshFailureKind::Storage, other.to_string()),
+                });
+            }
+        };
+
         state.etag = etag;
         state.rolled_back = false;
         if let Err(failure) = save_state(&state_path, &state) {
-            return Err(
-                match catalog
-                    .rollback_builtin()
-                    .await
-                {
-                    Ok(_) => failure,
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Built-in LLM catalog refresh record was not saved and the previous catalog could not be restored"
-                        );
-                        RefreshFailure::new(
-                            RefreshFailureKind::Storage,
-                            format!("{}; restoring the previous catalog also failed: {e}", failure.message),
-                        )
-                    }
-                },
+            tracing::warn!(
+                error = %failure.message,
+                "Built-in LLM catalog refresh installed the publication but could not complete its record; the next refresh installs it again"
             );
         }
         Ok(RefreshOutcome::Updated { manifest: candidate, refresh })
@@ -305,8 +309,12 @@ impl CatalogRefresher {
 /// Restore `llm.json.bak` and mark the accepted publication rolled back,
 /// keeping its sequence. The record is marked first and put back if the
 /// catalog cannot be restored, so a record that cannot be written refuses the
-/// rollback. Returns the restored provider count.
+/// rollback. Waits for a running refresh. Returns the restored provider count.
 pub(crate) async fn rollback_catalog(catalog: &LlmProviderCatalog) -> Result<usize, CatalogError> {
+    let _guard = catalog
+        .refresh_lock()
+        .lock()
+        .await;
     let path = catalog.refresh_state_path();
     let record = |failure: RefreshFailure| CatalogError::Io(failure.message);
     let mut state = load_state(&path).map_err(record)?;
@@ -459,8 +467,7 @@ fn load_state(path: &Path) -> Result<RefreshState, RefreshFailure> {
     })
 }
 
-/// Write the refresh record to a temporary file and rename it into place, so
-/// a crash never leaves a partial record.
+/// Write the refresh record with [`write_file_atomically`].
 fn save_state(
     path: &Path,
     state: &RefreshState,
@@ -468,10 +475,44 @@ fn save_state(
     let storage = |e: String| RefreshFailure::new(RefreshFailureKind::Storage, e);
     let serialized = serde_json::to_vec_pretty(state)
         .map_err(|e| storage(format!("failed to serialize the refresh record: {e}")))?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serialized)
-        .map_err(|e| storage(format!("failed to write {}: {e}", temporary.display())))?;
-    std::fs::rename(&temporary, path).map_err(|e| storage(format!("failed to replace {}: {e}", path.display())))
+    write_file_atomically(path, &serialized).map_err(|e| storage(format!("failed to write {}: {e}", path.display())))
+}
+
+/// Put the record back as it was before a failed install: the earlier
+/// record, or none.
+fn restore_state(
+    path: &Path,
+    previous: Option<&RefreshState>,
+) {
+    let restored = match previous {
+        Some(state) => save_state(path, state),
+        None => std::fs::remove_file(path).map_err(|e| {
+            RefreshFailure::new(RefreshFailureKind::Storage, format!("failed to remove {}: {e}", path.display()))
+        }),
+    };
+    if let Err(failure) = restored {
+        tracing::error!(
+            error = %failure.message,
+            "Built-in LLM catalog refresh failed and its record could not be put back; the publication stays accepted and the next refresh installs it again"
+        );
+    }
+}
+
+/// Warn when `llm.json.bak` shows a refresh replaced the catalog but the
+/// record holds no accepted publication, so any publication is accepted.
+fn warn_if_unrecorded(
+    catalog: &LlmProviderCatalog,
+    state: &RefreshState,
+) {
+    if state
+        .manifest
+        .is_none()
+        && catalog.has_backup()
+    {
+        tracing::warn!(
+            "Built-in LLM catalog was refreshed before but llm_catalog_refresh.json holds no accepted publication; the next refresh accepts any publication"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -669,7 +710,6 @@ mod tests {
         CatalogRefresher {
             manifest_url: source.manifest_url(),
             allow_insecure_source: true,
-            lock: Mutex::new(()),
         }
     }
 
@@ -806,8 +846,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            refresher
-                .rollback(&catalog)
+            rollback_catalog(&catalog)
                 .await
                 .unwrap(),
             1
@@ -851,8 +890,7 @@ mod tests {
             .await
             .unwrap();
 
-        refresher
-            .rollback(&catalog)
+        rollback_catalog(&catalog)
             .await
             .unwrap();
         assert_eq!(models(&catalog), vec!["gpt-5"]);
@@ -879,7 +917,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_record_that_cannot_be_saved_restores_the_previous_catalog() {
+    async fn a_record_that_cannot_be_saved_leaves_the_catalog_as_it_was() {
         let source = Source::start().await;
         let _allowed = source.allow();
         let directory = tempfile::tempdir().unwrap();
@@ -904,8 +942,7 @@ mod tests {
             .unwrap();
         assert!(matches!(retried, RefreshOutcome::Updated { ref manifest, .. } if manifest.publication_sequence == 1));
         assert_eq!(models(&catalog), vec!["gpt-5"]);
-        refresher
-            .rollback(&catalog)
+        rollback_catalog(&catalog)
             .await
             .unwrap();
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
@@ -957,8 +994,7 @@ mod tests {
             .unwrap();
         block_record_writes(&catalog);
 
-        let error = refresher
-            .rollback(&catalog)
+        let error = rollback_catalog(&catalog)
             .await
             .unwrap_err();
         assert!(matches!(error, CatalogError::Io(_)), "{error}");
@@ -998,8 +1034,7 @@ mod tests {
             .unwrap()
             .etag;
 
-        let error = refresher
-            .rollback(&catalog)
+        let error = rollback_catalog(&catalog)
             .await
             .unwrap_err();
         assert!(matches!(error, CatalogError::NotFound(_)), "{error}");
@@ -1068,7 +1103,6 @@ mod tests {
         let moved = CatalogRefresher {
             manifest_url: format!("{}/moved.json", source.base),
             allow_insecure_source: true,
-            lock: Mutex::new(()),
         };
         let redirect = refused(&moved, &catalog).await;
         assert_eq!(redirect.kind, RefreshFailureKind::Transport, "{}", redirect.message);
@@ -1097,7 +1131,6 @@ mod tests {
         let refresher = CatalogRefresher {
             manifest_url,
             allow_insecure_source: true,
-            lock: Mutex::new(()),
         };
 
         let failure = refused(&refresher, &catalog).await;
@@ -1123,6 +1156,77 @@ mod tests {
                 .refresh_state_path()
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_install_keeps_the_earlier_record() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+
+        source.publish(2, "1.0.4", &json!({ "providers": [] }), |_| {});
+        let invalid = refused(&refresher, &catalog).await;
+        assert_eq!(invalid.kind, RefreshFailureKind::Validation, "{}", invalid.message);
+        let state = load_state(&catalog.refresh_state_path()).unwrap();
+        assert_eq!(
+            state
+                .manifest
+                .map(|m| m.publication_sequence),
+            Some(1)
+        );
+        assert!(!state.rolled_back);
+        assert!(state.etag.is_some());
+        assert!(
+            !state
+                .seen_version_ids
+                .contains("agent-stream:1.0.4")
+        );
+        assert_eq!(models(&catalog), vec!["gpt-5"]);
+
+        source.publish(2, "1.0.4", &catalog_with("gpt-6"), |_| {});
+        let fixed = refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        assert!(matches!(fixed, RefreshOutcome::Updated { ref manifest, .. } if manifest.publication_sequence == 2));
+        assert_eq!(models(&catalog), vec!["gpt-6"]);
+    }
+
+    #[tokio::test]
+    async fn a_rollback_waits_for_a_running_refresh() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher(&source)
+            .refresh(&catalog)
+            .await
+            .unwrap();
+
+        let running = catalog
+            .refresh_lock()
+            .lock()
+            .await;
+        let waited = tokio::time::timeout(Duration::from_millis(50), rollback_catalog(&catalog)).await;
+        assert!(waited.is_err(), "the rollback must wait for the refresh");
+        assert_eq!(models(&catalog), vec!["gpt-5"]);
+
+        drop(running);
+        assert_eq!(
+            rollback_catalog(&catalog)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(models(&catalog), vec!["gpt-4o"]);
     }
 
     fn manifest() -> CatalogManifest {

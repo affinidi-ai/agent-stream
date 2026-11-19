@@ -237,15 +237,7 @@ pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoR
 /// if a refreshed catalog is problematic) and reload the in-memory catalog. The
 /// next refresh installs the accepted publication again, but no older one.
 pub async fn rollback_builtin(State(state): State<LlmCatalogState>) -> impl IntoResponse {
-    let restored = match &state.refresher {
-        Some(refresher) => {
-            refresher
-                .rollback(&state.catalog)
-                .await
-        }
-        None => rollback_catalog(&state.catalog).await,
-    };
-    match restored {
+    match rollback_catalog(&state.catalog).await {
         Ok(count) => {
             info!(providers = count, "Built-in LLM catalog rolled back from llm.json.bak");
             (StatusCode::OK, Json(serde_json::json!({ "providers": count, "restored": true }))).into_response()
