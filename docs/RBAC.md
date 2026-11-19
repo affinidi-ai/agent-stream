@@ -279,7 +279,7 @@ Routes that use `scope_gate`:
 | `GET /v1/mediators`, `/v1/mediators/compatible`, `/v1/mediators/{id}` | `mediators.view` |
 | `GET /v1/marketplace/purchased` | `payments.view` |
 | `GET /v1/config/surface-routing`, `/v1/pipes/config`, `/v1/prompt-guard/config` (the catalogs the Surface editor reads) | `pipes.view` |
-| `GET /v1/config/networking` | `settings.view` |
+| `GET /v1/config/networking`, `GET /v1/user-settings` (the effective settings carry system fields, as `GET /v1/settings` does) | `settings.view` |
 | `GET /v1/integrations/config`, `/v1/integrations/runtime-variables`, `/v1/users/integrations` | `integrations.view` |
 | `GET /v1/limits` | `metrics.view` |
 | `POST /v1/uploads/image` | `pipes.edit` |
@@ -289,8 +289,9 @@ Routes that use `scope_gate`:
 `scope_gate` checks a token's scopes only, not its bound user's current role. A token's
 scopes are checked against that role when the token is created or updated, and
 `settings.view` and `integrations.view` are administrator-only by default, so a scoped token
-reaches the networking read and the integration catalogs only if it was issued while bound
-to an administrator; a base user who needs them uses a token without explicit scopes.
+reaches the networking read, the effective user settings and the integration catalogs only
+if it was issued while bound to an administrator; a base user who needs them uses a token
+without explicit scopes.
 Demoting a user ends their sessions but does not withdraw scopes already issued to their
 access tokens, so revoke or re-issue those tokens. This is an accepted risk on the
 `scope_gate` routes only, which before this check needed no permission at all; routes
@@ -299,8 +300,8 @@ behind `gate` or `require_feature` test the live role.
 Writes to the caller's own account (`PUT /v1/profile`, `POST /v1/profile/avatar`,
 `POST` and `DELETE /v1/user-settings`, `POST /v1/terms/acceptances`) refuse an access token
 with explicit scopes. Reads of the caller's own data (`GET /v1/profile`, `/v1/permissions`,
-`/v1/user-settings`, `/v1/user-settings/overrides`, `/v1/terms/status`, and the caller's own
-notifications) stay open to it, as does `GET /v1/identity/did-document`, whose document is
+`/v1/user-settings/overrides`, `/v1/terms/status`, and the caller's own notifications) stay
+open to it, as does `GET /v1/identity/did-document`, whose document is
 also published at `/.well-known/did.json` and, as its `did:webvh` log, at
 `/.well-known/did/did.jsonl`.
 

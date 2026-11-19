@@ -808,7 +808,7 @@ mod route_coverage {
         ("GET", "/v1/profile", "self_service", None),
         ("GET", "/v1/prompt-guard/config", "scope_gate", Some("PipesView")),
         ("GET", "/v1/terms/status", "self_service", None),
-        ("GET", "/v1/user-settings", "self_service", None),
+        ("GET", "/v1/user-settings", "scope_gate", Some("SettingsView")),
         ("GET", "/v1/user-settings/overrides", "self_service", None),
         ("GET", "/v1/users/integrations", "scope_gate", Some("IntegrationsView")),
         ("POST", "/v1/gateways/{id}/ping", "scope_gate", Some("GatewaysView")),

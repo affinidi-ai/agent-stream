@@ -455,7 +455,7 @@ stored per user under `[storage_paths] settings` in `users/<user_id>.json`.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
-| `GET /v1/user-settings` | Any signed-in user | The effective settings: the caller's overrides applied over the system settings |
+| `GET /v1/user-settings` | Any signed-in user; an access token with explicit scopes needs `settings.view`, since the response carries system settings | The effective settings: the caller's overrides applied over the system settings |
 | `POST /v1/user-settings` | Any signed-in user; refused to an access token with explicit scopes | Set overrides for the fields supplied; returns the effective settings |
 | `DELETE /v1/user-settings` | Any signed-in user; refused to an access token with explicit scopes | Remove all the caller's overrides |
 | `GET /v1/user-settings/overrides` | Any signed-in user | Only the caller's overrides |

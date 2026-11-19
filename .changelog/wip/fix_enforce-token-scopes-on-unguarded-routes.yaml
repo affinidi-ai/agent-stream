@@ -25,27 +25,36 @@ changes:
         such route needs a matching scope from a token with explicit scopes, and a unit test
         fails the test suite when a .route registration has no access rule. GET /v1/permissions
         now reports a scoped token's permissions narrowed to its scopes, and an access token
-        reads its bound user's own notifications. Sessions and tokens without explicit scopes
-        are otherwise unchanged.
+        reads its bound user's own notifications. On the routes that now check only a scoped
+        token's scopes, sessions and tokens without explicit scopes are unchanged; the two run
+        routes also check pipes.execute in the caller's role, sessions included.
   breaking:
     - timestamp: '2026-11-18T15:14:38.000Z'
       title: Require matching scopes on routes that scoped access tokens could reach freely
       description: >-
         A management access token with explicit scopes now needs: pipes.execute for
-        POST /v1/pipes/{pipe_id}/execute and /execute/stream; gateways.view for the gateway
-        reads, POST /v1/gateways/{id}/ping, GET /v1/marketplace/models, the /v1/identity DID
-        resolve reads and POST /v1/verify/{did}; mediators.view for the mediator reads;
-        payments.view for GET /v1/marketplace/purchased; pipes.view for
-        GET /v1/config/surface-routing, /v1/pipes/config and /v1/prompt-guard/config;
-        settings.view for GET /v1/config/networking; integrations.view for
-        GET /v1/integrations/config, /v1/integrations/runtime-variables and
-        /v1/users/integrations; metrics.view for GET /v1/limits; pipes.edit for
+        POST /v1/pipes/{pipe_id}/execute and POST /v1/pipes/{pipe_id}/execute/stream;
+        gateways.view for GET /v1/gateways, GET /v1/gateways/{id},
+        GET /v1/gateways/{id}/integrations, GET /v1/gateways/{id}/policy,
+        GET /v1/gateways/{id}/surfaces, GET /v1/gateways/{id}/marketplace,
+        POST /v1/gateways/{id}/ping, GET /v1/marketplace/models,
+        GET /v1/identity/resolve-did, GET /v1/identity/resolve-did-document and
+        POST /v1/verify/{did}; mediators.view for GET /v1/mediators,
+        GET /v1/mediators/compatible and GET /v1/mediators/{id}; payments.view for
+        GET /v1/marketplace/purchased; pipes.view for GET /v1/config/surface-routing,
+        GET /v1/pipes/config and GET /v1/prompt-guard/config; settings.view for
+        GET /v1/config/networking and GET /v1/user-settings; integrations.view for
+        GET /v1/integrations/config, GET /v1/integrations/runtime-variables and
+        GET /v1/users/integrations; metrics.view for GET /v1/limits; pipes.edit for
         POST /v1/uploads/image; and notifications.view for
         GET /v1/notifications/user-welcome-template. It is refused on PUT /v1/profile,
-        POST /v1/profile/avatar, POST and DELETE /v1/user-settings and
+        POST /v1/profile/avatar, POST /v1/user-settings, DELETE /v1/user-settings and
         POST /v1/terms/acceptances. Add the needed scopes to existing tokens, or sign in to
         change your own profile and settings. settings.view and integrations.view are
-        administrator-only by default, so a base user who needs the networking read or the
-        integration catalogs from a script uses a token without explicit scopes. Running a
-        Surface also needs pipes.execute in the caller's role, which the built-in user and
-        administrator roles hold.
+        administrator-only by default, so a base user who needs the networking read, the
+        effective user settings or the integration catalogs from a script uses a token
+        without explicit scopes. Running a Surface also needs pipes.execute in the caller's
+        role, sessions included. The built-in user and administrator roles hold it; a custom
+        rbac.json that maps pipes.execute to a higher role, or leaves it out, now stops the
+        roles below from running Surfaces in the dashboard Sandbox and through the Admin API,
+        so map it to every role that should run Surfaces.

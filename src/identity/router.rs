@@ -125,15 +125,17 @@ fn account_routes() -> Router {
         .route("/v1/permissions", self_service(get(crate::auth_manager::permissions::get_permissions)))
 }
 
-/// The caller's own dashboard settings. An access token with explicit scopes
-/// may read them but not change them.
+/// The caller's dashboard settings. The effective settings carry system
+/// fields as `GET /v1/settings` does, so an access token with explicit scopes
+/// needs `settings.view` to read them; it may read its own overrides, and may
+/// change neither.
 fn user_settings_routes<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
     IdentityApiState: axum::extract::FromRef<S>,
 {
     Router::new()
-        .route("/v1/user-settings", self_service(get(handlers::get_user_settings)))
+        .route("/v1/user-settings", scope_gate(get(handlers::get_user_settings), Feature::SettingsView))
         .route("/v1/user-settings", refuse_scoped_tokens(post(handlers::update_user_settings)))
         .route("/v1/user-settings", refuse_scoped_tokens(delete(handlers::reset_user_settings)))
         .route("/v1/user-settings/overrides", self_service(get(handlers::get_user_settings_overrides)))
@@ -4190,11 +4192,21 @@ mod token_scope_route_tests {
                 );
             }
         }
-        for path in ["/v1/user-settings", "/v1/user-settings/overrides"] {
+        assert_eq!(
+            gate_outcome(&app, "GET", "/v1/user-settings/overrides", "aspat_pipes_view").await,
+            Err(()),
+            "a scoped token reads its own overrides"
+        );
+        assert_eq!(
+            gate_outcome(&app, "GET", "/v1/user-settings", "aspat_pipes_view").await,
+            Ok(StatusCode::FORBIDDEN),
+            "the effective settings carry system fields, so a scoped token needs settings.view"
+        );
+        for token in ["aspat_settings_view", "aspat_unscoped", fixture.session_token.as_str()] {
             assert_eq!(
-                gate_outcome(&app, "GET", path, "aspat_pipes_view").await,
+                gate_outcome(&app, "GET", "/v1/user-settings", token).await,
                 Err(()),
-                "a scoped token must read GET {path}"
+                "{token} must read GET /v1/user-settings"
             );
         }
     }
