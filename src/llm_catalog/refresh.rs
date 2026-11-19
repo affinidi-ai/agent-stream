@@ -859,7 +859,14 @@ mod tests {
             panic!("expected an update, got {outcome:?}");
         };
         assert_eq!(manifest.publication_sequence, 1);
-        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0, skipped: vec![] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec![]
+            }
+        );
         assert_eq!(models(&catalog), vec!["gpt-5"]);
         assert_eq!(
             catalog
@@ -1346,7 +1353,13 @@ mod tests {
         let catalog_source = refused(&refresher(&source), &catalog).await;
         assert_eq!(catalog_source.kind, RefreshFailureKind::Validation, "{}", catalog_source.message);
         assert_eq!(catalog_source.message, "catalog source refused by the outbound address policy");
-        assert!(!catalog_source.message.contains("127.0.0.1"), "{}", catalog_source.message);
+        assert!(
+            !catalog_source
+                .message
+                .contains("127.0.0.1"),
+            "{}",
+            catalog_source.message
+        );
 
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
         assert!(
@@ -1378,7 +1391,13 @@ mod tests {
 
         let failure = refused(&refresher(&source), &catalog).await;
         assert_eq!(failure.kind, RefreshFailureKind::Conflict, "{}", failure.message);
-        assert!(failure.message.contains("more than once"), "{}", failure.message);
+        assert!(
+            failure
+                .message
+                .contains("more than once"),
+            "{}",
+            failure.message
+        );
         assert_eq!(result_label(&Err(failure)), "conflict");
         assert!(
             !catalog
@@ -1648,7 +1667,14 @@ mod tests {
         let RefreshOutcome::Updated { refresh, .. } = outcome else {
             panic!("expected an update, got {outcome:?}");
         };
-        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0, skipped: vec!["Acme".to_string()] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec!["Acme".to_string()]
+            }
+        );
         assert_eq!(std::fs::read_to_string(&custom_path).unwrap(), custom);
     }
 

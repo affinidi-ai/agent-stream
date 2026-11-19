@@ -205,8 +205,7 @@ impl LlmProviderCatalog {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
             Err(e) => return Err(unreadable(format!("cannot be read ({e})"))),
         };
-        let doc: Value =
-            serde_json::from_str(&contents).map_err(|e| unreadable(format!("is not valid JSON ({e})")))?;
+        let doc: Value = serde_json::from_str(&contents).map_err(|e| unreadable(format!("is not valid JSON ({e})")))?;
         Ok(lowered_enum_values(&extract_providers(&doc)))
     }
 
@@ -1915,7 +1914,14 @@ mod tests {
             .refresh_builtin(refreshed)
             .await
             .unwrap();
-        assert_eq!(refresh, BuiltinRefresh { providers: 3, added: 2, skipped: vec![] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 3,
+                added: 2,
+                skipped: vec![]
+            }
+        );
 
         // New catalog is live…
         let enums: Vec<String> = store
@@ -2046,7 +2052,14 @@ mod tests {
             .refresh_builtin(json!({ "providers": [downloaded.clone()] }))
             .await
             .unwrap();
-        assert_eq!(refresh, BuiltinRefresh { providers: 2, added: 0, skipped: vec![] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 2,
+                added: 0,
+                skipped: vec![]
+            }
+        );
 
         let mut expected = stored;
         for key in REFRESHED_PROVIDER_FIELDS {
@@ -2139,7 +2152,14 @@ mod tests {
             .refresh_builtin(json!({ "providers": [provider("openai"), acme] }))
             .await
             .unwrap();
-        assert_eq!(refresh, BuiltinRefresh { providers: 2, added: 1, skipped: vec![] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 2,
+                added: 1,
+                skipped: vec![]
+            }
+        );
         let added = stored_provider(&store, "acme");
         assert_eq!(added["enabled"], false);
         assert_eq!(added[PUBLIC_BASE_URL_MARKER], true);
@@ -2237,7 +2257,14 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0, skipped: vec!["ACME".to_string()] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec!["ACME".to_string()]
+            }
+        );
         assert!(
             store
                 .list_providers()
@@ -2280,13 +2307,27 @@ mod tests {
     async fn refresh_keeps_the_id_of_an_invalid_custom_provider() {
         let (store, custom) = store_with_builtin("refresh_invalid_custom");
         std::fs::write(&custom, json!({ "providers": [{ "enum_value": "acme" }] }).to_string()).unwrap();
-        assert!(store.custom_providers().is_empty(), "the custom entry is invalid");
+        assert!(
+            store
+                .custom_providers()
+                .is_empty(),
+            "the custom entry is invalid"
+        );
 
         let refresh = store
-            .refresh_builtin(json!({ "providers": [provider("openai"), with_base_url(listed("Acme"), "https://93.184.216.34/v1")] }))
+            .refresh_builtin(
+                json!({ "providers": [provider("openai"), with_base_url(listed("Acme"), "https://93.184.216.34/v1")] }),
+            )
             .await
             .unwrap();
-        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0, skipped: vec!["Acme".to_string()] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec!["Acme".to_string()]
+            }
+        );
     }
 
     #[tokio::test]
@@ -2296,7 +2337,9 @@ mod tests {
         let before = std::fs::read_to_string(&store.path).unwrap();
 
         let refused = store
-            .refresh_builtin(json!({ "providers": [provider("openai"), with_base_url(listed("acme"), "https://93.184.216.34/v1")] }))
+            .refresh_builtin(
+                json!({ "providers": [provider("openai"), with_base_url(listed("acme"), "https://93.184.216.34/v1")] }),
+            )
             .await;
         assert!(
             matches!(&refused, Err(CatalogError::Conflict(message)) if message.contains("custom_llm.json")),
@@ -2308,13 +2351,21 @@ mod tests {
             .refresh_builtin(json!({ "providers": [provider("openai")] }))
             .await
             .unwrap();
-        assert_eq!(merged_only, BuiltinRefresh { providers: 1, added: 0, skipped: vec![] });
+        assert_eq!(
+            merged_only,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec![]
+            }
+        );
     }
 
     #[test]
     fn a_non_relative_endpoint_path_is_detected() {
         let mut absolute = provider("openai");
-        absolute["endpoints"] = json!([{ "name": "Chat", "path": "/chat" }, { "name": "Out", "path": "https://x.example/v1" }]);
+        absolute["endpoints"] =
+            json!([{ "name": "Chat", "path": "/chat" }, { "name": "Out", "path": "https://x.example/v1" }]);
         let mut relative = provider("openai");
         relative["endpoints"] = json!([{ "name": "Chat", "path": "/chat/completions" }]);
         assert!(has_non_relative_endpoint_path(&absolute));
@@ -2385,7 +2436,14 @@ mod tests {
             .refresh_builtin(json!({ "providers": [downloaded] }))
             .await
             .unwrap();
-        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0, skipped: vec![] });
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec![]
+            }
+        );
         let openai = stored_provider(&store, "openai");
         assert_eq!(openai["description"], "New");
         assert!(
