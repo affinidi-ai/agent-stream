@@ -144,26 +144,58 @@ pub fn proxy_with_timeout(timeout: Duration) -> Result<reqwest::Client> {
         .context("Failed to build proxy HTTP client")
 }
 
+/// Why [`read_limited`] refused a response body.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadLimitError {
+    /// The body is longer than the limit, declared or streamed.
+    TooLarge { limit: usize },
+    /// The body could not be read.
+    Body(String),
+}
+
+impl std::fmt::Display for ReadLimitError {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Self::TooLarge { limit } => write!(f, "response exceeds the {limit} byte limit"),
+            Self::Body(reason) => write!(f, "failed to read response body: {reason}"),
+        }
+    }
+}
+
 /// Read at most `limit` bytes of a response body, refusing a longer one
 /// (declared or streamed) rather than buffering it.
 pub(crate) async fn read_capped(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, String> {
+    read_limited(response, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// [`read_capped`], telling a body past the limit apart from one that could
+/// not be read.
+pub(crate) async fn read_limited(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ReadLimitError> {
     if response
         .content_length()
         .is_some_and(|declared| declared > limit as u64)
     {
-        return Err(format!("response exceeds the {limit} byte limit"));
+        return Err(ReadLimitError::TooLarge { limit });
     }
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| format!("failed to read response body: {}", e.without_url()))?
+        .map_err(|e| ReadLimitError::Body(e.without_url().to_string()))?
     {
         if body.len() + chunk.len() > limit {
-            return Err(format!("response exceeds the {limit} byte limit"));
+            return Err(ReadLimitError::TooLarge { limit });
         }
         body.extend_from_slice(&chunk);
     }
@@ -267,5 +299,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("4 byte limit"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn read_limited_reports_a_body_past_the_limit_as_too_large() {
+        let error = read_limited(response("0123456789"), 4)
+            .await
+            .unwrap_err();
+        assert_eq!(error, ReadLimitError::TooLarge { limit: 4 });
     }
 }

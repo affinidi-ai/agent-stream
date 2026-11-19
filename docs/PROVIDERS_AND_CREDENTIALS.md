@@ -129,6 +129,8 @@ capabilities, parameters and request profile. The catalog feeds:
 | --- | --- |
 | `llm.json` in `[storage_paths] llm_configuration` | The built-in catalog. Seeded once from `config_files.llm` (the example is [`config/examples/llm.example.json`](../config/examples/llm.example.json)); the storage copy is authoritative and never overwritten by the seed. |
 | `custom_llm.json` beside it | Operator-defined providers, merged after the built-in ones. Never seeded. |
+| `llm.json.bak` beside it | The built-in catalog before the last refresh. Written by a refresh, restored by a rollback. |
+| `llm_catalog_refresh.json` beside it | The refresh record: the accepted publication, its `ETag`, every `version_id` seen and the SHA-256 of the installed `llm.json`. Removing it resets rollback protection; see [Refreshing the built-in catalog](#refreshing-the-built-in-catalog). |
 
 `LlmProviderCatalog` reads both from disk through a cache keyed on the two
 files' modification times, so a manual edit or a catalog write takes effect on
@@ -140,13 +142,17 @@ Both files are checked against the embedded schema
 [`config/schemas/llm_catalog.schema.json`](../config/schemas/llm_catalog.schema.json)
 on every write through the API, and so is a single provider sent on its own
 (`POST /api/v1/llm-providers` and `PUT /api/v1/llm-providers/{enum_value}`).
+`POST` refuses an `enum_value` a built-in provider already uses, compared
+case-insensitively.
 
 A provider's `default_base_url` is dialled with its provider key attached. On create,
 update and custom save, a new or changed `default_base_url` must pass the
 [strict outbound policy](INTEGRATIONS.md#strict-outbound-policy) (`check_base_url`,
 `validate_resolved_webhook_url`); a URL it refuses gets `400`. The URL already stored
 for the same provider passes, so built-in Ollama on `localhost` and a self-hosted
-provider written to disk keep working; a built-in refresh is not checked. A URL that
+provider written to disk keep working. A built-in refresh never changes a stored
+provider's `default_base_url`, and a provider new in the download must pass the same
+check ([Refreshing the built-in catalog](#refreshing-the-built-in-catalog)). A URL that
 passed the check is marked `default_base_url_public` (set by the server, never taken
 from the request body), and the DNS check every outbound service client uses
 (`validate_service_endpoint_addresses` in
@@ -181,15 +187,24 @@ Refresh is on demand only; nothing polls for a new catalog.
   `http_client::with_strict_validating_resolver`, which re-checks every
   resolved address at connect time against the
   [strict outbound policy](INTEGRATIONS.md#strict-outbound-policy). Neither
-  follows a redirect.
+  follows a redirect. With `allow_insecure_source`, the address is checked
+  only before each request, not at connect time, and `HTTP_PROXY` /
+  `HTTPS_PROXY` are honoured. Over plain http the refresh also loses its
+  integrity check: the `sha256` and `size_bytes` come from a manifest on the
+  same host and channel, so anyone on the network path can serve a catalog of
+  their own, or a manifest with a very high `publication_sequence` that
+  refuses every later publication until `llm_catalog_refresh.json` is
+  removed. Use it only for a mirror on a network you trust.
   1. It downloads the manifest (10-second timeout, 64 KiB cap), sending the
-     stored `ETag` as `If-None-Match`. A `304` reports `unchanged`.
+     stored `ETag` as `If-None-Match`. A `304` reports `unchanged`. The `ETag`
+     is not sent while the record is marked rolled back or `llm.json` no
+     longer matches the SHA-256 recorded when the publication was installed.
   2. It checks the manifest fields:
 
      | Field | Rule |
      | --- | --- |
      | `schema_version` | `1` |
-     | `publication_sequence` | Positive. Lower than the accepted one, or equal with any other field changed: refused. Equal and unchanged: `unchanged`. |
+     | `publication_sequence` | Positive. Lower than the accepted one, or equal with any other field changed: refused. Equal and unchanged: `unchanged`, unless the record is marked rolled back or `llm.json` no longer matches the installed SHA-256; then the publication installs again. |
      | `version_id` | Not empty. One already used by another publication: refused. |
      | `version` | Not empty. The release the catalog comes from, shown to the administrator. |
      | `catalogue_url` | https (http only with `allow_insecure_source`), same host and port as `refresh_url`, no credentials |
@@ -197,19 +212,25 @@ Refresh is on demand only; nothing polls for a new catalog.
      | `size_bytes` | 1 to 8 MiB |
      | `published_at` | RFC 3339 timestamp |
 
-  3. It downloads `catalogue_url` (30-second timeout, 8 MiB cap) and refuses
-     it unless its length equals `size_bytes` and its SHA-256 equals `sha256`.
+  3. It downloads `catalogue_url` (30-second timeout), reading no more than
+     `size_bytes`, and refuses it unless its length equals `size_bytes` and
+     its SHA-256 equals `sha256`. A longer catalog is a `hash_mismatch`, not a
+     `transport_failure`.
   4. It records the publication in `llm_catalog_refresh.json` next to
      `llm.json`, marked rolled back, so a crash before step 6 installs it
      again on the next refresh.
   5. It validates the catalog against the schema (at least one provider,
-     unique `enum_value`) and merges it into `llm.json`, copying the previous
+     a `models` array on every provider, `enum_value`s unique ignoring case)
+     and merges it into `llm.json`, copying the previous
      file to `llm.json.bak`. The new `llm.json` is written to a temporary
      file, flushed to disk and renamed into place, so the runtime never sees
      a partial catalog:
      - A provider already stored takes only `models`, `endpoints`,
        `endpoint_parameters` and `description` from the download. A field the
-       download omits is removed. Everything else stays as stored, including
+       download omits is removed; a provider without `models` is refused, so
+       a download cannot strip a provider's models and prices. If `llm.json`
+       holds two providers whose `enum_value`s differ only in case, the
+       refresh is refused until one is removed. Everything else stays as stored, including
        `name`, `enabled`, `default_base_url`, `api_version_prefix`,
        `api_schema`, the `api_key_*` fields and
        `requires_forward_caller_token`, so a published file cannot change
@@ -220,14 +241,20 @@ Refresh is on demand only; nothing polls for a new catalog.
        its `default_base_url` passes the public-address check a new provider
        gets.
      - A provider only in `llm.json` is kept.
-  6. It completes the record: the accepted manifest, its `ETag` and every
-     `version_id` seen, no longer marked rolled back. If this write fails, the
+  6. It completes the record: the accepted manifest, its `ETag`, every
+     `version_id` seen and the SHA-256 of the installed `llm.json`, no longer
+     marked rolled back. A later edit of `llm.json`, by hand or through the
+     API, or a restore from outside makes the next refresh install the
+     publication again. If this write fails, the
      catalog stays installed, a warning is logged, and the next refresh
      installs the publication again.
 
   The record is written the same way as `llm.json`. An unreadable record
   refuses every refresh until it is fixed or removed, and is logged at
-  `error` at startup. A refreshed catalog (`llm.json.bak` present) with no
+  `error` at startup. Removing the record resets rollback protection: the
+  next refresh accepts any publication, older ones included. Restore a
+  known-good copy from backup, or remove it only after confirming the
+  current publication at the source. A refreshed catalog (`llm.json.bak` present) with no
   accepted publication on record logs a warning, since any publication is
   then accepted. If the record cannot be written in step 4, the refresh
   fails with `storage_failure` and nothing changes. If step 5 fails, the
@@ -247,6 +274,21 @@ Refresh is on demand only; nothing polls for a new catalog.
   with a fixed message and logs the file and cause. No error names the
   manifest or catalog URL, so a credential in its query string stays out of
   the response and the log. Without `refresh_url` the refresh answers `400`.
+
+  A successful refresh answers `200` with the catalog `version` and
+  `publication_sequence`, and `outcome`:
+
+  | `outcome` | Other fields |
+  | --- | --- |
+  | `updated` | `providers` (built-in providers after the merge), `added` (providers added disabled), `backup` (`true`) |
+  | `unchanged` | None |
+
+  Upgrading from 1.0.2 or earlier: a refresh on those versions replaced
+  `llm.json` whole, so it could have changed where a built-in provider's key
+  is sent, and later refreshes keep what it wrote. Compare each built-in
+  provider's `default_base_url` with the shipped seed
+  ([`config/examples/llm.example.json`](../config/examples/llm.example.json))
+  and correct any that differ before sending traffic.
 - `POST /api/v1/llm-providers/refresh/rollback` restores `llm.json.bak`. It
   keeps the accepted publication in `llm_catalog_refresh.json`, so a later
   refresh still refuses an older one, but marks it rolled back and drops its

@@ -396,6 +396,12 @@ impl LlmProviderCatalog {
             .exists()
     }
 
+    /// The built-in `llm.json` as it is on disk now, or `None` when it cannot
+    /// be read.
+    pub(crate) fn read_builtin_bytes(&self) -> Option<Vec<u8>> {
+        std::fs::read(&self.path).ok()
+    }
+
     /// Lock a built-in refresh or rollback holds for its whole run.
     pub(crate) fn refresh_lock(&self) -> &Mutex<()> {
         &self.refresh_lock
@@ -422,8 +428,10 @@ impl LlmProviderCatalog {
     /// provider only in storage is kept.
     ///
     /// The download and the merged result are validated (schema + non-empty +
-    /// unique ids + relative endpoint paths) **before** anything on disk is
-    /// touched. The previous file is copied to `llm.json.bak`, and the merged
+    /// unique ids, compared case-insensitively + a `models` array on every
+    /// downloaded provider + relative endpoint paths) **before** anything on
+    /// disk is touched, so `llm.json` holding two providers whose ids differ
+    /// only in case refuses the refresh. The previous file is copied to `llm.json.bak`, and the merged
     /// catalog replaces `llm.json` through a temporary file renamed into
     /// place, so readers and a crash see the old catalog or the new one.
     /// Base URLs of added providers are checked before the write lock is
@@ -433,6 +441,7 @@ impl LlmProviderCatalog {
         doc: Value,
     ) -> Result<BuiltinRefresh, CatalogError> {
         validate_catalog_document(&doc)?;
+        validate_models_present(&doc)?;
         validate_endpoint_paths(&doc)?;
         let checked = self
             .check_added_providers(&doc)
@@ -630,7 +639,8 @@ impl LlmProviderCatalog {
             .find(|p| provider_enum_value(p) == Some(enum_value)))
     }
 
-    /// Append a new provider. Fails if a provider with the same `enum_value` exists.
+    /// Append a new provider. Fails if a provider with the same `enum_value`,
+    /// compared case-insensitively, exists.
     pub async fn create_provider(
         &self,
         mut provider: Value,
@@ -639,10 +649,7 @@ impl LlmProviderCatalog {
         check_base_url(&mut provider, None).await?;
         let _guard = self.write_lock.lock().await;
         let mut providers = self.read_doc()?;
-        if providers
-            .iter()
-            .any(|p| provider_enum_value(p) == Some(enum_value.as_str()))
-        {
+        if lowered_enum_values(&providers).contains(&enum_value.to_ascii_lowercase()) {
             return Err(CatalogError::Duplicate(enum_value));
         }
         providers.push(provider.clone());
@@ -778,6 +785,22 @@ fn disable_added_provider(provider: &mut Value) {
         {
             model.insert("enabled".to_string(), Value::Bool(false));
         }
+    }
+}
+
+/// Refuse a downloaded provider without a `models` array. A refreshed field
+/// the download omits is removed, so such an entry would strip every model and
+/// price from the stored provider.
+fn validate_models_present(doc: &Value) -> Result<(), CatalogError> {
+    match extract_providers(doc)
+        .iter()
+        .find(|provider| !provider.get("models").is_some_and(Value::is_array))
+    {
+        Some(provider) => Err(CatalogError::Validation(format!(
+            "provider '{}' in the refreshed catalog has no models array",
+            provider_enum_value(provider).unwrap_or_default()
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -1263,11 +1286,13 @@ mod tests {
             .unwrap();
         assert_eq!(provider_enum_value(&created), Some("openai"));
 
-        // duplicate rejected
-        let dup = store
-            .create_provider(provider("openai"))
-            .await;
-        assert!(matches!(dup, Err(CatalogError::Duplicate(_))));
+        // duplicate rejected, whatever its case
+        for duplicate in ["openai", "OpenAI"] {
+            let dup = store
+                .create_provider(provider(duplicate))
+                .await;
+            assert!(matches!(dup, Err(CatalogError::Duplicate(ref id)) if id == duplicate), "{dup:?}");
+        }
 
         // get
         let fetched = store
@@ -1881,6 +1906,51 @@ mod tests {
                 .get("endpoints")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_a_provider_without_a_models_array() {
+        let (store, _custom) = store_with_builtin("refresh_no_models");
+        let stored = stored_provider(&store, "openai");
+        for models in [None, Some(json!(null)), Some(json!({}))] {
+            let mut downloaded = provider("openai");
+            match models {
+                Some(value) => downloaded["models"] = value,
+                None => {
+                    downloaded
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("models");
+                }
+            }
+            let refused = store
+                .refresh_builtin(json!({ "providers": [downloaded] }))
+                .await;
+            assert!(matches!(refused, Err(CatalogError::Validation(_))), "{refused:?}");
+            assert_eq!(stored_provider(&store, "openai"), stored);
+        }
+        store
+            .refresh_builtin(json!({ "providers": [provider("openai")] }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_stored_ids_that_differ_only_in_case() {
+        let catalog = temp_path("refresh_case_duplicates");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let stored = json!({ "providers": [provider("openai"), provider("OpenAI")] }).to_string();
+        std::fs::write(&catalog, &stored).unwrap();
+        let store = LlmProviderCatalog::new(catalog.clone(), None).unwrap();
+
+        let refused = store
+            .refresh_builtin(json!({ "providers": [provider_with_models("openai", json!([{ "name": "GPT-5", "value": "gpt-5" }]))] }))
+            .await;
+        assert!(
+            matches!(refused, Err(CatalogError::Validation(ref message)) if message.contains("more than once")),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&catalog).unwrap(), stored);
     }
 
     #[tokio::test]
