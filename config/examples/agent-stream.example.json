@@ -1643,7 +1643,7 @@
       "prefix": "/models"
     }
   ],
-  "_note_llm_catalog": "Optional. Set `llm_catalog.refresh_url` to the published master llm.json so the Models page's 'Refresh Builtin Models' button can pull, validate, and install the latest built-in providers (previous kept as llm.json.bak). Omit to disable the action. The URL must be https on a public host without credentials, and the download refuses any address that is not public; set `allow_insecure_source` to true only for an internal mirror (plain http or a private network). Loopback, link-local and cloud metadata hosts are always refused.",
+  "_note_llm_catalog": "Optional. Set `llm_catalog.refresh_url` to the published catalog manifest (not a catalog file) so the Models page's 'Refresh Builtin Models' button can download the catalog it names, check its hash and size, and update the models, endpoints and prices of the built-in providers (previous kept as llm.json.bak). Base URLs and API key settings stay as stored. Omit to disable the action. The URL must be https on a public host without credentials, and the download refuses any address that is not public; set `allow_insecure_source` to true only for an internal mirror (plain http or a private network). Loopback, link-local and cloud metadata hosts are always refused.",
   "llm_catalog": {
     "refresh_url": "",
     "allow_insecure_source": false

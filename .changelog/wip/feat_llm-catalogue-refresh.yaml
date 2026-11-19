@@ -1,0 +1,43 @@
+branch: feat/llm-catalogue-refresh
+changes:
+  added:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Count built-in catalog refreshes by result and track the accepted sequence
+      description: >-
+        agent_stream_llm_catalog_refresh_total counts each Refresh Builtin Models attempt by result
+        (updated, unchanged, transport_failure, validation_failure, rollback_rejection, hash_mismatch,
+        storage_failure), and agent_stream_llm_catalog_publication_sequence reports the accepted
+        publication, so operators can see refreshes that were refused and why.
+  changed:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Refresh only models, endpoints and prices of built-in providers
+      description: >-
+        Refresh Builtin Models now merges the published catalog instead of replacing llm.json. A stored
+        provider takes only models, endpoints, endpoint_parameters and description from the download;
+        its name, enabled flag, base URL, API schema and version prefix, API key settings and
+        requires_forward_caller_token stay as stored. Changes an administrator made to models and prices
+        of a built-in provider are replaced; keep those in the custom catalog. A provider new in the
+        download is added disabled after its base URL passes the public-address check, and a provider
+        missing from the download is kept. A second refresh of the same publication reports that the
+        catalog is already up to date; after a rollback, the next refresh installs it again.
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Stop a refreshed catalog from redirecting provider API keys
+      description: >-
+        Affected: 1.0.0 to 1.0.2. Fixed: the release after 1.0.2. A refreshed catalog could change a
+        built-in provider's default_base_url, so every provider key was sent to a host the published file
+        named, without the private-address check a custom provider gets. The refresh now keeps the stored
+        connection and key settings, refuses a publication older than the accepted one, a changed or
+        reused publication, and a catalog whose SHA-256 or size does not match the manifest. A rollback
+        keeps the accepted publication sequence, so an older publication cannot be replayed afterwards.
+  breaking:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Point llm_catalog.refresh_url at a catalog manifest, not a catalog file
+      description: >-
+        llm_catalog.refresh_url must now name a manifest with schema_version 1, publication_sequence,
+        version_id, version, catalogue_url (same host as refresh_url), sha256, size_bytes and
+        published_at. A refresh_url that still names a catalog file fails its refresh with the catalog
+        unchanged. Migration: publish a manifest next to the catalog file and set refresh_url to the
+        manifest, as described in docs/PROVIDERS_AND_CREDENTIALS.md.

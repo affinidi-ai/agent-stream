@@ -1,7 +1,6 @@
 //! API handlers for LLM provider catalog CRUD operations.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     Json,
@@ -12,24 +11,16 @@ use axum::{
 use serde_json::Value;
 use tracing::info;
 
+use super::refresh::{CatalogRefresher, RefreshFailureKind, RefreshOutcome};
 use super::store::{CatalogError, LlmProviderCatalog};
 
 #[derive(Clone)]
 pub struct LlmCatalogState {
     pub catalog: Arc<LlmProviderCatalog>,
-    /// URL of the published master catalog for the "Refresh Builtin Models"
-    /// flow (`llm_catalog.refresh_url` in agent-stream.json). `None` disables
-    /// the refresh action.
-    pub refresh_url: Option<String>,
-    /// `llm_catalog.allow_insecure_source`: the source may be plain http or on
-    /// a private network. Off, the download also refuses to connect to any
-    /// address that is not public, so a DNS answer cannot steer it inside.
-    pub allow_insecure_source: bool,
+    /// Refresh from the manifest at `llm_catalog.refresh_url` for the "Refresh
+    /// Builtin Models" flow. `None` disables the refresh action.
+    pub(crate) refresher: Option<Arc<CatalogRefresher>>,
 }
-
-/// The largest catalog the refresh accepts. The published catalog is a few
-/// hundred kilobytes; anything near this size is not a catalog.
-const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
 
 fn catalog_error_response(err: CatalogError) -> axum::response::Response {
     let status = match err {
@@ -169,18 +160,17 @@ pub async fn put_custom(
 /// `llm_catalog.refresh_url`), so the dashboard only shows the button when a
 /// click can succeed.
 pub async fn refresh_status(State(state): State<LlmCatalogState>) -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({ "available": state.refresh_url.is_some() }))).into_response()
+    (StatusCode::OK, Json(serde_json::json!({ "available": state.refresher.is_some() }))).into_response()
 }
 
 /// POST /api/v1/llm-providers/refresh
 ///
-/// Download the published master `llm.json` from the configured
-/// `llm_catalog.refresh_url`, validate it against the catalog schema, and swap
-/// it into storage — keeping the previous file as `llm.json.bak` and forcing a
-/// reload of the in-memory catalog. A bad download or invalid catalog leaves
-/// the existing catalog untouched.
+/// Read the manifest at `llm_catalog.refresh_url`, download the catalog it
+/// names, check it against the manifest, and merge its model data into the
+/// built-in catalog, keeping the previous file as `llm.json.bak`. A refused
+/// publication or a failed download leaves the catalog untouched.
 pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoResponse {
-    let Some(url) = state.refresh_url.clone() else {
+    let Some(refresher) = state.refresher.clone() else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -190,96 +180,64 @@ pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoR
             .into_response();
     };
 
-    // Defense-in-depth even though the URL was validated at startup: reject
-    // non-http(s) schemes and cloud-metadata targets.
-    if let Err(reason) = crate::url_validation::validate_service_endpoint_url(&url).await {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("Refresh URL rejected: {}", reason) })),
-        )
-            .into_response();
-    }
-
-    // By default every resolved address is re-checked at connection time, so a
-    // public host name cannot be answered with a private address. An operator
-    // who opted into an internal mirror gets the plain client.
-    let timeout = Duration::from_secs(30);
-    let client = if state.allow_insecure_source {
-        crate::http_client::with_timeout(timeout)
-    } else {
-        crate::http_client::with_strict_validating_resolver(timeout)
-    };
-    let client = match client {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("failed to build HTTP client: {}", e) })),
-            )
-                .into_response();
-        }
-    };
-
-    let safe_url = crate::url_validation::redact_url_for_logging(&url);
-
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("failed to fetch catalog from {}: {}", safe_url, e) })),
-            )
-                .into_response();
-        }
-    };
-    if !resp.status().is_success() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": format!("catalog source returned HTTP {}", resp.status()) })),
-        )
-            .into_response();
-    }
-    let body = match crate::http_client::read_capped(resp, MAX_CATALOG_BYTES).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response();
-        }
-    };
-    let doc: Value = match serde_json::from_slice(&body) {
-        Ok(d) => d,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("downloaded catalog is not valid JSON: {}", e) })),
-            )
-                .into_response();
-        }
-    };
-
-    match state
-        .catalog
-        .refresh_builtin(doc)
+    match refresher
+        .refresh(&state.catalog)
         .await
     {
-        Ok(count) => {
-            info!(providers = count, source = %safe_url, "Built-in LLM catalog refreshed");
-            (StatusCode::OK, Json(serde_json::json!({ "providers": count, "source": url, "backup": true })))
-                .into_response()
+        Ok(RefreshOutcome::Updated { manifest, refresh }) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "outcome": "updated",
+                "providers": refresh.providers,
+                "added": refresh.added,
+                "version": manifest.version,
+                "publication_sequence": manifest.publication_sequence,
+                "backup": true,
+            })),
+        )
+            .into_response(),
+        Ok(RefreshOutcome::Unchanged { manifest }) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "outcome": "unchanged",
+                "version": manifest.version,
+                "publication_sequence": manifest.publication_sequence,
+            })),
+        )
+            .into_response(),
+        Err(failure) => {
+            let status = match failure.kind {
+                RefreshFailureKind::Transport => StatusCode::BAD_GATEWAY,
+                RefreshFailureKind::Storage => StatusCode::INTERNAL_SERVER_ERROR,
+                RefreshFailureKind::Validation | RefreshFailureKind::Rollback | RefreshFailureKind::HashMismatch => {
+                    StatusCode::BAD_REQUEST
+                }
+            };
+            (status, Json(serde_json::json!({ "error": failure.message }))).into_response()
         }
-        Err(e) => catalog_error_response(e),
     }
 }
 
 /// POST /api/v1/llm-providers/refresh/rollback
 ///
 /// Restore the previous built-in catalog from `llm.json.bak` (the recovery path
-/// if a refreshed catalog is problematic) and reload the in-memory catalog.
+/// if a refreshed catalog is problematic) and reload the in-memory catalog. The
+/// next refresh installs the accepted publication again, but no older one.
 pub async fn rollback_builtin(State(state): State<LlmCatalogState>) -> impl IntoResponse {
-    match state
-        .catalog
-        .rollback_builtin()
-        .await
-    {
+    let restored = match &state.refresher {
+        Some(refresher) => {
+            refresher
+                .rollback(&state.catalog)
+                .await
+        }
+        None => {
+            state
+                .catalog
+                .rollback_builtin()
+                .await
+        }
+    };
+    match restored {
         Ok(count) => {
             info!(providers = count, "Built-in LLM catalog rolled back from llm.json.bak");
             (StatusCode::OK, Json(serde_json::json!({ "providers": count, "restored": true }))).into_response()

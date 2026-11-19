@@ -117,7 +117,10 @@ const LlmProvidersPage: React.FC = () => {
   const handleRefresh = async () => {
     if (
       !window.confirm(
-        'Refresh the built-in models from the published catalog?\n\nThis overwrites the current built-in llm.json.'
+        'Refresh the built-in models from the published catalog?\n\n' +
+          'Models, endpoints and prices of built-in providers are replaced, including changes you made to them. ' +
+          'Base URLs and API key settings stay as they are. New providers are added disabled. ' +
+          'Keep your own models and prices on the Custom tab.'
       )
     ) {
       return;
@@ -125,10 +128,22 @@ const LlmProvidersPage: React.FC = () => {
     setRefreshing(true);
     setRefreshMsg(null);
     try {
-      const res = await apiClient.post<{ providers: number }>('/llm-providers/refresh');
+      const res = await apiClient.post<{
+        outcome: 'updated' | 'unchanged';
+        version: string;
+        providers?: number;
+        added?: number;
+      }>('/llm-providers/refresh');
+      if (res.data.outcome === 'unchanged') {
+        setRefreshMsg({
+          type: 'success',
+          text: `Built-in models are already up to date (catalog ${res.data.version}).`,
+        });
+        return;
+      }
       setRefreshMsg({
         type: 'success',
-        text: `Built-in models refreshed — ${res.data.providers} providers loaded.`,
+        text: `Built-in models refreshed to catalog ${res.data.version} — ${res.data.providers} providers, ${res.data.added} added disabled.`,
       });
       setCanRollback(true);
       await loadProviders();

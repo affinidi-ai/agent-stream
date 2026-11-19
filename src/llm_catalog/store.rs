@@ -362,6 +362,16 @@ impl LlmProviderCatalog {
             .unwrap_or_else(|| PathBuf::from("llm.json.bak"))
     }
 
+    /// Path of the accepted refresh publication (`llm_catalog_refresh.json`),
+    /// kept next to `llm.json`. A rollback leaves it in place, so a restored
+    /// catalog never lowers the publication sequence the next refresh accepts.
+    pub(crate) fn refresh_state_path(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|p| p.join("llm_catalog_refresh.json"))
+            .unwrap_or_else(|| PathBuf::from("llm_catalog_refresh.json"))
+    }
+
     /// Drop the mtime-gated merged-providers cache so the next read reflects the
     /// on-disk state.
     fn invalidate_cache(&self) {
@@ -370,22 +380,49 @@ impl LlmProviderCatalog {
         }
     }
 
-    /// Overwrite the built-in `llm.json` with a **validated** refreshed catalog,
-    /// keeping the previous file as `llm.json.bak` for recovery. The document is
-    /// validated (schema + non-empty + unique ids) **before** anything on disk
-    /// is touched, and the freshly written file is re-verified after the write;
-    /// any failure rolls the previous file back so a bad refresh can never leave
-    /// the appliance without a working catalog. Returns the provider count.
+    /// Merge a **validated** refreshed catalog into the built-in `llm.json`,
+    /// keeping the previous file as `llm.json.bak` for recovery.
+    ///
+    /// A provider already stored takes only [`REFRESHED_PROVIDER_FIELDS`] from
+    /// the download and keeps everything else, so the file cannot change where
+    /// a provider's key is sent or how it is sent. A provider only in the
+    /// download is added disabled, after its `default_base_url` passes the
+    /// public-address check. A provider only in storage is kept.
+    ///
+    /// The document is validated (schema + non-empty + unique ids) **before**
+    /// anything on disk is touched, and the freshly written file is re-verified
+    /// after the write; any failure rolls the previous file back so a bad
+    /// refresh can never leave the appliance without a working catalog.
     pub async fn refresh_builtin(
         &self,
         doc: Value,
-    ) -> Result<usize, CatalogError> {
+    ) -> Result<BuiltinRefresh, CatalogError> {
         validate_catalog_document(&doc)?;
-        let providers = extract_providers(&doc);
+
+        let _guard = self.write_lock.lock().await;
+        let mut providers = self.read_doc()?;
+        let mut added = 0;
+        for downloaded in extract_providers(&doc) {
+            let id = provider_enum_value(&downloaded).map(str::to_ascii_lowercase);
+            match providers
+                .iter_mut()
+                .find(|stored| provider_enum_value(stored).map(str::to_ascii_lowercase) == id)
+            {
+                Some(stored) => *stored = merge_refreshed_provider(stored, &downloaded),
+                None => {
+                    let mut provider = downloaded;
+                    check_base_url(&mut provider, None).await?;
+                    if let Some(fields) = provider.as_object_mut() {
+                        fields.insert("enabled".to_string(), Value::Bool(false));
+                    }
+                    providers.push(provider);
+                    added += 1;
+                }
+            }
+        }
         let serialized = serde_json::to_string_pretty(&serde_json::json!({ "providers": &providers }))
             .map_err(|e| CatalogError::Io(format!("failed to serialize refreshed catalog: {}", e)))?;
 
-        let _guard = self.write_lock.lock().await;
         let backup = self.backup_path();
 
         // Move the current catalog aside so we can restore it on any failure.
@@ -420,9 +457,13 @@ impl LlmProviderCatalog {
         info!(
             path = %self.path.display(),
             providers = providers.len(),
+            added,
             "Refreshed built-in LLM catalog (previous kept as llm.json.bak)"
         );
-        Ok(providers.len())
+        Ok(BuiltinRefresh {
+            providers: providers.len(),
+            added,
+        })
     }
 
     /// Re-read the on-disk built-in catalog and re-validate it, for post-write
@@ -636,6 +677,43 @@ impl LlmProviderCatalog {
         }
         Ok(())
     }
+}
+
+/// Result of a built-in catalog refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinRefresh {
+    /// Built-in providers after the merge.
+    pub providers: usize,
+    /// Providers the download added, all disabled.
+    pub added: usize,
+}
+
+/// The only provider fields a refresh takes from the download for a provider
+/// already stored. Identity, connection and key settings (`enum_value`,
+/// `name`, `default_base_url`, `api_version_prefix`, `api_schema`, the
+/// `api_key_*` fields, `requires_forward_caller_token`) stay as stored.
+const REFRESHED_PROVIDER_FIELDS: [&str; 4] = ["models", "endpoints", "endpoint_parameters", "description"];
+
+/// The stored provider with [`REFRESHED_PROVIDER_FIELDS`] replaced by the
+/// download's values; a field the download omits is removed.
+fn merge_refreshed_provider(
+    stored: &Value,
+    downloaded: &Value,
+) -> Value {
+    let mut merged = stored.clone();
+    if let Some(fields) = merged.as_object_mut() {
+        for key in REFRESHED_PROVIDER_FIELDS {
+            match downloaded.get(key) {
+                Some(value) => {
+                    fields.insert(key.to_string(), value.clone());
+                }
+                None => {
+                    fields.remove(key);
+                }
+            }
+        }
+    }
+    merged
 }
 
 /// Extract the providers array from either a bare `{ "providers": [...] }`
@@ -1507,11 +1585,11 @@ mod tests {
         let refreshed = serde_json::json!({
             "providers": [provider("openai"), provider("anthropic"), provider("gemini")]
         });
-        let count = store
+        let refresh = store
             .refresh_builtin(refreshed)
             .await
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(refresh, BuiltinRefresh { providers: 3, added: 2 });
 
         // New catalog is live…
         let enums: Vec<String> = store
@@ -1583,6 +1661,151 @@ mod tests {
         );
     }
 
+    fn stored_provider(
+        store: &LlmProviderCatalog,
+        enum_value: &str,
+    ) -> Value {
+        store
+            .list_providers()
+            .unwrap()
+            .into_iter()
+            .find(|p| provider_enum_value(p) == Some(enum_value))
+            .unwrap_or_else(|| panic!("{enum_value} is not stored"))
+    }
+
+    #[tokio::test]
+    async fn refresh_takes_only_model_data_for_a_stored_provider() {
+        let catalog = temp_path("refresh_merge");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let mut stored = json!({
+            "enum_value": "openai",
+            "name": "OpenAI",
+            "default_base_url": "https://api.openai.com/v1",
+            "api_version_prefix": "/v1",
+            "api_schema": "openai",
+            "api_key_secret": "openai-key",
+            "api_key_label": "OpenAI API key",
+            "api_key_validation": "mandatory",
+            "api_key_required": true,
+            "requires_forward_caller_token": false,
+            "enabled": true,
+            "description": "Old description",
+            "endpoint_parameters": { "old": true },
+            "endpoints": [{ "name": "Chat", "path": "/chat/completions" }],
+            "models": [{ "name": "GPT-4o", "value": "gpt-4o", "cost_per_1k_input": 0.0025, "enabled": true }]
+        });
+        stored[PUBLIC_BASE_URL_MARKER] = json!(true);
+        let ollama = with_base_url(provider("ollama"), "http://localhost:11434");
+        std::fs::write(&catalog, json!({ "providers": [stored.clone(), ollama.clone()] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        let downloaded = json!({
+            "enum_value": "openai",
+            "name": "Renamed",
+            "default_base_url": "https://collector.example",
+            "api_version_prefix": "/v9",
+            "api_schema": "anthropic",
+            "api_key_secret": "other-key",
+            "api_key_label": "Paste it here",
+            "api_key_validation": "none",
+            "api_key_required": false,
+            "requires_forward_caller_token": true,
+            "enabled": false,
+            "description": "New description",
+            "endpoint_parameters": { "new": true },
+            "endpoints": [{ "name": "Responses", "path": "/responses" }],
+            "models": [{ "name": "GPT-5", "value": "gpt-5", "cost_per_1k_input": 0.001, "enabled": false }]
+        });
+        let refresh = store
+            .refresh_builtin(json!({ "providers": [downloaded.clone()] }))
+            .await
+            .unwrap();
+        assert_eq!(refresh, BuiltinRefresh { providers: 2, added: 0 });
+
+        let mut expected = stored;
+        for key in REFRESHED_PROVIDER_FIELDS {
+            expected[key] = downloaded[key].clone();
+        }
+        assert_eq!(stored_provider(&store, "openai"), expected);
+        assert_eq!(stored_provider(&store, "ollama"), ollama, "a provider missing from the download is kept");
+        assert!(store.requires_public_host("api.openai.com"));
+        assert!(!store.requires_public_host("collector.example"));
+    }
+
+    #[tokio::test]
+    async fn refresh_drops_a_model_field_the_download_omits() {
+        let (store, _custom) = store_with_builtin("refresh_omitted");
+        let mut downloaded = provider("openai");
+        downloaded
+            .as_object_mut()
+            .unwrap()
+            .remove("endpoints");
+        store
+            .refresh_builtin(json!({ "providers": [downloaded] }))
+            .await
+            .unwrap();
+        assert!(
+            stored_provider(&store, "openai")
+                .get("endpoints")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_adds_a_new_provider_disabled_after_the_base_url_check() {
+        let (store, _custom) = store_with_builtin("refresh_new_provider");
+        let mut acme = with_base_url(provider("acme"), "https://93.184.216.34/v1");
+        acme["enabled"] = json!(true);
+        acme[PUBLIC_BASE_URL_MARKER] = json!(false);
+
+        let refresh = store
+            .refresh_builtin(json!({ "providers": [provider("openai"), acme] }))
+            .await
+            .unwrap();
+        assert_eq!(refresh, BuiltinRefresh { providers: 2, added: 1 });
+        let added = stored_provider(&store, "acme");
+        assert_eq!(added["enabled"], false);
+        assert_eq!(added[PUBLIC_BASE_URL_MARKER], true);
+        assert_eq!(added["default_base_url"], "https://93.184.216.34/v1");
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_a_new_provider_with_an_internal_base_url() {
+        let (store, _custom) = store_with_builtin("refresh_new_internal");
+        let before = std::fs::read_to_string(&store.path).unwrap();
+
+        for url in INTERNAL_BASE_URLS {
+            let refused = store
+                .refresh_builtin(json!({ "providers": [provider("openai"), with_base_url(provider("acme"), url)] }))
+                .await;
+            assert!(
+                matches!(&refused, Err(CatalogError::Validation(message)) if message.contains("public address")),
+                "{url} must be refused, got {refused:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        assert!(!store.backup_path().exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_matches_a_stored_provider_ignoring_case() {
+        let (store, _custom) = store_with_builtin("refresh_case");
+        let mut downloaded = with_base_url(provider("OpenAI"), "https://collector.example");
+        downloaded["description"] = json!("New");
+        let refresh = store
+            .refresh_builtin(json!({ "providers": [downloaded] }))
+            .await
+            .unwrap();
+        assert_eq!(refresh, BuiltinRefresh { providers: 1, added: 0 });
+        let openai = stored_provider(&store, "openai");
+        assert_eq!(openai["description"], "New");
+        assert!(
+            openai
+                .get("default_base_url")
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn rollback_builtin_restores_previous() {
         let (store, _custom) = store_with_builtin("rollback_ok");
@@ -1591,12 +1814,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            provider_enum_value(
-                &store
-                    .list_providers()
-                    .unwrap()[0]
-            ),
-            Some("anthropic")
+            store
+                .list_providers()
+                .unwrap()
+                .len(),
+            2
         );
 
         let restored = store

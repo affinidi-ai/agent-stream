@@ -7,16 +7,16 @@ use axum::{
     routing::{delete, get, post, put},
 };
 
-use super::{handlers, store::LlmProviderCatalog};
+use super::{handlers, refresh::CatalogRefresher, store::LlmProviderCatalog};
 use crate::auth_manager::middleware::RbacGuard;
 use crate::rbac::Feature;
 
 /// Create the LLM provider catalog API router.
 ///
-/// `refresh_url` is the published master-catalog location for the "Refresh
-/// Builtin Models" flow (`llm_catalog.refresh_url` in agent-stream.json); `None`
+/// `refresh_url` is the published catalog manifest for the "Refresh Builtin
+/// Models" flow (`llm_catalog.refresh_url` in agent-stream.json); `None`
 /// disables that action. `allow_insecure_source` (`llm_catalog.allow_insecure_source`)
-/// lets the download reach a plain http or private-network mirror.
+/// lets the downloads reach a plain http or private-network mirror.
 ///
 /// Every route needs `llm_catalog.edit`, reads included: the catalog prices
 /// every call no surface prices itself, so it moves every budget on the
@@ -30,12 +30,10 @@ pub fn create_llm_providers_router(
 ) -> Router {
     // Treat an absent or blank URL identically: the refresh action is
     // unavailable, so the dashboard hides the button rather than letting it fail.
-    let refresh_url = refresh_url.filter(|u| !u.trim().is_empty());
-    let state = handlers::LlmCatalogState {
-        catalog,
-        refresh_url,
-        allow_insecure_source,
-    };
+    let refresher = refresh_url
+        .filter(|u| !u.trim().is_empty())
+        .map(|url| Arc::new(CatalogRefresher::new(url, allow_insecure_source, &catalog)));
+    let state = handlers::LlmCatalogState { catalog, refresher };
     Router::new()
         .route("/api/v1/llm-providers", get(handlers::list_providers))
         .route("/api/v1/llm-providers", post(handlers::create_provider))
