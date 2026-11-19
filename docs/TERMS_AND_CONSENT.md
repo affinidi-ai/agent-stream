@@ -159,7 +159,7 @@ Operational errors do not expose internal detail.
 | `GET /v1/terms/applicable` | None (public) | Current versions, for the registration page |
 | `GET /v1/terms/provider-health` | None (public) | Affinidi provider state (`404` `TERMS_DISABLED` while `terms` is `false`) |
 | `GET /v1/terms/status` | Any session, including consent-pending | Whether this user must accept, and what |
-| `POST /v1/terms/acceptances` | Any session, including consent-pending | Accept the required versions |
+| `POST /v1/terms/acceptances` | Any session, including consent-pending; refused to an access token with explicit scopes | Accept the required versions |
 | `GET /v1/terms` | `terms.view` | Both documents, the draft, and version history |
 | `PUT /v1/terms/customer/draft` | `terms.edit` | Save the Customer Terms draft |
 | `POST /v1/terms/customer/publish` | `terms.edit` | Publish the draft as a new version |

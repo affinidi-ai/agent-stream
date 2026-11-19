@@ -35,6 +35,6 @@ pub fn create_delegation_vault_router(
 pub fn create_delegation_vault_oauth_router(state: DelegationVaultState) -> Router {
     let callback_route = format!("{}/{{provider_id}}", state.oauth_callback_route);
     Router::new()
-        .route(&callback_route, get(handlers::oauth_callback))
+        .route(&callback_route, crate::auth_manager::route_declarations::public(get(handlers::oauth_callback)))
         .with_state(state)
 }

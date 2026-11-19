@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::auth_manager::middleware::{AuthGuardOk, RbacGuard, maybe_gate};
 use crate::auth_manager::pat::{PatContext, PatResourceScope};
+use crate::auth_manager::route_declarations::scope_gate;
 use crate::config::GatewayConfig;
 use crate::integrations::audit_integration_triggers::{AUDIT_CATEGORY, is_audit_integration};
 use crate::integrations::destinations;
@@ -37,8 +38,8 @@ pub fn integration_api_router(
         .route("/v1/integrations", maybe_gate(rbac_guard, get(list_notifiers), Feature::IntegrationsView))
         .route("/v1/integrations", maybe_gate(rbac_guard, post(create_notifier), Feature::IntegrationsEdit))
         // Specific routes must come before parameterized routes
-        .route("/v1/integrations/config", get(get_notifier_config))
-        .route("/v1/integrations/runtime-variables", get(get_runtime_variables))
+        .route("/v1/integrations/config", scope_gate(get(get_notifier_config), Feature::SettingsView))
+        .route("/v1/integrations/runtime-variables", scope_gate(get(get_runtime_variables), Feature::SettingsView))
         .route(
             "/v1/integrations/test",
             maybe_gate(

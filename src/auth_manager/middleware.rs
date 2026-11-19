@@ -103,7 +103,7 @@ const PUBLIC_READ_PATH_PREFIXES: &[&str] = &[
 
 /// Returns true if a request for `path` with `method` is public and should
 /// bypass session auth.
-fn is_public_path(
+pub(crate) fn is_public_path(
     method: &Method,
     path: &str,
 ) -> bool {
@@ -648,7 +648,12 @@ fn feature_guard_middleware(
                 .get::<crate::auth_manager::pat::PatContext>(),
             &guard.feature,
         ) {
-            warn!(feature = ?guard.feature, "require_feature: access token scope excludes this permission");
+            warn!(
+                token_id = crate::auth_manager::route_declarations::token_id(&request),
+                path = %request.uri().path(),
+                feature = ?guard.feature,
+                "require_feature: access token scope excludes this permission"
+            );
             return Err(StatusCode::FORBIDDEN);
         }
 

@@ -20,7 +20,7 @@ reads and changes only the signed-in caller's own notifications, except the welc
 | `PUT /v1/notifications/{id}` | Change one's `status` (for example, mark it read); `title` and `message` cannot be changed | `notifications.edit` |
 | `DELETE /v1/notifications/{id}` | Delete one | `notifications.delete` |
 | `GET /v1/notifications/unread/count` | The caller's unread count | Session, no permission |
-| `GET /v1/notifications/user-welcome-template` | The welcome notification template | Session, no permission |
+| `GET /v1/notifications/user-welcome-template` | The welcome notification template | Session; a scoped access token needs `notifications.view` |
 | `PUT /v1/notifications/user-welcome-template` | Replace the welcome template | `notifications.edit` |
 | `POST /v1/notifications/send-welcome` | Send a welcome notification with `title` and `message` to the user named by `user_id` | `notifications.edit` |
 
@@ -87,7 +87,8 @@ defines these categories:
 | `POST /v1/integrations/{id}/trigger` | Deliver `subject`, `message` and `variables` to one integration (`integrations.edit`) |
 | `POST /v1/integrations/trigger-multiple` | Deliver `subject` and `message` to several integrations (`integrations.edit`) |
 
-The `config` and `runtime-variables` catalogues hold no stored data and need no permission.
+The `config` and `runtime-variables` catalogues hold no stored data and need no permission;
+an access token with explicit scopes needs `settings.view`.
 `trigger`, `trigger-multiple`, and `test` when it loads a saved integration by
 `integration_id`, additionally check the caller's tenant, token scope and, for an `audit`
 integration, `audit.view`.

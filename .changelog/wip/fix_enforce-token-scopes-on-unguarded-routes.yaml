@@ -1,0 +1,38 @@
+branch: fix/enforce-token-scopes-on-unguarded-routes
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-18T15:14:38.000Z'
+      title: ⭐ Hold scoped access tokens to their scopes on every management route
+      description: >-
+        Affects 1.0.2 and earlier; fixed in 1.0.3. A management access token with explicit
+        scopes was checked against them only on routes that declare a permission, so on the
+        rest it acted with its owner's full role. A token issued for metrics.view could run
+        any Surface in its tenant through POST /v1/pipes/{pipe_id}/execute and
+        /execute/stream, making model calls on the Surface's provider credentials and
+        spending its budget, and could read gateway, mediator, marketplace, configuration,
+        limit and integration settings. Both run routes now need pipes.execute, every other
+        such route needs a matching scope from a token with explicit scopes, and a unit test
+        fails the build when a route is added without an access rule. Sessions and tokens
+        without explicit scopes are unchanged.
+  breaking:
+    - timestamp: '2026-11-18T15:14:38.000Z'
+      title: Require matching scopes on routes that scoped access tokens could reach freely
+      description: >-
+        A management access token with explicit scopes now needs: pipes.execute for
+        POST /v1/pipes/{pipe_id}/execute and /execute/stream; gateways.view for the gateway
+        reads, POST /v1/gateways/{id}/ping, GET /v1/marketplace/models, the /v1/identity DID
+        document and resolve reads and POST /v1/verify/{did}; mediators.view for
+        the mediator reads; payments.view for GET /v1/marketplace/purchased; settings.view for
+        GET /v1/config/surface-routing, /v1/config/networking, /v1/pipes/config,
+        /v1/prompt-guard/config, /v1/integrations/config and /v1/integrations/runtime-variables;
+        metrics.view for GET /v1/limits; pipes.edit for POST /v1/uploads/image;
+        integrations.view for GET /v1/users/integrations; and
+        notifications.view for GET /v1/notifications/user-welcome-template. It is refused on
+        PUT /v1/profile, POST /v1/profile/avatar, POST and DELETE /v1/user-settings and
+        POST /v1/terms/acceptances. Add the needed scopes to existing tokens, or sign in to
+        change your own profile and settings. Running a Surface also needs pipes.execute in
+        the caller's role, which the built-in user and administrator roles hold.

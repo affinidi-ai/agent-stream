@@ -37,8 +37,8 @@ the root of the listener, outside the `/api` prefix:
 
 The DIDComm endpoints `POST /didcomm` and `GET /didcomm/ws` are on the management router.
 `GET /api/v1/identity/did-document` returns the appliance DID document to any signed-in
-caller, with no permission: the `did:webvh` document once the DID has migrated, otherwise the
-`did:web` one.
+caller (an access token with explicit scopes needs `gateways.view`): the `did:webvh`
+document once the DID has migrated, otherwise the `did:web` one.
 
 The gateway store keeps a **self gateway** record for this appliance
 ([`src/gateways/filesystem.rs`](../src/gateways/filesystem.rs)). It is created on first
@@ -569,8 +569,8 @@ records exposed to the receiving Connection Point.
 
 `GET /api/v1/gateways/{id}/surfaces` sends `get-surfaces` to a connected peer and returns its
 answer, cached for five minutes unless `force_refresh` is set. It needs a signed-in session
-and no permission, and answers `404` for a gateway outside the caller's tenant or token
-scope. `POST /api/v1/gateways/refresh-surfaces` (`gateways.edit`) refreshes that cache for
+(an access token with explicit scopes needs `gateways.view`), and answers `404` for a gateway
+outside the caller's tenant or token scope. `POST /api/v1/gateways/refresh-surfaces` (`gateways.edit`) refreshes that cache for
 every connected gateway in the caller's tenant and token scope, at most once every five
 seconds.
 
@@ -659,9 +659,9 @@ identities through `/v1/identities` (`didwebvh_routes` in
 | `GET /v1/identities/integrations` | Identity integration settings | `identities.manage` |
 | `PUT /v1/identities/integrations` | Change them | `integrations.edit` |
 | `GET /v1/resolve` | Resolve a DID | Public |
-| `GET /v1/identity/resolve-did`, `GET /v1/identity/resolve-did-document` | Resolve any DID, limited per user ([DID cache](#did-cache)) | Session, no permission |
+| `GET /v1/identity/resolve-did`, `GET /v1/identity/resolve-did-document` | Resolve any DID, limited per user ([DID cache](#did-cache)) | Session; a scoped access token needs `gateways.view` |
 | `GET /dids/{path}` | Serve a DID log (`…/did.jsonl`) and `…/whois` | Public |
-| `POST /v1/verify/{did}` | Verify an identity | Session, no permission |
+| `POST /v1/verify/{did}` | Verify an identity | Session; a scoped access token needs `gateways.view` |
 
 `identities.manage` is administrator-only by default and separate from `identity.issue`,
 which gates credential issuance (see [`RBAC.md`](RBAC.md)). `/v1/resolve` and `/dids/` are

@@ -222,7 +222,7 @@ and `meter_replay` in [`src/drift/runner.rs`](../../src/drift/runner.rs).
 | 2 | `src/rbac/mod.rs` | Give the key its minimum role in `RbacConfig::default()`. A key missing from the map is denied to every role, administrators included. |
 | 3 | `config/examples/rbac.example.json` | Add the key with the same role. |
 | 4 | `src/identity/handlers/` | Write the handler. If it reads or changes a tenant-ownable record, scope it to the caller's tenant ([`src/tenancy/`](../../src/tenancy/)). |
-| 5 | `src/identity/router.rs` | Register the route through the RBAC guard: `.route(path, gate.gate(post(handler), Feature::YourFeature))`. A route registered without it is unprotected. Secret routes are registered in `src/secrets/router.rs`. |
+| 5 | `src/identity/router.rs` | Register the route through the RBAC guard: `.route(path, gate.gate(post(handler), Feature::YourFeature))`. A route with no guard must carry a declaration from `src/auth_manager/route_declarations.rs` (see [`RBAC.md`](../RBAC.md#route-access-declarations)); the route-coverage test fails on a route with neither. Secret routes are registered in `src/secrets/router.rs`. |
 | 6 | `src/auth_manager/permissions.rs` | If the dashboard uses the feature, add its key to `get_permissions`. |
 | 7 | `www/default/src/api.ts` | Add the client call. |
 | 8 | `docs/RBAC.md`, `docs/ACCESS_TOKENS.md` | Describe the permission, and the resource kind if Management PATs can be scoped to it. |
