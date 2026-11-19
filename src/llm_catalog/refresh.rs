@@ -144,7 +144,12 @@ impl CatalogRefresher {
                 Some(manifest.publication_sequence)
             }
             Err(failure) => {
-                tracing::warn!(outcome = label, error = %failure.message, "Built-in LLM catalog refresh refused");
+                match failure.kind {
+                    RefreshFailureKind::HashMismatch | RefreshFailureKind::Rollback => {
+                        tracing::error!(outcome = label, error = %failure.message, "Built-in LLM catalog refresh refused");
+                    }
+                    _ => tracing::warn!(outcome = label, error = %failure.message, "Built-in LLM catalog refresh refused"),
+                }
                 None
             }
         };
@@ -195,7 +200,7 @@ impl CatalogRefresher {
         let response = request
             .send()
             .await
-            .map_err(|e| transport(format!("failed to fetch the catalog manifest: {e}")))?;
+            .map_err(|e| transport(format!("failed to fetch the catalog manifest: {}", e.without_url())))?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return state
                 .manifest
@@ -237,7 +242,7 @@ impl CatalogRefresher {
             .get(catalog_url)
             .send()
             .await
-            .map_err(|e| transport(format!("failed to fetch the catalog: {e}")))?;
+            .map_err(|e| transport(format!("failed to fetch the catalog: {}", e.without_url())))?;
         if !response.status().is_success() {
             return Err(transport(format!("the catalog source returned HTTP {}", response.status())));
         }
@@ -1076,6 +1081,30 @@ mod tests {
         );
 
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_does_not_reveal_the_source_url() {
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        let manifest_url = format!("http://{address}/llm/v1/current.json?sig=query-credential");
+        let _allowed = crate::url_validation::test_service_endpoints::allow(std::slice::from_ref(&manifest_url));
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = CatalogRefresher {
+            manifest_url,
+            allow_insecure_source: true,
+            lock: Mutex::new(()),
+        };
+
+        let failure = refused(&refresher, &catalog).await;
+        assert_eq!(failure.kind, RefreshFailureKind::Transport, "{}", failure.message);
+        assert!(failure.message.starts_with("failed to fetch the catalog manifest"), "{}", failure.message);
+        assert!(!failure.message.contains("query-credential"), "{}", failure.message);
+        assert!(!failure.message.contains(&address.to_string()), "{}", failure.message);
     }
 
     #[tokio::test]

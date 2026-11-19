@@ -160,7 +160,7 @@ pub(crate) async fn read_capped(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| format!("failed to read response body: {e}"))?
+        .map_err(|e| format!("failed to read response body: {}", e.without_url()))?
     {
         if body.len() + chunk.len() > limit {
             return Err(format!("response exceeds the {limit} byte limit"));

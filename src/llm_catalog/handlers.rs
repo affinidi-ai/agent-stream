@@ -11,7 +11,7 @@ use axum::{
 use serde_json::Value;
 use tracing::info;
 
-use super::refresh::{CatalogRefresher, RefreshFailureKind, RefreshOutcome, rollback_catalog};
+use super::refresh::{CatalogRefresher, RefreshFailure, RefreshFailureKind, RefreshOutcome, rollback_catalog};
 use super::store::{CatalogError, LlmProviderCatalog};
 
 #[derive(Clone)]
@@ -22,14 +22,36 @@ pub struct LlmCatalogState {
     pub(crate) refresher: Option<Arc<CatalogRefresher>>,
 }
 
+const STORAGE_ERROR: &str = "The LLM catalog could not be read or written. See the server log.";
+
+/// A storage failure names files on the appliance, so its detail goes to the
+/// log and the caller gets [`STORAGE_ERROR`].
 fn catalog_error_response(err: CatalogError) -> axum::response::Response {
     let status = match err {
         CatalogError::Duplicate(_) => StatusCode::CONFLICT,
         CatalogError::Validation(_) => StatusCode::BAD_REQUEST,
         CatalogError::NotFound(_) => StatusCode::NOT_FOUND,
-        CatalogError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        CatalogError::Io(_) => {
+            tracing::error!(error = %err, "LLM catalog storage failure");
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": STORAGE_ERROR })))
+                .into_response();
+        }
     };
     (status, Json(serde_json::json!({ "error": err.to_string() }))).into_response()
+}
+
+/// Every refusal except storage comes from what the refresh source served
+/// (or what its host resolves to), so it is a bad gateway. A storage failure
+/// is already logged with its detail by [`CatalogRefresher::refresh`].
+fn refresh_failure_response(failure: RefreshFailure) -> axum::response::Response {
+    let (status, message) = match failure.kind {
+        RefreshFailureKind::Storage => (StatusCode::INTERNAL_SERVER_ERROR, STORAGE_ERROR.to_string()),
+        RefreshFailureKind::Transport
+        | RefreshFailureKind::Validation
+        | RefreshFailureKind::Rollback
+        | RefreshFailureKind::HashMismatch => (StatusCode::BAD_GATEWAY, failure.message),
+    };
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 /// GET /api/v1/llm-providers
@@ -205,16 +227,7 @@ pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoR
             })),
         )
             .into_response(),
-        Err(failure) => {
-            let status = match failure.kind {
-                RefreshFailureKind::Transport => StatusCode::BAD_GATEWAY,
-                RefreshFailureKind::Storage => StatusCode::INTERNAL_SERVER_ERROR,
-                RefreshFailureKind::Validation | RefreshFailureKind::Rollback | RefreshFailureKind::HashMismatch => {
-                    StatusCode::BAD_REQUEST
-                }
-            };
-            (status, Json(serde_json::json!({ "error": failure.message }))).into_response()
-        }
+        Err(failure) => refresh_failure_response(failure),
     }
 }
 
@@ -238,5 +251,54 @@ pub async fn rollback_builtin(State(state): State<LlmCatalogState>) -> impl Into
             (StatusCode::OK, Json(serde_json::json!({ "providers": count, "restored": true }))).into_response()
         }
         Err(e) => catalog_error_response(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn body(response: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn refresh_refusals_from_the_source_are_bad_gateway() {
+        for kind in [
+            RefreshFailureKind::Transport,
+            RefreshFailureKind::Validation,
+            RefreshFailureKind::Rollback,
+            RefreshFailureKind::HashMismatch,
+        ] {
+            let response = refresh_failure_response(RefreshFailure { kind, message: "upstream detail".to_string() });
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{kind:?}");
+            assert_eq!(body(response).await["error"], "upstream detail", "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_failures_do_not_name_files() {
+        let refresh = refresh_failure_response(RefreshFailure {
+            kind: RefreshFailureKind::Storage,
+            message: "failed to read /data/_storage/llm_catalog_refresh.json: denied".to_string(),
+        });
+        assert_eq!(refresh.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body(refresh).await["error"], STORAGE_ERROR);
+
+        let crud = catalog_error_response(CatalogError::Io(
+            "failed to write LLM catalog /data/_storage/llm.json: denied".to_string(),
+        ));
+        assert_eq!(crud.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body(crud).await["error"], STORAGE_ERROR);
+    }
+
+    #[tokio::test]
+    async fn other_catalog_errors_keep_their_message() {
+        let response = catalog_error_response(CatalogError::NotFound("openai".to_string()));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(response).await["error"], CatalogError::NotFound("openai".to_string()).to_string());
     }
 }

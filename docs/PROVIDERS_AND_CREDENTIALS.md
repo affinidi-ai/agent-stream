@@ -228,6 +228,12 @@ Refresh is on demand only; nothing polls for a new catalog.
   `unchanged`, `transport_failure`, `validation_failure`,
   `rollback_rejection`, `hash_mismatch`, `storage_failure`);
   `agent_stream_llm_catalog_publication_sequence` is the accepted sequence.
+  A refusal caused by what the source served, or by what its host resolves
+  to, answers `502` with the reason; `hash_mismatch` and `rollback_rejection`
+  are logged at `error`, the rest at `warn`. A `storage_failure` answers `500`
+  with a fixed message and logs the file and cause. No error names the
+  manifest or catalog URL, so a credential in its query string stays out of
+  the response and the log. Without `refresh_url` the refresh answers `400`.
 - `POST /api/v1/llm-providers/refresh/rollback` restores `llm.json.bak`. It
   keeps the accepted publication in `llm_catalog_refresh.json`, so a later
   refresh still refuses an older one, but marks it rolled back and drops its

@@ -20,6 +20,15 @@ changes:
         download is added disabled after its base URL passes the public-address check, and a provider
         missing from the download is kept. A second refresh of the same publication reports that the
         catalog is already up to date; after a rollback, the next refresh installs it again.
+    - timestamp: '2026-11-19T14:00:00.000Z'
+      title: Answer 502 when the catalog source causes a refresh to be refused
+      description: >-
+        POST /api/v1/llm-providers/refresh now answers 502 instead of 400 for a hash or size mismatch, a
+        rollback or replayed publication, and a manifest or catalog that fails validation, since each is
+        an upstream fault; 400 remains for a missing llm_catalog.refresh_url. Hash mismatches and
+        rollback refusals are logged at error. A storage failure on any LLM provider route now returns a
+        fixed message and logs the file path instead of returning it, and refresh errors no longer
+        include the manifest or catalog URL, so a credential in its query string is not exposed.
   fixed:
     - timestamp: '2026-11-19T09:00:00.000Z'
       title: Keep the built-in catalog and its refresh record in step on failure
