@@ -35,7 +35,7 @@ fn try_acquire_resource<'a>(
     resource: &str,
 ) -> Result<ResourcePermit<'a>, String> {
     counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| (active < limit).then_some(active + 1))
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |active| (active < limit).then_some(active + 1))
         .map(|_| ResourcePermit { counter })
         .map_err(|active| format!("{resource} capacity is exhausted ({active}/{limit})"))
 }
