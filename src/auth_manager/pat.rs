@@ -416,5 +416,13 @@ mod tests {
             },
             "only the catalog path itself is carved out"
         );
+        assert_eq!(
+            classify_canonical_resource_path("/v1/pipes/config/execute"),
+            CanonicalPathScope::EnforceId {
+                kind: ResourceKind::Pipes,
+                id: "config".to_string()
+            },
+            "a route under a Surface named config keeps its id check"
+        );
     }
 }
