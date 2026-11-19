@@ -139,6 +139,16 @@ where
         .route("/v1/user-settings/overrides", self_service(get(handlers::get_user_settings_overrides)))
 }
 
+/// The caller's own notifications, for the session user or the user an access
+/// token is bound to.
+fn notification_read_routes() -> Router {
+    use crate::integrations::{FileSystemNotificationStore as Store, handlers};
+    Router::new()
+        .route("/v1/notifications", self_service(get(handlers::list_notifications::<Store>)))
+        .route("/v1/notifications/{id}", self_service(get(handlers::get_notification::<Store>)))
+        .route("/v1/notifications/unread/count", self_service(get(handlers::get_unread_count::<Store>)))
+}
+
 /// Mediator reads. Every signed-in user reads mediators to set up connections;
 /// an access token with explicit scopes needs `mediators.view`.
 fn mediator_read_routes() -> Router {
@@ -1607,13 +1617,7 @@ pub fn create_identity_api_router(
 
     // Create notification routes if store is provided
     let notification_router = if let Some(store) = notification_store {
-        let router = Router::new()
-            .route(
-                "/v1/notifications",
-                self_service(get(crate::integrations::handlers::list_notifications::<
-                    crate::integrations::FileSystemNotificationStore,
-                >)),
-            )
+        let router = notification_read_routes()
             .route(
                 "/v1/notifications",
                 rbac_guard.gate(
@@ -1624,12 +1628,6 @@ pub fn create_identity_api_router(
                     ),
                     Feature::NotificationsEdit,
                 ),
-            )
-            .route(
-                "/v1/notifications/{id}",
-                self_service(get(crate::integrations::handlers::get_notification::<
-                    crate::integrations::FileSystemNotificationStore,
-                >)),
             )
             .route(
                 "/v1/notifications/{id}",
@@ -1650,12 +1648,6 @@ pub fn create_identity_api_router(
                     ),
                     Feature::NotificationsDelete,
                 ),
-            )
-            .route(
-                "/v1/notifications/unread/count",
-                self_service(get(crate::integrations::handlers::get_unread_count::<
-                    crate::integrations::FileSystemNotificationStore,
-                >)),
             )
             .route(
                 "/v1/notifications/user-welcome-template",
@@ -4205,6 +4197,79 @@ mod token_scope_route_tests {
                 "a scoped token must read GET {path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_caller_reads_its_own_notifications_with_a_session_or_a_scoped_token() {
+        use crate::integrations::NotificationStore;
+        let fixture = admin_fixture().await;
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::integrations::FileSystemNotificationStore::new(
+                store_dir
+                    .path()
+                    .join("notifications"),
+                store_dir
+                    .path()
+                    .join("templates"),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let mut notification = crate::integrations::types::Notification::new(
+            crate::integrations::types::NotificationType::General,
+            "Welcome".to_string(),
+            "Hello".to_string(),
+            serde_json::json!({}),
+        );
+        notification.user_id = ADMIN.to_string();
+        store
+            .create(&notification)
+            .await
+            .unwrap();
+        let app = notification_read_routes()
+            .layer(Extension(store))
+            .layer(middleware::from_fn_with_state(auth_layer(&fixture), require_session_auth));
+
+        for token in ["aspat_pipes_view", "aspat_unscoped", fixture.session_token.as_str()] {
+            let list = app
+                .clone()
+                .oneshot(request("GET", "/v1/notifications", token))
+                .await
+                .unwrap();
+            assert_eq!(list.status(), StatusCode::OK, "{token}: list");
+            let body = axum::body::to_bytes(list.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                listed
+                    .as_array()
+                    .map(Vec::len),
+                Some(1),
+                "{token} must see the bound user's notification"
+            );
+
+            let one = status_of(&app, "GET", &format!("/v1/notifications/{}", notification.id), token).await;
+            assert_eq!(one, StatusCode::OK, "{token}: get by id");
+
+            let count = app
+                .clone()
+                .oneshot(request("GET", "/v1/notifications/unread/count", token))
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(count.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let count: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(count["unread_count"], 1, "{token}: unread count");
+        }
+        assert_eq!(
+            status_of(&app, "GET", "/v1/notifications/missing", "aspat_pipes_view").await,
+            StatusCode::NOT_FOUND,
+            "another id is not found, not leaked"
+        );
     }
 
     #[tokio::test]

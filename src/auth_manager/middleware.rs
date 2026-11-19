@@ -107,14 +107,31 @@ pub(crate) fn is_public_path(
     method: &Method,
     path: &str,
 ) -> bool {
-    let has_prefix = |prefixes: &[&str]| {
+    public_path_entry(method, path).is_some()
+}
+
+/// The public exact path or prefix that makes a request for `path` with
+/// `method` public, if any.
+pub(crate) fn public_path_entry(
+    method: &Method,
+    path: &str,
+) -> Option<&'static str> {
+    let prefix_of = |prefixes: &'static [&'static str]| {
         prefixes
             .iter()
-            .any(|prefix| path.starts_with(prefix))
+            .copied()
+            .find(|prefix| path.starts_with(prefix))
     };
-    PUBLIC_EXACT_PATHS.contains(&path)
-        || has_prefix(PUBLIC_PROTOCOL_PATH_PREFIXES)
-        || ((method == Method::GET || method == Method::HEAD) && has_prefix(PUBLIC_READ_PATH_PREFIXES))
+    PUBLIC_EXACT_PATHS
+        .iter()
+        .copied()
+        .find(|exact| *exact == path)
+        .or_else(|| prefix_of(PUBLIC_PROTOCOL_PATH_PREFIXES))
+        .or_else(|| {
+            (method == Method::GET || method == Method::HEAD)
+                .then(|| prefix_of(PUBLIC_READ_PATH_PREFIXES))
+                .flatten()
+        })
 }
 
 /// Extract session token from the request's Authorization header or cookies.

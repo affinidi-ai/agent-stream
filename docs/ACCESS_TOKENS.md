@@ -106,8 +106,10 @@ create a token bound to it and scoped to `["metrics.view"]`, as in the example a
 token reads `GET /v1/pipes-metrics` (under the management API prefix, `/api` in the
 example configuration) and is refused with `403` on feature-gated routes that
 need another permission. Binding to a service account rather than a person means the token
-survives staff changes; demoting or disabling the service account takes effect on the next
-request.
+survives staff changes; disabling the service account takes effect on the next request, and
+so does demoting it on routes behind a permission guard. On the `scope_gate` routes a
+demotion does not withdraw scopes already issued, so revoke or re-issue the token (see
+[`RBAC.md`](RBAC.md#route-access-declarations)).
 
 ### Expiry
 

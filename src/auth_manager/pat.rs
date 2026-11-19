@@ -408,6 +408,7 @@ mod tests {
         assert_eq!(classify_canonical_resource_path("/v1/settings"), CanonicalPathScope::Unscoped);
         assert_eq!(classify_canonical_resource_path("/v1/integrations/config"), CanonicalPathScope::Unscoped);
         assert_eq!(classify_canonical_resource_path("/v1/pipes/config"), CanonicalPathScope::Unscoped);
+        assert_eq!(classify_canonical_resource_path("/api/v1/pipes/config"), CanonicalPathScope::Unscoped);
         assert_eq!(
             classify_canonical_resource_path("/v1/pipes/config-chat"),
             CanonicalPathScope::EnforceId {

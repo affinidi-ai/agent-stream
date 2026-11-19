@@ -252,20 +252,26 @@ or carries one of these declarations:
 
 | Declaration | Meaning |
 | --- | --- |
-| `scope_gate` | Every signed-in user may call it; an access token with explicit scopes needs the named permission in its scopes. |
-| `refuse_scoped_tokens` | A write to the caller's own account. An access token with explicit scopes gets `403`. |
+| `scope_gate` | Every signed-in user may call it; an access token with explicit scopes needs the named permission in its scopes. A request the session guard did not authenticate gets `401`. |
+| `refuse_scoped_tokens` | A write to the caller's own account. An access token with explicit scopes gets `403`; a request the session guard did not authenticate gets `401`. |
 | `self_service` | A read of the caller's own data, or of data the appliance also publishes without authentication, open to any authenticated caller. |
 | `handler_checked` | The handler checks role and scope itself, as described above. |
 | `public` | Needs no authentication: a public document such as a DID document or revocation list, a redirect, or the OAuth provider's callback. |
 | `source_authenticated` | Surface traffic on a listener, authenticated by the Surface's source authentication. |
 
-A unit test parses the source and fails when a `.route(...)` registration has none of these,
-or when the declaration does not wrap every method the route registers, so an access token
-with explicit scopes never reaches a route that none of its scopes covers. The test does not
-inspect static file services or fallbacks (`nest_service`, `fallback_service`, `fallback`):
-the `/avatars` and `/uploads` file services, the dashboard's static bundle, and the `404`
-answers for unknown routes, none of which is a management handler. Routes that use
-`scope_gate`:
+A unit test parses the source and fails the test suite when a `.route(...)` registration
+names none of these, or when the declaration does not wrap every method the route registers.
+A literal path counts as public only on an exact match or at a `/` boundary of a public
+prefix. The test proves that every registration names an access rule, not that the rule
+holds: `self_service`, `handler_checked`, `public` and `source_authenticated` enforce
+nothing themselves, so a second test pins every route that carries a declaration, with its
+methods and permission, to a table in the same file. Adding a route under a declaration, or
+moving one onto another, fails until that table (and the table below, for `scope_gate`)
+changes with it. The scan does not inspect `route_service`, static file services or
+fallbacks (`nest_service`, `fallback_service`, `fallback`), or routes registered inside a
+macro: today these are the `/avatars` and `/uploads` file services, the dashboard's static
+bundle, and the `404` answers for unknown routes, none of which is a management handler.
+Routes that use `scope_gate`:
 
 | Routes | Permission a scoped token needs |
 | --- | --- |
@@ -280,10 +286,15 @@ answers for unknown routes, none of which is a management handler. Routes that u
 | `GET /v1/identity/resolve-did`, `/v1/identity/resolve-did-document`, `POST /v1/verify/{did}` | `gateways.view` |
 | `GET /v1/notifications/user-welcome-template` | `notifications.view` |
 
-A token holds only scopes its bound user's role holds, and `settings.view` and
-`integrations.view` are administrator-only by default. So a scoped token reaches the
-networking read and the integration catalogs only when it is bound to an administrator; a
-base user who needs them uses a token without explicit scopes.
+`scope_gate` checks a token's scopes only, not its bound user's current role. A token's
+scopes are checked against that role when the token is created or updated, and
+`settings.view` and `integrations.view` are administrator-only by default, so a scoped token
+reaches the networking read and the integration catalogs only if it was issued while bound
+to an administrator; a base user who needs them uses a token without explicit scopes.
+Demoting a user ends their sessions but does not withdraw scopes already issued to their
+access tokens, so revoke or re-issue those tokens. This is an accepted risk on the
+`scope_gate` routes only, which before this check needed no permission at all; routes
+behind `gate` or `require_feature` test the live role.
 
 Writes to the caller's own account (`PUT /v1/profile`, `POST /v1/profile/avatar`,
 `POST` and `DELETE /v1/user-settings`, `POST /v1/terms/acceptances`) refuse an access token
@@ -349,8 +360,9 @@ mapped to a boolean for the caller.
 
 There is no wrapper object and no `role` field. The key set comes from one list,
 `permission_features`, so every key is present for every caller. Each value is the
-caller's role tested against the configuration; it does not apply an access token's
-scopes. An unknown user answers `404`.
+caller's role tested against the configuration and, for an access token with explicit
+scopes, narrowed to those scopes, so a token scoped to `metrics.view` sees `pipes.execute`
+as `false`. An unknown user answers `404`.
 
 `GET /v1/permissions/public` returns the same shape with every key `false`, for the
 registration flow before anyone is signed in.

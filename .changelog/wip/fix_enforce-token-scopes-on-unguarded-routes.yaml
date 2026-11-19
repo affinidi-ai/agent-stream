@@ -15,7 +15,7 @@ changes:
     - timestamp: '2026-11-18T15:14:38.000Z'
       title: ⭐ Hold scoped access tokens to their scopes on every management route
       description: >-
-        Affects 1.0.2 and earlier; fixed in 1.0.3. A management access token with explicit
+        Affects 1.0.2 and earlier; fixed in the next release. A management access token with explicit
         scopes was checked against them only on routes that declare a permission, so on the
         rest it acted with its owner's full role. A token issued for metrics.view could run
         any Surface in its tenant through POST /v1/pipes/{pipe_id}/execute and
@@ -23,8 +23,10 @@ changes:
         spending its budget, and could read gateway, mediator, marketplace, configuration,
         limit and integration settings. Both run routes now need pipes.execute, every other
         such route needs a matching scope from a token with explicit scopes, and a unit test
-        fails the build when a .route registration has no access rule. Sessions and tokens
-        without explicit scopes are unchanged.
+        fails the test suite when a .route registration has no access rule. GET /v1/permissions
+        now reports a scoped token's permissions narrowed to its scopes, and an access token
+        reads its bound user's own notifications. Sessions and tokens without explicit scopes
+        are otherwise unchanged.
   breaking:
     - timestamp: '2026-11-18T15:14:38.000Z'
       title: Require matching scopes on routes that scoped access tokens could reach freely
