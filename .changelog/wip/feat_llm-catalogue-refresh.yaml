@@ -90,8 +90,10 @@ changes:
         with a single '/', refuses a new provider that lists no models, and adds new providers with each
         model disabled; a later publication cannot turn those models back on, even by omitting them
         or sending an empty models array, since a disabled model is kept across refreshes. Until an
-        administrator saves an added provider with enabled true, a Surface naming a model it does not
-        list is refused as well. A Surface save now checks disabled models on failover, load-balancing
+        administrator saves an added provider with enabled true, a Surface naming any of its models is
+        refused, whether the provider lists the model or not and even if the model's own switch was
+        turned on. POST /api/v1/llm-providers applies the same guards as a refresh: it refuses a
+        provider without a models array or with an endpoint path that does not start with a single '/'. A Surface save now checks disabled models on failover, load-balancing
         and inline routing targets and on each enabled Variant, not only on the primary model, Judge,
         Jury and Decider, so a disabled model can no longer be saved as a backup target. Failover and
         load-balancing targets are checked even when that block is turned off, since per-request

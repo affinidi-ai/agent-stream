@@ -143,7 +143,8 @@ Both files are checked against the embedded schema
 on every write through the API, and so is a single provider sent on its own
 (`POST /api/v1/llm-providers` and `PUT /api/v1/llm-providers/{enum_value}`).
 `POST` refuses an `enum_value` a built-in provider already uses, compared
-case-insensitively.
+case-insensitively, a provider without a `models` array, and an
+`endpoints[].path` that does not start with a single `/`.
 
 A provider's `default_base_url` is dialled with its provider key attached. On create,
 update and custom save, a new or changed `default_base_url` must pass the
@@ -256,7 +257,8 @@ Refresh is on demand only; nothing polls for a new catalog.
        public-address check a new provider gets. Its models stay off across
        later refreshes until an administrator enables them. It is also marked
        `added_by_refresh`, and while it carries that marker a Surface naming
-       a model the provider does not list is refused too. The save checks
+       any of its models is refused, listed or not, even one whose own
+       `enabled` switch was turned on. The save checks
        every target that can receive traffic: the primary model, an enabled
        Judge, juror, Decider router, candidate or merger, every failover or
        load-balancing target whether or not that block is turned on (a

@@ -710,6 +710,9 @@ impl LlmProviderCatalog {
                 if !provider_enum_value(provider).is_some_and(|e| e.eq_ignore_ascii_case(provider_enum)) {
                     return None;
                 }
+                if awaits_approval(provider) {
+                    return Some(false);
+                }
                 let listed = provider
                     .get("models")
                     .and_then(Value::as_array)
@@ -720,11 +723,7 @@ impl LlmProviderCatalog {
                                 == Some(model)
                         })
                     });
-                match listed {
-                    Some(entry) => Some(model_is_enabled(entry)),
-                    None if awaits_approval(provider) => Some(false),
-                    None => None,
-                }
+                listed.map(model_is_enabled)
             })
     }
 
@@ -756,6 +755,17 @@ impl LlmProviderCatalog {
         mut provider: Value,
     ) -> Result<Value, CatalogError> {
         let enum_value = validate_provider_document(&provider)?;
+        if !provider
+            .get("models")
+            .is_some_and(Value::is_array)
+        {
+            return Err(CatalogError::Validation(format!("provider '{enum_value}' has no models array")));
+        }
+        if has_non_relative_endpoint_path(&provider) {
+            return Err(CatalogError::Validation(format!(
+                "endpoint path of '{enum_value}' must be a path starting with a single '/'"
+            )));
+        }
         check_base_url(&mut provider, None).await?;
         keep_approval_marker(&mut provider, None);
         let _guard = self.write_lock.lock().await;
@@ -1752,6 +1762,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_provider_needs_models_and_relative_endpoint_paths() {
+        let (store, _custom) = store_with_builtin("create_provider_guards");
+
+        let no_models = store
+            .create_provider(json!({ "enum_value": "acme", "name": "Acme" }))
+            .await;
+        assert!(
+            matches!(&no_models, Err(CatalogError::Validation(message)) if message.contains("no models array")),
+            "{no_models:?}"
+        );
+        for path in ["https://evil.example/v1/chat", "//evil.example/chat", "/\\evil.example/chat", "chat"] {
+            let mut acme = provider("acme");
+            acme["endpoints"] = json!([{ "name": "Chat", "path": path }]);
+            let created = store
+                .create_provider(acme)
+                .await;
+            assert!(
+                matches!(&created, Err(CatalogError::Validation(message)) if message.contains("single '/'")),
+                "{path} must be refused, got {created:?}"
+            );
+        }
+        assert_eq!(
+            store
+                .list_providers()
+                .unwrap(),
+            vec![provider("openai")]
+        );
+
+        let mut acme = provider("acme");
+        acme["endpoints"] = json!([{ "name": "Chat", "path": "/chat/completions" }]);
+        let created = store
+            .create_provider(acme)
+            .await
+            .unwrap();
+        assert_eq!(created["endpoints"][0]["path"], json!("/chat/completions"));
+    }
+
+    #[tokio::test]
     async fn a_new_provider_base_url_must_be_public() {
         let (store, _custom) = store_with_builtin("create_base_url");
 
@@ -2428,6 +2476,19 @@ mod tests {
             .unwrap();
         assert_eq!(stored_provider(&store, "acme")[AWAITING_APPROVAL_MARKER], true, "an edit alone does not approve");
         assert_eq!(store.model_enabled("acme", "acme-2"), Some(false));
+
+        let mut model_on = edited.clone();
+        model_on["models"][0]["enabled"] = json!(true);
+        store
+            .update_provider("acme", model_on)
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "acme")[AWAITING_APPROVAL_MARKER], true);
+        assert_eq!(
+            store.model_enabled("acme", "acme-1"),
+            Some(false),
+            "a listed model switched on stays refused until the provider is approved"
+        );
 
         edited["enabled"] = json!(true);
         store

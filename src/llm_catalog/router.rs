@@ -303,7 +303,11 @@ mod tests {
     fn every_catalog_route() -> Vec<(Method, &'static str, Option<Value>)> {
         vec![
             (Method::GET, "/api/v1/llm-providers", None),
-            (Method::POST, "/api/v1/llm-providers", Some(json!({ "enum_value": "other", "name": "Other" }))),
+            (
+                Method::POST,
+                "/api/v1/llm-providers",
+                Some(json!({ "enum_value": "other", "name": "Other", "models": [] })),
+            ),
             (Method::GET, "/api/v1/llm-providers/custom", None),
             (Method::PUT, "/api/v1/llm-providers/custom", Some(json!({ "providers": [] }))),
             (Method::GET, "/api/v1/llm-providers/refresh", None),
