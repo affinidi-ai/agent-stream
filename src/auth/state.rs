@@ -71,6 +71,7 @@ impl AuthState {
         storage_path: String,
         avatars_path: String,
         session_timeout_minutes: u64,
+        session_max_lifetime_minutes: u64,
         sessions_storage_path: String,
         metrics_store: Arc<crate::metrics::MetricsStore>,
         terms_manager: Arc<crate::terms::TermsManager>,
@@ -84,8 +85,12 @@ impl AuthState {
 
         // Initialize session manager with configured timeout and filesystem persistence
         let session_manager = Arc::new(
-            SessionManager::with_storage(session_timeout_minutes, std::path::PathBuf::from(sessions_storage_path))
-                .await?,
+            SessionManager::with_storage(
+                session_timeout_minutes,
+                session_max_lifetime_minutes,
+                std::path::PathBuf::from(sessions_storage_path),
+            )
+            .await?,
         );
 
         Ok(Self {

@@ -611,6 +611,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             30,
+            crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
             temp_dir
                 .path()
                 .join("sessions")

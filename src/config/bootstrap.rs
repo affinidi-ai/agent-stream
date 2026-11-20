@@ -410,6 +410,8 @@ impl BootstrapConfig {
             .validate()
             .map_err(|e| anyhow::anyhow!("Invalid [reconnect_policy] config: {e}"))?;
 
+        validate_session_max_lifetime(self.session_max_lifetime_minutes)?;
+
         // Validate TLS certificate paths
         if !self.tls.cert_path.exists() {
             anyhow::bail!("TLS certificate file not found: {:?}", self.tls.cert_path);
@@ -423,9 +425,38 @@ impl BootstrapConfig {
     }
 }
 
+fn validate_session_max_lifetime(minutes: u64) -> anyhow::Result<()> {
+    let longest = crate::auth::session::MAX_SESSION_LIFETIME_MINUTES;
+    if minutes == 0 || minutes > longest {
+        anyhow::bail!("session_max_lifetime_minutes must be between 1 and {longest}, got {minutes}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_max_lifetime_accepts_one_minute_up_to_a_day() {
+        assert!(validate_session_max_lifetime(1).is_ok());
+        assert!(validate_session_max_lifetime(1440).is_ok());
+    }
+
+    #[test]
+    fn session_max_lifetime_refuses_zero_and_more_than_a_day() {
+        assert!(validate_session_max_lifetime(0).is_err());
+        assert!(validate_session_max_lifetime(1441).is_err());
+    }
+
+    #[test]
+    fn session_max_lifetime_defaults_to_twelve_hours() {
+        let (_dir, root) = temp_root();
+
+        let config = load(root.as_path(), MINIMAL_CONFIG);
+
+        assert_eq!(config.session_max_lifetime_minutes, 720);
+    }
 
     #[test]
     fn terms_storage_path_resolves_relative_to_the_config_directory() {

@@ -4177,6 +4177,7 @@ async fn initialize_auth_state(
         storage_path,
         avatars_path,
         session_timeout_minutes,
+        bootstrap_config.session_max_lifetime_minutes,
         sessions_path,
         metrics_store,
         terms_manager,
@@ -4213,6 +4214,7 @@ async fn initialize_sso_user_stores(
     let session_manager = Arc::new(
         crate::auth::SessionManager::with_storage(
             bootstrap_config.session_timeout_minutes,
+            bootstrap_config.session_max_lifetime_minutes,
             std::path::PathBuf::from(
                 &bootstrap_config
                     .storage_paths
@@ -4325,9 +4327,13 @@ mod tests {
             );
             let sessions_dir = dir.path().join("sessions");
             let standby = Arc::new(
-                crate::auth::SessionManager::with_storage(0, sessions_dir.clone())
-                    .await
-                    .unwrap(),
+                crate::auth::SessionManager::with_storage(
+                    0,
+                    crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
+                    sessions_dir.clone(),
+                )
+                .await
+                .unwrap(),
             );
             let token = standby
                 .create_session("alice".into(), "user-a".into())
@@ -4545,9 +4551,13 @@ mod tests {
                     .unwrap(),
             );
             let sessions = Arc::new(
-                SessionManager::with_storage(20, path("sessions").into())
-                    .await
-                    .unwrap(),
+                SessionManager::with_storage(
+                    20,
+                    crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
+                    path("sessions").into(),
+                )
+                .await
+                .unwrap(),
             );
 
             let member: crate::members::Member = serde_json::from_value(serde_json::json!({
@@ -4598,11 +4608,15 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let token = SessionManager::with_storage(20, path("sessions").into())
-                .await
-                .unwrap()
-                .create_session("alice".into(), "u1".into())
-                .await;
+            let token = SessionManager::with_storage(
+                20,
+                crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
+                path("sessions").into(),
+            )
+            .await
+            .unwrap()
+            .create_session("alice".into(), "u1".into())
+            .await;
 
             let activation = Activation::new(None, None, None).with_reloads([
                 members.clone() as Arc<dyn mode::ReloadOnPromotion>,
@@ -4721,7 +4735,7 @@ mod tests {
                 .fetch_add(1, Ordering::SeqCst);
             if self
                 .failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
             {
                 return Err(std::io::Error::other("storage unavailable"));
