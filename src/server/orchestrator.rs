@@ -4332,8 +4332,8 @@ mod tests {
                     crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
                     sessions_dir.clone(),
                 )
-                    .await
-                    .unwrap(),
+                .await
+                .unwrap(),
             );
             let token = standby
                 .create_session("alice".into(), "user-a".into())
@@ -4613,10 +4613,10 @@ mod tests {
                 crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
                 path("sessions").into(),
             )
-                .await
-                .unwrap()
-                .create_session("alice".into(), "u1".into())
-                .await;
+            .await
+            .unwrap()
+            .create_session("alice".into(), "u1".into())
+            .await;
 
             let activation = Activation::new(None, None, None).with_reloads([
                 members.clone() as Arc<dyn mode::ReloadOnPromotion>,

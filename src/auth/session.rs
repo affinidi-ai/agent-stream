@@ -844,7 +844,8 @@ mod tests {
         let mgr = SessionManager::new();
         let lifetime = chrono::Duration::minutes(DEFAULT_SESSION_LIFETIME_MINUTES as i64);
         let past = stored_session("long-lived", lifetime + chrono::Duration::minutes(1), chrono::Duration::minutes(10));
-        let inside = stored_session("still-inside", lifetime - chrono::Duration::minutes(1), chrono::Duration::minutes(10));
+        let inside =
+            stored_session("still-inside", lifetime - chrono::Duration::minutes(1), chrono::Duration::minutes(10));
         for session in [&past, &inside] {
             mgr.storage
                 .save(session)
@@ -942,13 +943,9 @@ mod tests {
                 .unwrap();
         }
 
-        mgr.cleanup_expired()
-            .await;
+        mgr.cleanup_expired().await;
 
-        let sessions = mgr
-            .sessions()
-            .read()
-            .await;
+        let sessions = mgr.sessions().read().await;
         assert!(!sessions.contains_key("past"));
         assert!(sessions.contains_key("current"));
         drop(sessions);
