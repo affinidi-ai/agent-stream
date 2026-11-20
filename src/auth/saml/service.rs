@@ -1085,10 +1085,7 @@ mod tests {
     fn the_name_id_is_an_identity_value_and_never_a_role_value() {
         let attributes = assertion_attributes(&assertion(
             Some("name-id-1"),
-            vec![
-                statement(&[("groups", &["staff"])]),
-                statement(&[("id", &["later-id"]), ("groups", &["admins"])]),
-            ],
+            vec![statement(&[("groups", &["staff"])]), statement(&[("id", &["later-id"]), ("groups", &["admins"])])],
         ));
         assert_eq!(
             attributes
@@ -1098,7 +1095,11 @@ mod tests {
             Some("name-id-1")
         );
         assert_eq!(attributes.identity.get("id"), None, "a user ID only in a later statement is not an identity value");
-        assert!(!attributes.values.contains_key("NameID"));
+        assert!(
+            !attributes
+                .values
+                .contains_key("NameID")
+        );
         assert_eq!(attributes.values["groups"], vec!["staff", "admins"]);
     }
 
