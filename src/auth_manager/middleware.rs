@@ -306,8 +306,7 @@ pub async fn require_session_auth(
         let remaining_seconds = (session.expires_at - chrono::Utc::now())
             .num_seconds()
             .max(0) as u64;
-        if let Ok(value) = session_cookie::build_session_cookie(&session_token, remaining_seconds).parse()
-        {
+        if let Ok(value) = session_cookie::build_session_cookie(&session_token, remaining_seconds).parse() {
             response
                 .headers_mut()
                 .append(SET_COOKIE, value);
