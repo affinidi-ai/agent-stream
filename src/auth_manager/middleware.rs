@@ -303,10 +303,10 @@ pub async fn require_session_auth(
         // sliding server-side expiration.  Without this the browser-side cookie
         // expires at login-time + timeout even though the server keeps extending
         // the session on every request, causing WebSocket reconnection storms.
-        let remaining_seconds = (session.expires_at - chrono::Utc::now())
-            .num_seconds()
-            .max(0) as u64;
-        if let Ok(value) = session_cookie::build_session_cookie(&session_token, remaining_seconds).parse() {
+        let max_age = state
+            .session_manager
+            .cookie_max_age_seconds(&session, chrono::Utc::now());
+        if let Ok(value) = session_cookie::build_session_cookie(&session_token, max_age).parse() {
             response
                 .headers_mut()
                 .append(SET_COOKIE, value);

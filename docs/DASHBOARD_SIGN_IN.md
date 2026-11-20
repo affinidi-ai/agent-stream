@@ -366,7 +366,7 @@ Sessions last `session_timeout_minutes` (default 20) from their last use, and ne
 than `session_max_lifetime_minutes` (default 720, twelve hours; at most 1440) after sign-in,
 however active they stay. Each request that passes the session gate, and each `/auth/check`,
 pushes the expiry out again up to that limit, and the gate re-sends the cookie with a
-`Max-Age` matching the time left. An open dashboard keeps its session in use, so the
+`Max-Age` of the timeout, or of the lifetime left when that is shorter. An open dashboard keeps its session in use, so the
 lifetime limit is what ends it. Sessions are written to `[storage_paths] sessions` (default
 `../_storage/sessions`), so they survive a restart; expired sessions are removed at startup
 and, in SAML and OIDC modes, every 5 minutes on the Active instance.
