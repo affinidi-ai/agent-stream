@@ -87,10 +87,10 @@ pub fn set_server_mode(mode: ServerMode) {
         ServerMode::Standby => STATE_STANDBY,
     };
     let previous = SERVE_STATE
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
             Some(pack(generation(packed).wrapping_add(1), next_state))
         })
-        .expect("fetch_update always returns Some");
+        .expect("the update closure always returns Some");
     let next_generation = generation(previous).wrapping_add(1);
     let _ = mode_change_tx().send(ModeChange {
         mode,
