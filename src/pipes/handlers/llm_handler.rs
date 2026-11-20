@@ -391,11 +391,30 @@ impl LLMHandler {
         Ok(())
     }
 
-    /// Reject the save when any catalog-governed model the pipe references — the
-    /// primary LLM model, the Judge model, or an enabled juror's model — is
-    /// explicitly disabled (`"enabled": false`). Models absent from the catalog
-    /// (custom endpoints, moderation models) are left untouched.
+    /// Reject the save when any catalog-governed model a dispatchable target
+    /// references is disabled ([`LlmProviderCatalog::model_enabled`] returns
+    /// `Some(false)`): the primary model, an enabled Judge, juror, Decider
+    /// router, candidate or merger, an enabled failover or load-balancing
+    /// target, an inline routing target, on the base and on each variant.
+    /// Models absent from the catalog (custom endpoints, moderation models)
+    /// are left untouched.
+    ///
+    /// [`LlmProviderCatalog::model_enabled`]: crate::llm_catalog::LlmProviderCatalog::model_enabled
     fn reject_disabled_models(
+        pipe_config: &PipeConfig,
+        catalog: &crate::llm_catalog::LlmProviderCatalog,
+    ) -> Result<(), String> {
+        Self::reject_disabled_surface_models(pipe_config, catalog)?;
+        for variant in &pipe_config.variants {
+            if let Ok(resolved) = pipe_config.resolve_variant(Some(&variant.alias)) {
+                Self::reject_disabled_surface_models(&resolved, catalog)
+                    .map_err(|e| format!("variant '{}': {}", variant.alias, e))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_disabled_surface_models(
         pipe_config: &PipeConfig,
         catalog: &crate::llm_catalog::LlmProviderCatalog,
     ) -> Result<(), String> {
@@ -436,6 +455,37 @@ impl LLMHandler {
             {
                 ensure_model_enabled(catalog, &merger.provider_type, &merger.model)?;
             }
+        }
+        let failover = pipe_config
+            .failover
+            .iter()
+            .filter(|failover| failover.enabled)
+            .flat_map(|failover| failover.targets.iter())
+            .enumerate()
+            .map(|(idx, target)| (format!("failover target {}", idx + 1), &target.llm));
+        let load_balancing = pipe_config
+            .load_balancing
+            .iter()
+            .filter(|lb| lb.enabled)
+            .flat_map(|lb| lb.targets.iter())
+            .enumerate()
+            .map(|(idx, target)| (format!("load balancing target {}", idx + 1), &target.llm));
+        let routing = pipe_config
+            .routing_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.target.variant.is_none())
+            .filter_map(|(idx, rule)| {
+                rule.target
+                    .llm
+                    .as_ref()
+                    .map(|llm| (format!("routing rule {}", idx + 1), llm))
+            });
+        for (label, llm) in failover
+            .chain(load_balancing)
+            .chain(routing)
+        {
+            ensure_model_enabled(catalog, &llm.provider_type, &llm.model).map_err(|e| format!("{label}: {e}"))?;
         }
         Ok(())
     }
@@ -1172,6 +1222,166 @@ mod tests {
         let err = LLMHandler::reject_disabled_models(&pipe, &catalog).unwrap_err();
         assert!(err.contains("acme-2") && err.contains("disabled"), "unexpected message: {err}");
         assert!(LLMHandler::reject_disabled_models(&llm_pipe("custom-model"), &catalog).is_ok());
+    }
+
+    async fn refresh_added_acme_catalog(name: &str) -> LlmProviderCatalog {
+        let catalog = temp_catalog(name, json!([{ "value": "on" }]));
+        catalog
+            .refresh_builtin(json!({ "providers": [
+                { "enum_value": "anthropic", "name": "Anthropic", "endpoints": [], "models": [{ "name": "On", "value": "on" }] },
+                {
+                    "enum_value": "acme",
+                    "name": "Acme",
+                    "default_base_url": "https://93.184.216.34/v1",
+                    "endpoints": [],
+                    "models": [{ "name": "One", "value": "acme-1" }]
+                }
+            ] }))
+            .await
+            .unwrap();
+        catalog
+    }
+
+    fn acme_target(model: &str) -> serde_json::Value {
+        json!({ "provider_type": "acme", "model": model, "endpoint_url": "/chat/completions" })
+    }
+
+    fn acme_primary(model: &str) -> PipeType {
+        let mut pipe = llm_pipe(model);
+        if let PipeType::LLM { provider, .. } = &mut pipe.pipe_type
+            && let LLMProvider::OpenAI { provider_type, .. } = provider.as_mut()
+        {
+            *provider_type = "acme".to_string();
+        }
+        pipe.pipe_type
+    }
+
+    fn enabled_variant(
+        overrides: crate::pipes::pipe_variants::PipeVariantOverrides
+    ) -> crate::pipes::pipe_variants::PipeVariant {
+        crate::pipes::pipe_variants::PipeVariant {
+            id: "v1".to_string(),
+            alias: "strict".to_string(),
+            name: "Strict".to_string(),
+            description: String::new(),
+            enabled: true,
+            overrides,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_a_refresh_added_provider_on_every_dispatchable_target() {
+        let catalog = refresh_added_acme_catalog("refresh_added_every_target").await;
+        for model in ["acme-1", "acme-2"] {
+            let target = acme_target(model);
+            let cases: Vec<(&str, Configure<'_>)> = vec![
+                (
+                    "failover target 1",
+                    Box::new(|p| {
+                        p.failover = Some(
+                            serde_json::from_value(json!({ "enabled": true, "targets": [{ "llm": target }] })).unwrap(),
+                        )
+                    }),
+                ),
+                (
+                    "load balancing target 1",
+                    Box::new(|p| {
+                        p.load_balancing = Some(
+                            serde_json::from_value(json!({ "enabled": true, "targets": [{ "llm": target }] })).unwrap(),
+                        )
+                    }),
+                ),
+                (
+                    "routing rule 1",
+                    Box::new(|p| {
+                        p.routing_rules = vec![
+                            serde_json::from_value(json!({
+                                "match": { "kind": "header", "name": "x-route", "equals": "acme" },
+                                "target": { "llm": target }
+                            }))
+                            .unwrap(),
+                        ]
+                    }),
+                ),
+                (
+                    "variant 'strict': Model",
+                    Box::new(|p| {
+                        p.variants = vec![enabled_variant(crate::pipes::pipe_variants::PipeVariantOverrides {
+                            pipe_type: Some(acme_primary(model)),
+                            ..Default::default()
+                        })]
+                    }),
+                ),
+                (
+                    "variant 'strict': Model",
+                    Box::new(|p| {
+                        p.variants = vec![enabled_variant(crate::pipes::pipe_variants::PipeVariantOverrides {
+                            judge: Some(serde_json::from_value(json!({ "enabled": true, "llm": target })).unwrap()),
+                            ..Default::default()
+                        })]
+                    }),
+                ),
+            ];
+            for (label, configure) in cases {
+                let mut pipe = llm_pipe("on");
+                configure(&mut pipe);
+                let err = LLMHandler::reject_disabled_models(&pipe, &catalog).expect_err(label);
+                assert!(err.starts_with(label), "the error must name {label}, got: {err}");
+                assert!(err.contains(model) && err.contains("disabled"), "unexpected message for {label}: {err}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_a_refresh_added_provider_on_a_target_that_is_never_dispatched() {
+        let catalog = refresh_added_acme_catalog("refresh_added_inactive_target").await;
+        let target = acme_target("acme-2");
+        let cases: Vec<(&str, Configure<'_>)> = vec![
+            (
+                "disabled failover",
+                Box::new(|p| {
+                    p.failover = Some(
+                        serde_json::from_value(json!({ "enabled": false, "targets": [{ "llm": target }] })).unwrap(),
+                    )
+                }),
+            ),
+            (
+                "disabled load balancing",
+                Box::new(|p| {
+                    p.load_balancing = Some(
+                        serde_json::from_value(json!({ "enabled": false, "targets": [{ "llm": target }] })).unwrap(),
+                    )
+                }),
+            ),
+            (
+                "routing rule that names a variant",
+                Box::new(|p| {
+                    p.routing_rules = vec![
+                        serde_json::from_value(json!({
+                            "match": { "kind": "header", "name": "x-route", "equals": "acme" },
+                            "target": { "variant": "", "llm": target }
+                        }))
+                        .unwrap(),
+                    ]
+                }),
+            ),
+            (
+                "disabled variant",
+                Box::new(|p| {
+                    let mut variant = enabled_variant(crate::pipes::pipe_variants::PipeVariantOverrides {
+                        pipe_type: Some(acme_primary("acme-2")),
+                        ..Default::default()
+                    });
+                    variant.enabled = false;
+                    p.variants = vec![variant];
+                }),
+            ),
+        ];
+        for (label, configure) in cases {
+            let mut pipe = llm_pipe("on");
+            configure(&mut pipe);
+            assert_eq!(LLMHandler::reject_disabled_models(&pipe, &catalog), Ok(()), "{label}");
+        }
     }
 
     #[test]

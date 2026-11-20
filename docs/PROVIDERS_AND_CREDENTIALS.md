@@ -256,7 +256,11 @@ Refresh is on demand only; nothing polls for a new catalog.
        public-address check a new provider gets. Its models stay off across
        later refreshes until an administrator enables them. It is also marked
        `added_by_refresh`, and while it carries that marker a Surface naming
-       a model the provider does not list is refused too. Saving the provider
+       a model the provider does not list is refused too. The save checks
+       every target that can receive traffic: the primary model, an enabled
+       Judge, juror, Decider router, candidate or merger, an enabled failover
+       or load-balancing target, an inline routing target, on the base and on
+       each enabled Variant. Saving the provider
        with `enabled: true` approves it and clears the marker; from then on an
        unlisted model is allowed as for any other provider, and each listed
        model still needs its own `enabled` switch. The server sets the marker,

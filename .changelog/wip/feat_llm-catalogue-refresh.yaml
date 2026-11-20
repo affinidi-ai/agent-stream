@@ -91,7 +91,9 @@ changes:
         model disabled; a later publication cannot turn those models back on, even by omitting them
         or sending an empty models array, since a disabled model is kept across refreshes. Until an
         administrator saves an added provider with enabled true, a Surface naming a model it does not
-        list is refused as well.
+        list is refused as well. A Surface save now checks disabled models on failover, load-balancing
+        and inline routing targets and on each enabled Variant, not only on the primary model, Judge,
+        Jury and Decider, so a disabled model can no longer be saved as a backup target.
   breaking:
     - timestamp: '2026-11-19T05:41:50.000Z'
       title: Point llm_catalog.refresh_url at a catalog manifest, not a catalog file
