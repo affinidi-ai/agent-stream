@@ -475,8 +475,8 @@ impl SamlService {
     pub fn extract_attributes(
         &self,
         assertion: &Assertion,
-    ) -> Result<SamlAttributes> {
-        Ok(assertion_attributes(assertion))
+    ) -> SamlAttributes {
+        assertion_attributes(assertion)
     }
 
     /// Get configuration

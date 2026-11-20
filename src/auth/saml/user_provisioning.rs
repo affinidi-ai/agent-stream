@@ -252,26 +252,38 @@ fn determine_role(
         .max_by_key(UserRole::rank)
         .unwrap_or(UserRole::User);
 
-    for saml_role in saml_roles
+    for (saml_role, role) in legacy_role_hints(saml_roles, config, &resolved) {
+        warn!(
+            "determine_role: no role_mapping entry for '{}'; earlier versions granted {} for this name, so add \"{}\": \"{}\" to role_mapping to keep it",
+            saml_role, role, saml_role, role
+        );
+    }
+
+    info!("determine_role: {} SAML role values resolve to {:?}", saml_roles.len(), resolved);
+    resolved
+}
+
+/// The unmapped role values whose name earlier versions granted a role higher
+/// than `resolved`, each with that role, so the operator can be told which
+/// `role_mapping` entry to add.
+fn legacy_role_hints<'a>(
+    saml_roles: &'a [String],
+    config: &SamlConfig,
+    resolved: &UserRole,
+) -> Vec<(&'a str, UserRole)> {
+    saml_roles
         .iter()
         .filter(|saml_role| {
             !config
                 .role_mapping
                 .contains_key(saml_role.as_str())
         })
-    {
-        if let Some(role) = name_once_granting_a_role(saml_role)
-            && role.rank() > resolved.rank()
-        {
-            warn!(
-                "determine_role: no role_mapping entry for '{}'; earlier versions granted {} for this name, so add \"{}\": \"{}\" to role_mapping to keep it",
-                saml_role, role, saml_role, role
-            );
-        }
-    }
-
-    info!("determine_role: {} SAML role values resolve to {:?}", saml_roles.len(), resolved);
-    resolved
+        .filter_map(|saml_role| {
+            name_once_granting_a_role(saml_role)
+                .filter(|role| role.rank() > resolved.rank())
+                .map(|role| (saml_role.as_str(), role))
+        })
+        .collect()
 }
 
 /// The role one value of the role attribute maps to, or `User` when
@@ -449,6 +461,53 @@ mod tests {
     }
 
     #[test]
+    fn an_old_fallback_name_is_hinted_only_when_it_would_have_granted_more() {
+        let roles = |values: &[&str]| -> Vec<String> {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect()
+        };
+        let unmapped = config_mapping(&[]);
+        let admin_roles = roles(&["admin"]);
+        assert_eq!(
+            legacy_role_hints(&admin_roles, &unmapped, &UserRole::User),
+            vec![("admin", UserRole::Administrator)]
+        );
+
+        let ops_mapped = config_mapping(&[("ops", "poweruser")]);
+        let admin_and_ops = roles(&["admin", "ops"]);
+        assert_eq!(
+            legacy_role_hints(&admin_and_ops, &ops_mapped, &UserRole::PowerUser),
+            vec![("admin", UserRole::Administrator)]
+        );
+
+        let admins_mapped = config_mapping(&[("admins", "administrator")]);
+        let poweruser_and_admins = roles(&["poweruser", "admins"]);
+        assert_eq!(
+            legacy_role_hints(&poweruser_and_admins, &admins_mapped, &UserRole::Administrator),
+            Vec::<(&str, UserRole)>::new()
+        );
+
+        let admin_mapped = config_mapping(&[("admin", "administrator")]);
+        assert_eq!(
+            legacy_role_hints(&admin_roles, &admin_mapped, &UserRole::Administrator),
+            Vec::<(&str, UserRole)>::new()
+        );
+
+        let admin_and_admins = roles(&["admin", "admins"]);
+        assert_eq!(
+            legacy_role_hints(&admin_and_admins, &admins_mapped, &UserRole::Administrator),
+            Vec::<(&str, UserRole)>::new(),
+            "a name granting the role already resolved is not hinted"
+        );
+        assert_eq!(
+            legacy_role_hints(&roles(&["poweruser"]), &unmapped, &UserRole::PowerUser),
+            Vec::<(&str, UserRole)>::new()
+        );
+    }
+
+    #[test]
     fn a_mapped_role_value_grants_the_mapped_role() {
         let config = config_mapping(&[("admin", "administrator"), ("ops", "poweruser"), ("staff", "user")]);
         for (value, expected) in
@@ -549,6 +608,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.user_id, first.user_id, "the same NameID signs in as the same user");
+    }
+
+    #[tokio::test]
+    async fn an_assertion_with_neither_a_user_id_nor_a_name_id_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let attributes = SamlAttributes {
+            identity: HashMap::from([("username".to_string(), "dave".to_string())]),
+            values: HashMap::from([("id".to_string(), vec!["later-statement-id".to_string()])]),
+        };
+
+        let refused = provision_user_from_saml(&storage, &attributes, &config(), "").await;
+        assert!(refused.is_err());
+        assert!(
+            storage
+                .list_users()
+                .await
+                .unwrap()
+                .is_empty(),
+            "no user is created"
+        );
     }
 
     #[tokio::test]

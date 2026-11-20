@@ -94,9 +94,10 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
   that caps the groups it sends (Microsoft Entra ID past 150) sends no group values at all
   for a person over the cap, so that person gets `user`; map app roles or a filtered groups
   claim instead. Other attributes, the user ID among them, use the first value in the first
-  attribute statement. Every later sign-in sets the username, email, name, department and job title again from the identity
-  provider, and the role too for everyone but the primary administrator, who stays
-  `administrator`. See [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
+  attribute statement. Every later sign-in sets the username, email, name, department and
+  job title again from the identity provider, and the role too for everyone but the primary
+  administrator, who stays `administrator`. See
+  [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
 - When provisioning a new user would pass the appliance user limit, the ACS answers `403`
   with a readable page instead of opening a session.
 - A user who is not approved (for example an administrator disabled or deleted them) is
