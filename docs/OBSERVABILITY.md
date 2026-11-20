@@ -54,7 +54,11 @@ Surface), plus `ide_pipe_id` when the Surface was being listed in an IDE Surface
 Catalogue. Each inline integration credential moved to the secrets store logs an `INFO`
 event `integration_credential_migrated` with `integration_id`, `tenant_id`, `field`,
 `action` and `secret_id`, never the value
-([INTEGRATIONS.md](INTEGRATIONS.md#secrets-in-integration-configuration)). An `oidc.json` that opts out of the
+([INTEGRATIONS.md](INTEGRATIONS.md#secrets-in-integration-configuration)). Each
+`POST /api/v1/llm-providers/refresh/reset` logs a `WARN` event `llm_catalog_sequence_reset`
+with `actor_id`, `outcome` (`reset` or `refused`) and `publication_sequence`, plus
+`previous_sequence` on a reset and `reason` on a refusal
+([PROVIDERS_AND_CREDENTIALS.md](PROVIDERS_AND_CREDENTIALS.md#refreshing-the-built-in-catalog)). An `oidc.json` that opts out of the
 tenant binding with `allow_any_account` logs a `WARN` event `oidc_tenant_binding_disabled` with
 `issuer` and `unmapped` at startup. At startup it also
 logs one `stored_secret_binding` line per stored secret binding (see
@@ -245,6 +249,7 @@ Metric families ([`metric_names.rs`](../src/metrics/backends/metric_names.rs), `
 | Failover and spend | `agent_stream_llm_failover_total`, `_llm_failover_backup_attempts_total`, `_llm_failover_suppressed_total`, `_llm_failover_duration_seconds`, `_budget_skipped_total`, `_stream_usage_estimated_total` |
 | Users | `agent_stream_user_events_total`, `_users_active`, `_user_logins_total`, `_auth_attempts_total`, `_auth_failures_total` |
 | Encryption and terms | `agent_stream_kms_operation_total`, `_kms_operation_duration_seconds`, `_affinidi_terms_refresh_total`, `_affinidi_terms_refresh_duration_seconds`, `_affinidi_terms_cache_age_seconds`, `_affinidi_terms_publication_sequence` |
+| Built-in LLM catalog refresh | `agent_stream_llm_catalog_refresh_total` (label `result`), `_llm_catalog_publication_sequence`; see [`PROVIDERS_AND_CREDENTIALS.md`](PROVIDERS_AND_CREDENTIALS.md#refreshing-the-built-in-catalog) |
 | Storage | `agent_stream_storage_load_errors_total` (`entity`, `reason` = `missing`, `read_failed`, `decrypt_failed`, `parse_failed`, `migrate_failed`): stored records skipped because they could not be loaded |
 
 ### CloudWatch

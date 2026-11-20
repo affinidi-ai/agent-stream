@@ -6,8 +6,9 @@
 //! parameters, rate limiting, capabilities) round-trips without loss. Providers
 //! are keyed by their machine-readable `enum_value`.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 
@@ -59,6 +60,9 @@ pub enum CatalogError {
     NotFound(String),
     /// Reading or writing the catalog file failed.
     Io(String),
+    /// The stored catalog stops the change: it is not valid as stored, it
+    /// changed while the change ran, or `custom_llm.json` cannot be read.
+    Conflict(String),
 }
 
 impl std::fmt::Display for CatalogError {
@@ -70,7 +74,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::Duplicate(v) => write!(f, "provider '{}' already exists", v),
             CatalogError::Validation(m) => write!(f, "{}", m),
             CatalogError::NotFound(v) => write!(f, "provider '{}' not found", v),
-            CatalogError::Io(m) => write!(f, "{}", m),
+            CatalogError::Io(m) | CatalogError::Conflict(m) => write!(f, "{}", m),
         }
     }
 }
@@ -91,6 +95,9 @@ pub struct LlmProviderCatalog {
     /// custom providers".
     custom_path: PathBuf,
     write_lock: Mutex<()>,
+    /// Held by a built-in refresh and a rollback for their whole run, so they
+    /// change the catalog and its refresh record one at a time.
+    refresh_lock: Mutex<()>,
     /// Hot-path cache of the **merged** providers array (built-in + valid
     /// custom), keyed by both files' mtimes so that manual edits, reloads, and
     /// admin writes to either file invalidate it automatically.
@@ -146,12 +153,60 @@ impl LlmProviderCatalog {
             );
         }
 
-        Ok(Self {
+        let catalog = Self {
             path,
             custom_path,
             write_lock: Mutex::new(()),
+            refresh_lock: Mutex::new(()),
             cache: RwLock::new(None),
-        })
+        };
+        catalog.warn_about_unsafe_builtin_providers();
+        Ok(catalog)
+    }
+
+    /// Warn about a built-in provider an earlier refresh may have written
+    /// unchecked: an endpoint `path` used as a full URL, or an id that shadows
+    /// a custom provider.
+    fn warn_about_unsafe_builtin_providers(&self) {
+        let Ok(providers) = self.read_doc() else {
+            return;
+        };
+        let custom_ids = self
+            .custom_enum_values()
+            .unwrap_or_default();
+        for provider in &providers {
+            let id = provider_enum_value(provider).unwrap_or_default();
+            if has_non_relative_endpoint_path(provider) {
+                warn!(
+                    provider = id,
+                    "Built-in LLM provider has an endpoint path that is not relative and is used as a full URL; check it against the shipped seed"
+                );
+            }
+            if custom_ids.contains(&id.to_ascii_lowercase()) {
+                warn!(
+                    provider = id,
+                    "Built-in LLM provider id matches a custom provider, which is therefore ignored; check it against the shipped seed"
+                );
+            }
+        }
+    }
+
+    /// Lowercased `enum_value` of every entry in `custom_llm.json`, valid or
+    /// not, so a refresh never adds a provider that shadows one. An absent
+    /// file has none; one that cannot be read or parsed is a conflict.
+    fn custom_enum_values(&self) -> Result<HashSet<String>, CatalogError> {
+        let unreadable = |reason: String| {
+            CatalogError::Conflict(format!(
+                "custom_llm.json {reason}; a refresh cannot add providers until it is fixed"
+            ))
+        };
+        let contents = match std::fs::read_to_string(&self.custom_path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+            Err(e) => return Err(unreadable(format!("cannot be read ({e})"))),
+        };
+        let doc: Value = serde_json::from_str(&contents).map_err(|e| unreadable(format!("is not valid JSON ({e})")))?;
+        Ok(lowered_enum_values(&extract_providers(&doc)))
     }
 
     /// Read the providers array fresh from disk.
@@ -200,7 +255,19 @@ impl LlmProviderCatalog {
             return Arc::clone(providers);
         }
 
-        let providers = Arc::new(self.merged_providers());
+        let builtin = match self.read_doc() {
+            Ok(builtin) => builtin,
+            Err(e) => {
+                if let Ok(guard) = self.cache.read()
+                    && let Some((_, _, providers)) = guard.as_ref()
+                {
+                    tracing::debug!(error = %e, "LLM catalog cannot be read; serving the last catalog read");
+                    return Arc::clone(providers);
+                }
+                Vec::new()
+            }
+        };
+        let providers = Arc::new(self.merge_custom(builtin));
         if let Some(bmt) = builtin_mtime
             && let Ok(mut guard) = self.cache.write()
         {
@@ -213,10 +280,10 @@ impl LlmProviderCatalog {
     /// Invalid custom providers (missing identity, colliding with a built-in
     /// `enum_value`, or duplicated) are silently dropped so a bad custom file
     /// can never break the runtime catalog.
-    fn merged_providers(&self) -> Vec<Value> {
-        let mut builtin = self
-            .read_doc()
-            .unwrap_or_default();
+    fn merge_custom(
+        &self,
+        mut builtin: Vec<Value>,
+    ) -> Vec<Value> {
         let builtin_enums: HashSet<String> = builtin
             .iter()
             .filter_map(|p| provider_enum_value(p).map(|e| e.to_ascii_lowercase()))
@@ -291,30 +358,21 @@ impl LlmProviderCatalog {
     /// must satisfy the embedded JSON schema, every provider must carry a valid
     /// identity, no custom `enum_value` may reuse a built-in provider id, no
     /// custom `enum_value` may be duplicated, and a new or changed
-    /// `default_base_url` must resolve to a public address. On success returns
-    /// the stored providers array.
+    /// `default_base_url` must resolve to a public address. The built-in ids
+    /// are checked again under the write lock, so a refresh that adds a
+    /// matching provider during the address check refuses the save. On
+    /// success returns the stored providers array.
     pub async fn save_custom(
         &self,
         doc: Value,
     ) -> Result<Vec<Value>, CatalogError> {
         validate_against_schema(&doc)?;
         let mut providers = extract_providers(&doc);
-        let builtin_enums: HashSet<String> = self
-            .read_doc()?
-            .iter()
-            .filter_map(|p| provider_enum_value(p).map(|e| e.to_ascii_lowercase()))
-            .collect();
+        self.refuse_builtin_ids(&providers)?;
         let mut seen = HashSet::new();
         for provider in &providers {
             let enum_value = validate_provider(provider)?;
-            let lowered = enum_value.to_ascii_lowercase();
-            if builtin_enums.contains(&lowered) {
-                return Err(CatalogError::Validation(format!(
-                    "custom provider '{}' reuses a built-in provider id — choose a unique enum_value",
-                    enum_value
-                )));
-            }
-            if !seen.insert(lowered) {
+            if !seen.insert(enum_value.to_ascii_lowercase()) {
                 return Err(CatalogError::Validation(format!(
                     "custom provider '{}' is defined more than once",
                     enum_value
@@ -329,8 +387,33 @@ impl LlmProviderCatalog {
             check_base_url(provider, stored_provider).await?;
         }
         let _guard = self.write_lock.lock().await;
+        self.refuse_builtin_ids(&providers)?;
         self.write_custom_doc(&providers)?;
         Ok(providers)
+    }
+
+    /// Refuse custom providers whose `enum_value` matches, ignoring case, a
+    /// provider in the built-in catalog as it is on disk now.
+    fn refuse_builtin_ids(
+        &self,
+        providers: &[Value],
+    ) -> Result<(), CatalogError> {
+        let builtin_enums: HashSet<String> = self
+            .read_doc()?
+            .iter()
+            .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
+            .collect();
+        match providers
+            .iter()
+            .filter_map(provider_enum_value)
+            .find(|e| builtin_enums.contains(&e.to_ascii_lowercase()))
+        {
+            Some(enum_value) => Err(CatalogError::Validation(format!(
+                "custom provider '{}' reuses a built-in provider id — choose a unique enum_value",
+                enum_value
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn write_custom_doc(
@@ -362,6 +445,33 @@ impl LlmProviderCatalog {
             .unwrap_or_else(|| PathBuf::from("llm.json.bak"))
     }
 
+    /// Path of the accepted refresh publication (`llm_catalog_refresh.json`),
+    /// kept next to `llm.json`. A rollback leaves it in place, so a restored
+    /// catalog never lowers the publication sequence the next refresh accepts.
+    pub(crate) fn refresh_state_path(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|p| p.join("llm_catalog_refresh.json"))
+            .unwrap_or_else(|| PathBuf::from("llm_catalog_refresh.json"))
+    }
+
+    /// Whether `llm.json.bak` exists, which means a refresh replaced the
+    /// built-in catalog and no rollback restored it since.
+    pub(crate) fn has_backup(&self) -> bool {
+        self.backup_path().exists()
+    }
+
+    /// The built-in `llm.json` as it is on disk now, or `None` when it cannot
+    /// be read.
+    pub(crate) fn read_builtin_bytes(&self) -> Option<Vec<u8>> {
+        std::fs::read(&self.path).ok()
+    }
+
+    /// Lock a built-in refresh or rollback holds for its whole run.
+    pub(crate) fn refresh_lock(&self) -> &Mutex<()> {
+        &self.refresh_lock
+    }
+
     /// Drop the mtime-gated merged-providers cache so the next read reflects the
     /// on-disk state.
     fn invalidate_cache(&self) {
@@ -370,83 +480,169 @@ impl LlmProviderCatalog {
         }
     }
 
-    /// Overwrite the built-in `llm.json` with a **validated** refreshed catalog,
-    /// keeping the previous file as `llm.json.bak` for recovery. The document is
-    /// validated (schema + non-empty + unique ids) **before** anything on disk
-    /// is touched, and the freshly written file is re-verified after the write;
-    /// any failure rolls the previous file back so a bad refresh can never leave
-    /// the appliance without a working catalog. Returns the provider count.
+    /// Merge a **validated** refreshed catalog into the built-in `llm.json`,
+    /// keeping the previous file as `llm.json.bak` for recovery.
+    ///
+    /// A provider already stored takes only [`REFRESHED_PROVIDER_FIELDS`] from
+    /// the download and keeps everything else, so the file cannot change where
+    /// a provider's key is sent or how it is sent. A provider only in the
+    /// download is added disabled, after its `default_base_url` passes the
+    /// public-address check, with the provider and each of its models
+    /// disabled. A provider only in the download whose id matches a custom
+    /// provider is skipped, so the download never takes over that id. A
+    /// provider only in storage is kept.
+    ///
+    /// A provider new in the download must list models, and any entry of
+    /// `custom_llm.json`, valid or not, keeps its id; while that file cannot
+    /// be read, a download that adds providers is refused.
+    ///
+    /// The download and the merged result are validated (schema + non-empty +
+    /// unique ids, compared case-insensitively + a `models` array on every
+    /// downloaded provider + relative endpoint paths) **before** anything on
+    /// disk is touched, so `llm.json` holding two providers whose ids differ
+    /// only in case refuses the refresh. The previous file is copied to `llm.json.bak`, and the merged
+    /// catalog replaces `llm.json` through a temporary file renamed into
+    /// place, so readers and a crash see the old catalog or the new one.
+    /// Base URLs of added providers are checked before the write lock is
+    /// taken, so their DNS lookups never hold up other catalog writes.
     pub async fn refresh_builtin(
         &self,
         doc: Value,
-    ) -> Result<usize, CatalogError> {
+    ) -> Result<BuiltinRefresh, CatalogError> {
         validate_catalog_document(&doc)?;
-        let providers = extract_providers(&doc);
-        let serialized = serde_json::to_string_pretty(&serde_json::json!({ "providers": &providers }))
-            .map_err(|e| CatalogError::Io(format!("failed to serialize refreshed catalog: {}", e)))?;
+        validate_models_present(&doc)?;
+        validate_endpoint_paths(&doc)?;
+        let checked = self
+            .check_added_providers(&doc)
+            .await?;
 
         let _guard = self.write_lock.lock().await;
+        let mut providers = self.read_doc()?;
+        let downloads = extract_providers(&doc);
+        let custom_enums = if adds_providers(&providers, &downloads) {
+            self.custom_enum_values()?
+        } else {
+            HashSet::new()
+        };
+        let mut added = 0;
+        let mut skipped = Vec::new();
+        for downloaded in downloads {
+            let id = provider_enum_value(&downloaded).map(str::to_ascii_lowercase);
+            match providers
+                .iter_mut()
+                .find(|stored| provider_enum_value(stored).map(str::to_ascii_lowercase) == id)
+            {
+                Some(stored) => *stored = merge_refreshed_provider(stored, &downloaded),
+                None if id
+                    .as_ref()
+                    .is_some_and(|id| custom_enums.contains(id)) =>
+                {
+                    let skipped_id = provider_enum_value(&downloaded).unwrap_or_default();
+                    warn!(
+                        provider = skipped_id,
+                        "Skipped a provider in the refreshed LLM catalog whose id matches a custom provider"
+                    );
+                    skipped.push(skipped_id.to_string());
+                }
+                None => {
+                    let provider = id
+                        .and_then(|id| checked.get(&id))
+                        .cloned()
+                        .ok_or_else(|| {
+                            CatalogError::Conflict(
+                                "the built-in LLM catalog changed during the refresh; try again".to_string(),
+                            )
+                        })?;
+                    providers.push(provider);
+                    added += 1;
+                }
+            }
+        }
+        let merged = serde_json::json!({ "providers": &providers });
+        validate_catalog_document(&merged).map_err(|e| {
+            CatalogError::Conflict(format!("the stored built-in LLM catalog is not valid after the merge: {e}"))
+        })?;
+        let serialized = serde_json::to_vec_pretty(&merged)
+            .map_err(|e| CatalogError::Io(format!("failed to serialize refreshed catalog: {}", e)))?;
+
         let backup = self.backup_path();
-
-        // Move the current catalog aside so we can restore it on any failure.
-        let had_original = self.path.exists();
-        if had_original {
-            let _ = std::fs::remove_file(&backup);
-            std::fs::rename(&self.path, &backup).map_err(|e| {
-                CatalogError::Io(format!("failed to back up existing catalog to {}: {}", backup.display(), e))
-            })?;
-        }
-
-        // Write the refreshed catalog; restore the backup on write failure.
-        if let Err(e) = std::fs::write(&self.path, &serialized) {
-            let _ = std::fs::remove_file(&self.path);
-            if had_original {
-                let _ = std::fs::rename(&backup, &self.path);
-            }
-            return Err(CatalogError::Io(format!("failed to write refreshed catalog {}: {}", self.path.display(), e)));
-        }
-
-        // Verify the freshly written file parses and validates; roll back if not.
-        if let Err(e) = self.verify_on_disk() {
-            let _ = std::fs::remove_file(&self.path);
-            if had_original {
-                let _ = std::fs::rename(&backup, &self.path);
-            }
+        let current = std::fs::read(&self.path)
+            .map_err(|e| CatalogError::Io(format!("failed to read LLM catalog {}: {}", self.path.display(), e)))?;
+        write_file_atomically(&backup, &current).map_err(|e| {
+            CatalogError::Io(format!("failed to back up existing catalog to {}: {}", backup.display(), e))
+        })?;
+        write_file_atomically(&self.path, &serialized).map_err(|e| {
+            // A failed directory sync leaves the new file in place.
             self.invalidate_cache();
-            return Err(e);
-        }
+            CatalogError::Io(format!("failed to write refreshed catalog {}: {}", self.path.display(), e))
+        })?;
 
         self.invalidate_cache();
         info!(
             path = %self.path.display(),
             providers = providers.len(),
+            added,
             "Refreshed built-in LLM catalog (previous kept as llm.json.bak)"
         );
-        Ok(providers.len())
+        Ok(BuiltinRefresh {
+            providers: providers.len(),
+            added,
+            skipped,
+            sha256: sha256_hex(&serialized),
+        })
     }
 
-    /// Re-read the on-disk built-in catalog and re-validate it, for post-write
-    /// verification during a refresh.
-    fn verify_on_disk(&self) -> Result<(), CatalogError> {
-        let contents = std::fs::read_to_string(&self.path).map_err(|e| {
-            CatalogError::Io(format!("failed to re-read written catalog {}: {}", self.path.display(), e))
-        })?;
-        let doc: Value = serde_json::from_str(&contents)
-            .map_err(|e| CatalogError::Validation(format!("refreshed catalog is not valid JSON: {}", e)))?;
-        validate_catalog_document(&doc)
+    /// Check every provider the download adds (not stored, not matching any
+    /// entry of `custom_llm.json`): its `default_base_url` must pass the
+    /// public-address check and its `models` must not be empty, since a
+    /// provider without listed models takes any model name. Each is disabled.
+    /// Returns the checked providers keyed by lowercased `enum_value`.
+    async fn check_added_providers(
+        &self,
+        doc: &Value,
+    ) -> Result<HashMap<String, Value>, CatalogError> {
+        let stored = self.read_doc()?;
+        let downloads = extract_providers(doc);
+        if !adds_providers(&stored, &downloads) {
+            return Ok(HashMap::new());
+        }
+        let builtin_enums = lowered_enum_values(&stored);
+        let custom_enums = self.custom_enum_values()?;
+        let mut checked = HashMap::new();
+        for mut provider in downloads {
+            let Some(id) = provider_enum_value(&provider).map(str::to_ascii_lowercase) else {
+                continue;
+            };
+            if builtin_enums.contains(&id) || custom_enums.contains(&id) {
+                continue;
+            }
+            check_base_url(&mut provider, None).await?;
+            if provider
+                .get("models")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                return Err(CatalogError::Validation(format!(
+                    "provider '{}' new in the refreshed catalog lists no models",
+                    provider_enum_value(&provider).unwrap_or_default()
+                )));
+            }
+            disable_added_provider(&mut provider);
+            checked.insert(id, provider);
+        }
+        Ok(checked)
     }
 
-    /// Restore the previous built-in catalog from `llm.json.bak`: delete the
-    /// current `llm.json`, rename the backup back into place, and reload. This
-    /// is the recovery path if a refreshed catalog turns out to be problematic.
-    /// Returns the restored provider count.
+    /// Restore the previous built-in catalog from `llm.json.bak` by renaming
+    /// the backup over `llm.json`. This is the recovery path if a refreshed
+    /// catalog turns out to be problematic. Returns the restored provider
+    /// count.
     pub async fn rollback_builtin(&self) -> Result<usize, CatalogError> {
         let _guard = self.write_lock.lock().await;
         let backup = self.backup_path();
         if !backup.exists() {
             return Err(CatalogError::NotFound("no llm.json.bak backup is available to restore".to_string()));
         }
-        let _ = std::fs::remove_file(&self.path);
         std::fs::rename(&backup, &self.path)
             .map_err(|e| CatalogError::Io(format!("failed to restore catalog from {}: {}", backup.display(), e)))?;
         self.invalidate_cache();
@@ -497,7 +693,11 @@ impl LlmProviderCatalog {
     /// when it exists but is explicitly disabled (`"enabled": false`), and
     /// `None` when the provider or model is not present in the catalog. Callers
     /// treat `None` as "not governed by the catalog" so unlisted custom or
-    /// moderation models stay usable. Provider matching is case-insensitive.
+    /// moderation models stay usable. A provider a refresh added that no
+    /// administrator has enabled yet ([`awaits_approval`]) returns
+    /// `Some(false)` for a model it does not list, so a name the publisher left
+    /// out cannot reach the downloaded base URL. Provider matching is
+    /// case-insensitive.
     pub fn model_enabled(
         &self,
         provider_enum: &str,
@@ -510,16 +710,20 @@ impl LlmProviderCatalog {
                 if !provider_enum_value(provider).is_some_and(|e| e.eq_ignore_ascii_case(provider_enum)) {
                     return None;
                 }
-                provider
+                if awaits_approval(provider) {
+                    return Some(false);
+                }
+                let listed = provider
                     .get("models")
-                    .and_then(Value::as_array)?
-                    .iter()
-                    .find(|m| {
-                        m.get("value")
-                            .and_then(Value::as_str)
-                            == Some(model)
-                    })
-                    .map(model_is_enabled)
+                    .and_then(Value::as_array)
+                    .and_then(|models| {
+                        models.iter().find(|m| {
+                            m.get("value")
+                                .and_then(Value::as_str)
+                                == Some(model)
+                        })
+                    });
+                listed.map(model_is_enabled)
             })
     }
 
@@ -544,19 +748,29 @@ impl LlmProviderCatalog {
             .find(|p| provider_enum_value(p) == Some(enum_value)))
     }
 
-    /// Append a new provider. Fails if a provider with the same `enum_value` exists.
+    /// Append a new provider. Fails if a provider with the same `enum_value`,
+    /// compared case-insensitively, exists.
     pub async fn create_provider(
         &self,
         mut provider: Value,
     ) -> Result<Value, CatalogError> {
         let enum_value = validate_provider_document(&provider)?;
+        if !provider
+            .get("models")
+            .is_some_and(Value::is_array)
+        {
+            return Err(CatalogError::Validation(format!("provider '{enum_value}' has no models array")));
+        }
+        if has_non_relative_endpoint_path(&provider) {
+            return Err(CatalogError::Validation(format!(
+                "endpoint path of '{enum_value}' must be a path starting with a single '/'"
+            )));
+        }
         check_base_url(&mut provider, None).await?;
+        keep_approval_marker(&mut provider, None);
         let _guard = self.write_lock.lock().await;
         let mut providers = self.read_doc()?;
-        if providers
-            .iter()
-            .any(|p| provider_enum_value(p) == Some(enum_value.as_str()))
-        {
+        if lowered_enum_values(&providers).contains(&enum_value.to_ascii_lowercase()) {
             return Err(CatalogError::Duplicate(enum_value));
         }
         providers.push(provider.clone());
@@ -590,6 +804,7 @@ impl LlmProviderCatalog {
             .position(|p| provider_enum_value(p) == Some(enum_value))
         {
             Some(idx) => {
+                keep_approval_marker(&mut provider, Some(&providers[idx]));
                 providers[idx] = provider.clone();
                 self.write_doc(&providers)?;
                 Ok(provider)
@@ -627,15 +842,294 @@ impl LlmProviderCatalog {
         providers: &[Value],
     ) -> Result<(), CatalogError> {
         let doc = serde_json::json!({ "providers": providers });
-        let serialized = serde_json::to_string_pretty(&doc)
+        let serialized = serde_json::to_vec_pretty(&doc)
             .map_err(|e| CatalogError::Io(format!("failed to serialize LLM catalog: {}", e)))?;
-        std::fs::write(&self.path, serialized)
+        write_file_atomically(&self.path, &serialized)
             .map_err(|e| CatalogError::Io(format!("failed to write LLM catalog {}: {}", self.path.display(), e)))?;
         if let Ok(mut guard) = self.cache.write() {
             *guard = None;
         }
         Ok(())
     }
+}
+
+/// Result of a built-in catalog refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinRefresh {
+    /// Built-in providers after the merge.
+    pub providers: usize,
+    /// Providers the download added, all disabled.
+    pub added: usize,
+    /// Ids of providers new in the download that were skipped because a
+    /// custom provider uses the same id.
+    pub skipped: Vec<String>,
+    /// SHA-256 of the `llm.json` this refresh wrote, taken while the catalog
+    /// was locked, so a later edit is never recorded as the refresh's catalog.
+    pub sha256: String,
+}
+
+/// Lowercase hex SHA-256 of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Whether the download holds a provider id `stored` does not.
+fn adds_providers(
+    stored: &[Value],
+    downloads: &[Value],
+) -> bool {
+    let stored_ids = lowered_enum_values(stored);
+    downloads
+        .iter()
+        .filter_map(|provider| provider_enum_value(provider).map(str::to_ascii_lowercase))
+        .any(|id| !stored_ids.contains(&id))
+}
+
+/// The only provider fields a refresh takes from the download for a provider
+/// already stored. Identity, connection and key settings (`enum_value`,
+/// `name`, `default_base_url`, `api_version_prefix`, `api_schema`, the
+/// `api_key_*` fields, `requires_forward_caller_token`) stay as stored.
+const REFRESHED_PROVIDER_FIELDS: [&str; 4] = ["models", "endpoints", "endpoint_parameters", "description"];
+
+/// The stored provider with [`REFRESHED_PROVIDER_FIELDS`] replaced by the
+/// download's values; a field the download omits is removed. Model `enabled`
+/// switches follow [`carry_model_switches`], and disabled models follow
+/// [`keep_disabled_models`].
+fn merge_refreshed_provider(
+    stored: &Value,
+    downloaded: &Value,
+) -> Value {
+    let mut merged = stored.clone();
+    if let Some(fields) = merged.as_object_mut() {
+        for key in REFRESHED_PROVIDER_FIELDS {
+            match downloaded.get(key) {
+                Some(value) => {
+                    fields.insert(key.to_string(), value.clone());
+                }
+                None => {
+                    fields.remove(key);
+                }
+            }
+        }
+        if let Some(models) = fields.get_mut("models") {
+            carry_model_switches(stored, models);
+            keep_disabled_models(stored, models);
+        }
+    }
+    merged
+}
+
+/// Append each stored model with `"enabled": false` that the download omits.
+/// The model gate allows a model the catalog does not list, so dropping a
+/// disabled model would make it callable again.
+fn keep_disabled_models(
+    stored: &Value,
+    models: &mut Value,
+) {
+    let Some(models) = models.as_array_mut() else {
+        return;
+    };
+    let kept: Vec<Value> = stored
+        .get("models")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|stored| {
+            stored
+                .get("enabled")
+                .and_then(Value::as_bool)
+                == Some(false)
+        })
+        .filter(|stored| {
+            let value = stored
+                .get("value")
+                .and_then(Value::as_str);
+            value.is_some()
+                && !models.iter().any(|model| {
+                    model
+                        .get("value")
+                        .and_then(Value::as_str)
+                        == value
+                })
+        })
+        .cloned()
+        .collect();
+    models.extend(kept);
+}
+
+/// Give each downloaded model the `enabled` switch of the stored model with the
+/// same `value`, and disable a model new to a provider stored with
+/// `"enabled": false`. A refresh therefore never turns on a model an
+/// administrator, or the refresh that added the provider, turned off.
+fn carry_model_switches(
+    stored: &Value,
+    models: &mut Value,
+) {
+    let provider_enabled = stored
+        .get("enabled")
+        .and_then(Value::as_bool)
+        != Some(false);
+    let stored_models = stored
+        .get("models")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let Some(models) = models.as_array_mut() else {
+        return;
+    };
+    for model in models
+        .iter_mut()
+        .filter_map(Value::as_object_mut)
+    {
+        let value = model
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let stored_model = value
+            .as_deref()
+            .and_then(|value| {
+                stored_models
+                    .iter()
+                    .find(|stored| {
+                        stored
+                            .get("value")
+                            .and_then(Value::as_str)
+                            == Some(value)
+                    })
+            });
+        match stored_model.map(|stored| stored.get("enabled")) {
+            Some(Some(enabled)) => {
+                model.insert("enabled".to_string(), enabled.clone());
+            }
+            Some(None) => {
+                model.remove("enabled");
+            }
+            None if !provider_enabled => {
+                model.insert("enabled".to_string(), Value::Bool(false));
+            }
+            None => {}
+        }
+    }
+}
+
+/// Set on a provider a refresh added. Until an administrator saves it with
+/// `"enabled": true`, the model gate refuses every model name the provider
+/// does not list ([`LlmProviderCatalog::model_enabled`]). Seeded and
+/// administrator-created providers never carry it, so their unlisted models
+/// (Azure deployments, custom and moderation models) stay usable.
+const AWAITING_APPROVAL_MARKER: &str = "added_by_refresh";
+
+/// Whether `provider` was added by a refresh and no administrator has enabled
+/// it since.
+fn awaits_approval(provider: &Value) -> bool {
+    provider
+        .get(AWAITING_APPROVAL_MARKER)
+        .and_then(Value::as_bool)
+        == Some(true)
+        && provider
+            .get("enabled")
+            .and_then(Value::as_bool)
+            != Some(true)
+}
+
+/// The server, never the request body, decides [`AWAITING_APPROVAL_MARKER`]:
+/// an administrator save keeps it from the stored provider until the body sets
+/// `"enabled": true`, which approves the provider and clears it.
+fn keep_approval_marker(
+    provider: &mut Value,
+    stored: Option<&Value>,
+) {
+    let keep = stored.is_some_and(|stored| {
+        stored
+            .get(AWAITING_APPROVAL_MARKER)
+            .and_then(Value::as_bool)
+            == Some(true)
+    }) && provider
+        .get("enabled")
+        .and_then(Value::as_bool)
+        != Some(true);
+    if let Some(fields) = provider.as_object_mut() {
+        if keep {
+            fields.insert(AWAITING_APPROVAL_MARKER.to_string(), Value::Bool(true));
+        } else {
+            fields.remove(AWAITING_APPROVAL_MARKER);
+        }
+    }
+}
+
+/// Mark a provider the download added as disabled, together with each of its
+/// models, so none of them is offered or callable until an admin enables it,
+/// and mark it awaiting approval so a model name it does not list is refused.
+fn disable_added_provider(provider: &mut Value) {
+    let Some(fields) = provider.as_object_mut() else {
+        return;
+    };
+    fields.insert("enabled".to_string(), Value::Bool(false));
+    fields.insert(AWAITING_APPROVAL_MARKER.to_string(), Value::Bool(true));
+    if let Some(models) = fields
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+    {
+        for model in models
+            .iter_mut()
+            .filter_map(Value::as_object_mut)
+        {
+            model.insert("enabled".to_string(), Value::Bool(false));
+        }
+    }
+}
+
+/// Refuse a downloaded provider without a `models` array. A refreshed field
+/// the download omits is removed, so such an entry would strip every model and
+/// price from the stored provider.
+fn validate_models_present(doc: &Value) -> Result<(), CatalogError> {
+    match extract_providers(doc)
+        .iter()
+        .find(|provider| {
+            !provider
+                .get("models")
+                .is_some_and(Value::is_array)
+        }) {
+        Some(provider) => Err(CatalogError::Validation(format!(
+            "provider '{}' in the refreshed catalog has no models array",
+            provider_enum_value(provider).unwrap_or_default()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Refuse a downloaded endpoint `path` that does not start with exactly one
+/// `/`. Anything else is used as a full URL, so the download could choose the
+/// host that receives a provider's key.
+fn validate_endpoint_paths(doc: &Value) -> Result<(), CatalogError> {
+    match extract_providers(doc)
+        .iter()
+        .find(|provider| has_non_relative_endpoint_path(provider))
+    {
+        Some(provider) => Err(CatalogError::Validation(format!(
+            "endpoint path of '{}' must be a path starting with a single '/'",
+            provider_enum_value(provider).unwrap_or_default()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Whether any endpoint `path` of `provider` is not a path starting with
+/// exactly one `/`.
+fn has_non_relative_endpoint_path(provider: &Value) -> bool {
+    provider
+        .get("endpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|endpoint| endpoint.get("path"))
+        .any(|path| {
+            !path
+                .as_str()
+                .is_some_and(|p| p.starts_with('/') && !p.starts_with("//") && !p.starts_with("/\\"))
+        })
 }
 
 /// Extract the providers array from either a bare `{ "providers": [...] }`
@@ -656,6 +1150,79 @@ fn provider_enum_value(provider: &Value) -> Option<&str> {
     provider
         .get("enum_value")
         .and_then(|v| v.as_str())
+}
+
+/// The lowercased `enum_value` of every provider that has one.
+fn lowered_enum_values(providers: &[Value]) -> HashSet<String> {
+    providers
+        .iter()
+        .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
+        .collect()
+}
+
+/// Replace `path` with `contents` through `<path>.tmp`, flushed to disk before
+/// the rename, so a reader or a crash sees the old file or the new one, never
+/// a partial one, then sync the parent directory so the rename itself is
+/// durable. The temporary file is removed on failure. An error from the
+/// directory sync is returned although `path` already holds `contents`: the
+/// caller must not report the write as durable.
+pub(crate) fn write_file_atomically(
+    path: &Path,
+    contents: &[u8],
+) -> std::io::Result<()> {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".tmp");
+    let temporary = path.with_file_name(name);
+    let written = std::fs::File::create(&temporary)
+        .and_then(|mut file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    sync_directory(parent).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("{} was replaced but its directory could not be synced to disk: {e}", path.display()),
+        )
+    })
+}
+
+/// Flush `directory`'s entries to disk, so a rename into it survives a crash.
+/// A file system that does not support syncing a directory (`EINVAL`,
+/// `ENOTSUP`) is skipped with a debug log: there the rename is as durable as
+/// that file system makes it. Every other failure, including failing to open
+/// the directory, is returned.
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    match std::fs::File::open(directory).and_then(|handle| handle.sync_all()) {
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput) => {
+            tracing::debug!(
+                directory = %directory.display(),
+                error = %e,
+                "Directory sync is not supported here; a rename is only as durable as the file system makes it"
+            );
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+/// Windows cannot open a directory as a file to sync it, and NTFS journals the
+/// rename itself, so there is nothing to flush here.
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Whether a model document is enabled. A missing or non-boolean `enabled`
@@ -879,6 +1446,16 @@ mod tests {
         json!({ "enum_value": enum_value, "name": format!("Provider {}", enum_value), "endpoints": [], "models": models })
     }
 
+    /// SHA-256 of the store's `llm.json` as it is on disk now.
+    fn installed(store: &LlmProviderCatalog) -> String {
+        sha256_hex(&std::fs::read(&store.path).unwrap())
+    }
+
+    /// A provider listing one model, as a refresh requires of a provider it adds.
+    fn listed(enum_value: &str) -> Value {
+        provider_with_models(enum_value, json!([{ "name": "Model", "value": format!("{enum_value}-model") }]))
+    }
+
     #[test]
     fn model_is_enabled_treats_missing_as_enabled() {
         assert!(model_is_enabled(&json!({ "value": "m" })));
@@ -1053,11 +1630,13 @@ mod tests {
             .unwrap();
         assert_eq!(provider_enum_value(&created), Some("openai"));
 
-        // duplicate rejected
-        let dup = store
-            .create_provider(provider("openai"))
-            .await;
-        assert!(matches!(dup, Err(CatalogError::Duplicate(_))));
+        // duplicate rejected, whatever its case
+        for duplicate in ["openai", "OpenAI"] {
+            let dup = store
+                .create_provider(provider(duplicate))
+                .await;
+            assert!(matches!(dup, Err(CatalogError::Duplicate(ref id)) if id == duplicate), "{dup:?}");
+        }
 
         // get
         let fetched = store
@@ -1180,6 +1759,44 @@ mod tests {
                 .unwrap(),
             vec![provider("openai")]
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_provider_needs_models_and_relative_endpoint_paths() {
+        let (store, _custom) = store_with_builtin("create_provider_guards");
+
+        let no_models = store
+            .create_provider(json!({ "enum_value": "acme", "name": "Acme" }))
+            .await;
+        assert!(
+            matches!(&no_models, Err(CatalogError::Validation(message)) if message.contains("no models array")),
+            "{no_models:?}"
+        );
+        for path in ["https://evil.example/v1/chat", "//evil.example/chat", "/\\evil.example/chat", "chat"] {
+            let mut acme = provider("acme");
+            acme["endpoints"] = json!([{ "name": "Chat", "path": path }]);
+            let created = store
+                .create_provider(acme)
+                .await;
+            assert!(
+                matches!(&created, Err(CatalogError::Validation(message)) if message.contains("single '/'")),
+                "{path} must be refused, got {created:?}"
+            );
+        }
+        assert_eq!(
+            store
+                .list_providers()
+                .unwrap(),
+            vec![provider("openai")]
+        );
+
+        let mut acme = provider("acme");
+        acme["endpoints"] = json!([{ "name": "Chat", "path": "/chat/completions" }]);
+        let created = store
+            .create_provider(acme)
+            .await
+            .unwrap();
+        assert_eq!(created["endpoints"][0]["path"], json!("/chat/completions"));
     }
 
     #[tokio::test]
@@ -1407,6 +2024,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_custom_rechecks_builtin_ids_under_the_write_lock() {
+        let (store, custom) = store_with_builtin("custom_collision_race");
+        let guard = store.write_lock.lock().await;
+        let save = store.save_custom(json!({ "providers": [provider("acme")] }));
+        tokio::pin!(save);
+        assert!(futures::poll!(&mut save).is_pending(), "save waits for the write lock");
+
+        std::fs::write(&store.path, json!({ "providers": [provider("openai"), provider("ACME")] }).to_string())
+            .unwrap();
+        drop(guard);
+
+        let result = save.await;
+        assert!(matches!(
+            &result,
+            Err(CatalogError::Validation(message)) if message.contains("reuses a built-in provider id")
+        ));
+        assert!(!custom.exists(), "nothing was written");
+    }
+
+    #[tokio::test]
     async fn save_custom_rejects_duplicate_within_custom() {
         let (store, _custom) = store_with_builtin("custom_dup");
         let result = store
@@ -1505,13 +2142,21 @@ mod tests {
         );
 
         let refreshed = serde_json::json!({
-            "providers": [provider("openai"), provider("anthropic"), provider("gemini")]
+            "providers": [provider("openai"), listed("anthropic"), listed("gemini")]
         });
-        let count = store
+        let refresh = store
             .refresh_builtin(refreshed)
             .await
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 3,
+                added: 2,
+                skipped: vec![],
+                sha256: installed(&store)
+            }
+        );
 
         // New catalog is live…
         let enums: Vec<String> = store
@@ -1583,20 +2228,619 @@ mod tests {
         );
     }
 
+    fn stored_provider(
+        store: &LlmProviderCatalog,
+        enum_value: &str,
+    ) -> Value {
+        store
+            .list_providers()
+            .unwrap()
+            .into_iter()
+            .find(|p| provider_enum_value(p) == Some(enum_value))
+            .unwrap_or_else(|| panic!("{enum_value} is not stored"))
+    }
+
+    #[tokio::test]
+    async fn refresh_takes_only_model_data_for_a_stored_provider() {
+        let catalog = temp_path("refresh_merge");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let mut stored = json!({
+            "enum_value": "openai",
+            "name": "OpenAI",
+            "default_base_url": "https://api.openai.com/v1",
+            "api_version_prefix": "/v1",
+            "api_schema": "openai",
+            "api_key_secret": "openai-key",
+            "api_key_label": "OpenAI API key",
+            "api_key_validation": "mandatory",
+            "api_key_required": true,
+            "requires_forward_caller_token": false,
+            "enabled": true,
+            "description": "Old description",
+            "endpoint_parameters": { "old": true },
+            "endpoints": [{ "name": "Chat", "path": "/chat/completions" }],
+            "models": [{ "name": "GPT-4o", "value": "gpt-4o", "cost_per_1k_input": 0.0025, "enabled": true }]
+        });
+        stored[PUBLIC_BASE_URL_MARKER] = json!(true);
+        let ollama = with_base_url(provider("ollama"), "http://localhost:11434");
+        std::fs::write(&catalog, json!({ "providers": [stored.clone(), ollama.clone()] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        let downloaded = json!({
+            "enum_value": "openai",
+            "name": "Renamed",
+            "default_base_url": "https://collector.example",
+            "api_version_prefix": "/v9",
+            "api_schema": "anthropic",
+            "api_key_secret": "other-key",
+            "api_key_label": "Paste it here",
+            "api_key_validation": "none",
+            "api_key_required": false,
+            "requires_forward_caller_token": true,
+            "enabled": false,
+            "description": "New description",
+            "endpoint_parameters": { "new": true },
+            "endpoints": [{ "name": "Responses", "path": "/responses" }],
+            "models": [{ "name": "GPT-5", "value": "gpt-5", "cost_per_1k_input": 0.001, "enabled": false }]
+        });
+        let refresh = store
+            .refresh_builtin(json!({ "providers": [downloaded.clone()] }))
+            .await
+            .unwrap();
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 2,
+                added: 0,
+                skipped: vec![],
+                sha256: installed(&store)
+            }
+        );
+
+        let mut expected = stored;
+        for key in REFRESHED_PROVIDER_FIELDS {
+            expected[key] = downloaded[key].clone();
+        }
+        assert_eq!(stored_provider(&store, "openai"), expected);
+        assert_eq!(stored_provider(&store, "ollama"), ollama, "a provider missing from the download is kept");
+        assert!(store.requires_public_host("api.openai.com"));
+        assert!(!store.requires_public_host("collector.example"));
+    }
+
+    #[tokio::test]
+    async fn refresh_drops_a_model_field_the_download_omits() {
+        let (store, _custom) = store_with_builtin("refresh_omitted");
+        let mut downloaded = provider("openai");
+        downloaded
+            .as_object_mut()
+            .unwrap()
+            .remove("endpoints");
+        store
+            .refresh_builtin(json!({ "providers": [downloaded] }))
+            .await
+            .unwrap();
+        assert!(
+            stored_provider(&store, "openai")
+                .get("endpoints")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_a_provider_without_a_models_array() {
+        let (store, _custom) = store_with_builtin("refresh_no_models");
+        let stored = stored_provider(&store, "openai");
+        for models in [None, Some(json!(null)), Some(json!({}))] {
+            let mut downloaded = provider("openai");
+            match models {
+                Some(value) => downloaded["models"] = value,
+                None => {
+                    downloaded
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("models");
+                }
+            }
+            let refused = store
+                .refresh_builtin(json!({ "providers": [downloaded] }))
+                .await;
+            assert!(matches!(refused, Err(CatalogError::Validation(_))), "{refused:?}");
+            assert_eq!(stored_provider(&store, "openai"), stored);
+        }
+        store
+            .refresh_builtin(json!({ "providers": [provider("openai")] }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_stored_ids_that_differ_only_in_case() {
+        let catalog = temp_path("refresh_case_duplicates");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let stored = json!({ "providers": [provider("openai"), provider("OpenAI")] }).to_string();
+        std::fs::write(&catalog, &stored).unwrap();
+        let store = LlmProviderCatalog::new(catalog.clone(), None).unwrap();
+
+        let refused = store
+            .refresh_builtin(json!({ "providers": [provider_with_models("openai", json!([{ "name": "GPT-5", "value": "gpt-5" }]))] }))
+            .await;
+        assert!(
+            matches!(refused, Err(CatalogError::Conflict(ref message)) if message.contains("more than once")),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&catalog).unwrap(), stored);
+    }
+
+    #[tokio::test]
+    async fn refresh_adds_a_new_provider_disabled_after_the_base_url_check() {
+        let (store, _custom) = store_with_builtin("refresh_new_provider");
+        let mut acme = with_base_url(
+            provider_with_models(
+                "acme",
+                json!([{ "name": "Default", "value": "acme-default" }, { "name": "On", "value": "acme-on", "enabled": true }]),
+            ),
+            "https://93.184.216.34/v1",
+        );
+        acme["enabled"] = json!(true);
+        acme[PUBLIC_BASE_URL_MARKER] = json!(false);
+
+        let refresh = store
+            .refresh_builtin(json!({ "providers": [provider("openai"), acme] }))
+            .await
+            .unwrap();
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 2,
+                added: 1,
+                skipped: vec![],
+                sha256: installed(&store)
+            }
+        );
+        let added = stored_provider(&store, "acme");
+        assert_eq!(added["enabled"], false);
+        assert_eq!(added[PUBLIC_BASE_URL_MARKER], true);
+        assert_eq!(added["default_base_url"], "https://93.184.216.34/v1");
+
+        assert_eq!(store.model_enabled("acme", "acme-default"), Some(false));
+        assert_eq!(store.model_enabled("acme", "acme-on"), Some(false));
+        let mut offered = store
+            .cached_providers()
+            .to_vec();
+        retain_enabled_models(&mut offered);
+        let acme_offered = offered
+            .iter()
+            .find(|p| provider_enum_value(p) == Some("acme"))
+            .unwrap();
+        assert_eq!(acme_offered["models"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn an_added_provider_stays_disabled_across_later_refreshes() {
+        let (store, _custom) = store_with_builtin("refresh_added_twice");
+        let acme = |models: Value| with_base_url(provider_with_models("acme", models), "https://93.184.216.34/v1");
+        store
+            .refresh_builtin(
+                json!({ "providers": [provider("openai"), acme(json!([{ "name": "One", "value": "acme-1" }]))] }),
+            )
+            .await
+            .unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [
+                provider("openai"),
+                acme(json!([
+                    { "name": "One", "value": "acme-1", "enabled": true },
+                    { "name": "Two", "value": "acme-2" }
+                ]))
+            ] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("acme", "acme-1"), Some(false));
+        assert_eq!(store.model_enabled("acme", "acme-2"), Some(false));
+    }
+
+    #[tokio::test]
+    async fn an_added_provider_refuses_unlisted_models_until_an_administrator_enables_it() {
+        let catalog = temp_path("refresh_added_unlisted");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let mut azure = provider("azure");
+        azure["enabled"] = json!(false);
+        std::fs::write(&catalog, json!({ "providers": [provider("openai"), azure.clone()] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        let mut acme = with_base_url(
+            provider_with_models("acme", json!([{ "name": "One", "value": "acme-1" }])),
+            "https://93.184.216.34/v1",
+        );
+        acme[AWAITING_APPROVAL_MARKER] = json!(false);
+        store
+            .refresh_builtin(json!({ "providers": [provider("openai"), azure, acme] }))
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "acme")[AWAITING_APPROVAL_MARKER], true);
+        assert_eq!(store.model_enabled("acme", "acme-2"), Some(false), "an unlisted model of an added provider");
+        assert_eq!(store.model_enabled("ACME", "acme-2"), Some(false));
+        assert_eq!(store.model_enabled("azure", "my-deployment"), None, "a seeded disabled provider is unchanged");
+        assert_eq!(store.model_enabled("openai", "custom"), None);
+
+        let mut edited = stored_provider(&store, "acme");
+        edited
+            .as_object_mut()
+            .unwrap()
+            .remove(AWAITING_APPROVAL_MARKER);
+        edited["description"] = json!("edited");
+        store
+            .update_provider("acme", edited.clone())
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "acme")[AWAITING_APPROVAL_MARKER], true, "an edit alone does not approve");
+        assert_eq!(store.model_enabled("acme", "acme-2"), Some(false));
+
+        let mut model_on = edited.clone();
+        model_on["models"][0]["enabled"] = json!(true);
+        store
+            .update_provider("acme", model_on)
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "acme")[AWAITING_APPROVAL_MARKER], true);
+        assert_eq!(
+            store.model_enabled("acme", "acme-1"),
+            Some(false),
+            "a listed model switched on stays refused until the provider is approved"
+        );
+
+        edited["enabled"] = json!(true);
+        store
+            .update_provider("acme", edited)
+            .await
+            .unwrap();
+        assert!(
+            stored_provider(&store, "acme")
+                .get(AWAITING_APPROVAL_MARKER)
+                .is_none()
+        );
+        assert_eq!(store.model_enabled("acme", "acme-2"), None);
+        assert_eq!(store.model_enabled("acme", "acme-1"), Some(false), "each listed model is still enabled separately");
+    }
+
+    #[tokio::test]
+    async fn an_administrator_cannot_mark_a_provider_awaiting_approval() {
+        let (store, _custom) = store_with_builtin("approval_marker_from_body");
+        let mut openai = provider("openai");
+        openai[AWAITING_APPROVAL_MARKER] = json!(true);
+        store
+            .update_provider("openai", openai)
+            .await
+            .unwrap();
+        assert!(
+            stored_provider(&store, "openai")
+                .get(AWAITING_APPROVAL_MARKER)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_keeps_each_stored_model_switch() {
+        let catalog = temp_path("refresh_model_switches");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let mut openai = provider_with_models(
+            "openai",
+            json!([
+                { "name": "Off", "value": "off", "enabled": false },
+                { "name": "On", "value": "on" }
+            ]),
+        );
+        openai["enabled"] = json!(true);
+        let mut azure = provider_with_models("azure", json!([{ "name": "Kept", "value": "kept" }]));
+        azure["enabled"] = json!(false);
+        std::fs::write(&catalog, json!({ "providers": [openai, azure] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [
+                provider_with_models("openai", json!([
+                    { "name": "Off", "value": "off", "enabled": true },
+                    { "name": "On", "value": "on", "enabled": false },
+                    { "name": "New", "value": "new" }
+                ])),
+                provider_with_models("azure", json!([
+                    { "name": "Kept", "value": "kept" },
+                    { "name": "Added", "value": "added" }
+                ]))
+            ] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("openai", "off"), Some(false), "an administrator's switch-off is kept");
+        assert_eq!(store.model_enabled("openai", "on"), Some(true), "a stored model with no switch stays on");
+        assert_eq!(store.model_enabled("openai", "new"), Some(true), "a new model of an enabled provider is on");
+        assert_eq!(
+            store.model_enabled("azure", "kept"),
+            Some(true),
+            "a disabled provider's stored model keeps working"
+        );
+        assert_eq!(store.model_enabled("azure", "added"), Some(false), "a new model of a disabled provider is off");
+    }
+
+    #[tokio::test]
+    async fn a_refresh_keeps_a_disabled_model_the_download_omits() {
+        let catalog = temp_path("refresh_keeps_disabled_omitted");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let openai = provider_with_models(
+            "openai",
+            json!([
+                { "name": "Off", "value": "off", "enabled": false },
+                { "name": "On", "value": "on" },
+                { "name": "Gone", "value": "gone" }
+            ]),
+        );
+        std::fs::write(&catalog, json!({ "providers": [openai] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [
+                provider_with_models("openai", json!([{ "name": "On", "value": "on" }]))
+            ] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("openai", "off"), Some(false), "an omitted disabled model stays off");
+        assert_eq!(store.model_enabled("openai", "on"), Some(true));
+        assert_eq!(store.model_enabled("openai", "gone"), None, "an omitted enabled model is removed");
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_an_empty_models_array_keeps_disabled_models() {
+        let catalog = temp_path("refresh_keeps_disabled_empty");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let openai = provider_with_models(
+            "openai",
+            json!([
+                { "name": "Off", "value": "off", "enabled": false },
+                { "name": "On", "value": "on" }
+            ]),
+        );
+        std::fs::write(&catalog, json!({ "providers": [openai] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [provider_with_models("openai", json!([]))] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("openai", "off"), Some(false), "a disabled model survives models: []");
+        let openai = store
+            .list_providers()
+            .unwrap()
+            .into_iter()
+            .find(|p| provider_enum_value(p) == Some("openai"))
+            .unwrap();
+        assert_eq!(openai["models"], json!([{ "name": "Off", "value": "off", "enabled": false }]));
+    }
+
+    #[tokio::test]
+    async fn refresh_skips_a_new_provider_whose_id_matches_a_custom_provider() {
+        let (store, custom) = store_with_builtin("refresh_custom_collision");
+        let custom_acme = with_base_url(provider("acme"), "https://custom.example/v1");
+        std::fs::write(&custom, json!({ "providers": [custom_acme] }).to_string()).unwrap();
+
+        let refresh = store
+            .refresh_builtin(json!({
+                "providers": [provider("openai"), with_base_url(provider("ACME"), "https://93.184.216.34/v1")]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec!["ACME".to_string()],
+                sha256: installed(&store)
+            }
+        );
+        assert!(
+            store
+                .list_providers()
+                .unwrap()
+                .iter()
+                .all(|p| !provider_enum_value(p).is_some_and(|e| e.eq_ignore_ascii_case("acme")))
+        );
+        assert_eq!(store.custom_providers().len(), 1);
+        let resolved: Vec<Value> = store
+            .cached_providers()
+            .iter()
+            .filter(|p| provider_enum_value(p).is_some_and(|e| e.eq_ignore_ascii_case("acme")))
+            .cloned()
+            .collect();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0]["default_base_url"], "https://custom.example/v1");
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_a_new_provider_that_lists_no_models() {
+        let (store, _custom) = store_with_builtin("refresh_new_no_models");
+        let before = std::fs::read_to_string(&store.path).unwrap();
+
+        let refused = store
+            .refresh_builtin(json!({ "providers": [provider("openai"), with_base_url(provider("acme"), "https://93.184.216.34/v1")] }))
+            .await;
+        assert!(
+            matches!(&refused, Err(CatalogError::Validation(message)) if message.contains("lists no models")),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+
+        store
+            .refresh_builtin(json!({ "providers": [provider("openai")] }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_the_id_of_an_invalid_custom_provider() {
+        let (store, custom) = store_with_builtin("refresh_invalid_custom");
+        std::fs::write(&custom, json!({ "providers": [{ "enum_value": "acme" }] }).to_string()).unwrap();
+        assert!(
+            store
+                .custom_providers()
+                .is_empty(),
+            "the custom entry is invalid"
+        );
+
+        let refresh = store
+            .refresh_builtin(
+                json!({ "providers": [provider("openai"), with_base_url(listed("Acme"), "https://93.184.216.34/v1")] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec!["Acme".to_string()],
+                sha256: installed(&store)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_adds_no_provider_while_the_custom_catalog_cannot_be_parsed() {
+        let (store, custom) = store_with_builtin("refresh_unparsed_custom");
+        std::fs::write(&custom, "{ not json").unwrap();
+        let before = std::fs::read_to_string(&store.path).unwrap();
+
+        let refused = store
+            .refresh_builtin(
+                json!({ "providers": [provider("openai"), with_base_url(listed("acme"), "https://93.184.216.34/v1")] }),
+            )
+            .await;
+        assert!(
+            matches!(&refused, Err(CatalogError::Conflict(message)) if message.contains("custom_llm.json")),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+
+        let merged_only = store
+            .refresh_builtin(json!({ "providers": [provider("openai")] }))
+            .await
+            .unwrap();
+        assert_eq!(
+            merged_only,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec![],
+                sha256: installed(&store)
+            }
+        );
+    }
+
+    #[test]
+    fn a_non_relative_endpoint_path_is_detected() {
+        let mut absolute = provider("openai");
+        absolute["endpoints"] =
+            json!([{ "name": "Chat", "path": "/chat" }, { "name": "Out", "path": "https://x.example/v1" }]);
+        let mut relative = provider("openai");
+        relative["endpoints"] = json!([{ "name": "Chat", "path": "/chat/completions" }]);
+        assert!(has_non_relative_endpoint_path(&absolute));
+        assert!(!has_non_relative_endpoint_path(&relative));
+        assert!(!has_non_relative_endpoint_path(&provider("openai")));
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_an_endpoint_path_that_is_not_relative() {
+        let (store, _custom) = store_with_builtin("refresh_endpoint_path");
+        let before = std::fs::read_to_string(&store.path).unwrap();
+
+        for path in [
+            "https://collector.example/v1/chat/completions",
+            "collector.example/chat",
+            "//collector.example/chat",
+            "/\\collector.example/chat",
+        ] {
+            for id in ["openai", "acme"] {
+                let mut downloaded = provider(id);
+                downloaded["endpoints"] = json!([{ "name": "Chat", "path": path }]);
+                let refused = store
+                    .refresh_builtin(json!({ "providers": [downloaded] }))
+                    .await;
+                assert!(
+                    matches!(&refused, Err(CatalogError::Validation(message))
+                        if message.contains("endpoint path") && message.contains(id)),
+                    "{id} with {path} must be refused, got {refused:?}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        assert!(!store.backup_path().exists());
+
+        let mut relative = provider("openai");
+        relative["endpoints"] = json!([{ "name": "Chat", "path": "/chat/completions" }]);
+        store
+            .refresh_builtin(json!({ "providers": [relative] }))
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "openai")["endpoints"][0]["path"], "/chat/completions");
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_a_new_provider_with_an_internal_base_url() {
+        let (store, _custom) = store_with_builtin("refresh_new_internal");
+        let before = std::fs::read_to_string(&store.path).unwrap();
+
+        for url in INTERNAL_BASE_URLS {
+            let refused = store
+                .refresh_builtin(json!({ "providers": [provider("openai"), with_base_url(provider("acme"), url)] }))
+                .await;
+            assert!(
+                matches!(&refused, Err(CatalogError::Validation(message)) if message.contains("public address")),
+                "{url} must be refused, got {refused:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        assert!(!store.backup_path().exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_matches_a_stored_provider_ignoring_case() {
+        let (store, _custom) = store_with_builtin("refresh_case");
+        let mut downloaded = with_base_url(provider("OpenAI"), "https://collector.example");
+        downloaded["description"] = json!("New");
+        let refresh = store
+            .refresh_builtin(json!({ "providers": [downloaded] }))
+            .await
+            .unwrap();
+        assert_eq!(
+            refresh,
+            BuiltinRefresh {
+                providers: 1,
+                added: 0,
+                skipped: vec![],
+                sha256: installed(&store)
+            }
+        );
+        let openai = stored_provider(&store, "openai");
+        assert_eq!(openai["description"], "New");
+        assert!(
+            openai
+                .get("default_base_url")
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn rollback_builtin_restores_previous() {
         let (store, _custom) = store_with_builtin("rollback_ok");
         store
-            .refresh_builtin(serde_json::json!({ "providers": [provider("anthropic")] }))
+            .refresh_builtin(serde_json::json!({ "providers": [listed("anthropic")] }))
             .await
             .unwrap();
         assert_eq!(
-            provider_enum_value(
-                &store
-                    .list_providers()
-                    .unwrap()[0]
-            ),
-            Some("anthropic")
+            store
+                .list_providers()
+                .unwrap()
+                .len(),
+            2
         );
 
         let restored = store
@@ -1620,5 +2864,101 @@ mod tests {
     async fn rollback_without_backup_errors() {
         let (store, _custom) = store_with_builtin("rollback_none");
         assert!(matches!(store.rollback_builtin().await, Err(CatalogError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn refresh_leaves_no_temporary_file() {
+        let (store, _custom) = store_with_builtin("refresh_no_tmp");
+        store
+            .refresh_builtin(json!({ "providers": [provider("openai")] }))
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .path
+                .with_file_name("llm.json.tmp")
+                .exists()
+        );
+        assert!(
+            !store
+                .path
+                .with_file_name("llm.json.bak.tmp")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn cached_providers_keep_the_last_catalog_when_llm_json_cannot_be_read() {
+        let (store, _custom) = store_with_builtin("cache_unreadable");
+        let before = store.cached_providers();
+        assert_eq!(before.len(), 1);
+
+        std::fs::write(&store.path, "{ not json").unwrap();
+        assert_eq!(*store.cached_providers(), *before);
+
+        std::fs::remove_file(&store.path).unwrap();
+        assert_eq!(*store.cached_providers(), *before);
+    }
+
+    #[test]
+    fn write_file_atomically_replaces_the_file_and_cleans_up_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("record.json");
+        std::fs::write(&path, b"old").unwrap();
+        write_file_atomically(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(
+            !directory
+                .path()
+                .join("record.json.tmp")
+                .exists()
+        );
+
+        let occupied = directory
+            .path()
+            .join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("keep"), b"x").unwrap();
+        assert!(write_file_atomically(&occupied, b"new").is_err());
+        assert!(
+            !directory
+                .path()
+                .join("occupied.tmp")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_atomically_reports_a_directory_it_cannot_sync() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("record.json");
+        std::fs::write(&path, b"old").unwrap();
+        // Write and search permission let the rename happen; without read
+        // permission the directory cannot be opened to sync it.
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let opened = std::fs::File::open(directory.path()).is_ok();
+        let written = write_file_atomically(&path, b"new");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        if opened {
+            // Running as root: permissions do not stop the open.
+            return;
+        }
+
+        let error = written.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("was replaced but its directory could not be synced"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 }

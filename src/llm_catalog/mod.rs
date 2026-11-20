@@ -8,6 +8,7 @@
 //! runtime and is never overwritten by the seed once present.
 
 pub mod handlers;
+mod refresh;
 pub mod router;
 pub mod store;
 

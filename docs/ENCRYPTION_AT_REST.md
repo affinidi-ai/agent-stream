@@ -254,6 +254,11 @@ is present. Both staged files are removed after a successful restore.
   key values or decrypted content.
 - **Guard the BEK like the CMK.** Anyone with a product/environment BEK can
   authenticate archives in that scope. Store it in a secrets manager.
+- The archive carries the built-in LLM catalog refresh record,
+  `llm_catalog_refresh.json`. Restoring an older archive restores its older
+  record, so the next catalog refresh accepts publications the appliance had
+  already moved past. See
+  [`PROVIDERS_AND_CREDENTIALS.md`](PROVIDERS_AND_CREDENTIALS.md#refreshing-the-built-in-catalog).
 
 ## Failure and recovery
 

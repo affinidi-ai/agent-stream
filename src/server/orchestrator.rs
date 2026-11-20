@@ -4721,7 +4721,7 @@ mod tests {
                 .fetch_add(1, Ordering::SeqCst);
             if self
                 .failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
             {
                 return Err(std::io::Error::other("storage unavailable"));

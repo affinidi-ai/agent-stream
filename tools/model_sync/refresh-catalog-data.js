@@ -318,7 +318,8 @@ async function main() {
     process.exit(1);
   }
   console.log(
-    "\nReview the diff, then publish the file to the location referenced by `llm_catalog.refresh_url` in agent-stream.json."
+    "\nReview the diff, then run publish-builtin-catalog.js with --catalogue-url, --sequence and --version " +
+      "to write the manifest appliances read at `llm_catalog.refresh_url`."
   );
 }
 
