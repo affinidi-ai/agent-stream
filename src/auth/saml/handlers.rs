@@ -129,11 +129,7 @@ pub async fn saml_acs(
     // Extract user attributes
     let attributes = saml_state
         .saml_service
-        .extract_attributes(&assertion)
-        .map_err(|e| {
-            error!("Failed to extract SAML attributes: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .extract_attributes(&assertion);
 
     // Provision or update user
     let user = match provision_user_from_saml(
