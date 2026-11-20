@@ -196,9 +196,15 @@ Refresh is on demand only; nothing polls for a new catalog.
   every later publication until the sequence is reset. Use it only for a
   mirror on a network you trust.
   1. It downloads the manifest (10-second timeout, 64 KiB cap), sending the
-     stored `ETag` as `If-None-Match`. A `304` reports `unchanged`. The `ETag`
-     is not sent while the record is marked rolled back or `llm.json` no
-     longer matches the SHA-256 recorded when the publication was installed.
+     stored `ETag` as `If-None-Match`. A `304` reports `unchanged` while
+     `llm.json` still matches; if `llm.json` changed during the refresh, the
+     refresh answers `conflict` and the next one installs the publication
+     again. The `ETag` is not sent while the record is marked rolled back or
+     `llm.json` no longer matches the SHA-256 recorded when the publication
+     was installed, and a `304` to a request without it is refused
+     (`validation_failure`). The recorded SHA-256 is that of the file the
+     refresh wrote, so an edit landing just after the install is not taken
+     for the publication.
   2. It checks the manifest fields:
 
      | Field | Rule |
@@ -242,6 +248,9 @@ Refresh is on demand only; nothing polls for a new catalog.
        same `value`, so a refresh never turns on a model that was turned off
        and never turns off one an administrator has. A model new to a
        provider stored with `enabled: false` is added with `enabled: false`.
+       A stored model with `enabled: false` is kept even when the download
+       omits it or sends `models: []`, since the model gate allows a model
+       the catalog does not list.
      - A provider only in the download is added with `enabled: false`, and
        each of its models too, after its `default_base_url` passes the
        public-address check a new provider gets. Its models stay off across

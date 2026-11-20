@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use super::store::{BuiltinRefresh, CatalogError, LlmProviderCatalog, write_file_atomically};
+use super::store::{BuiltinRefresh, CatalogError, LlmProviderCatalog, sha256_hex, write_file_atomically};
 
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 /// The largest catalog the refresh accepts. The published catalog is a few
@@ -93,7 +93,7 @@ impl RefreshState {
 fn installed_sha256(catalog: &LlmProviderCatalog) -> Option<String> {
     catalog
         .read_builtin_bytes()
-        .map(|bytes| hex::encode(Sha256::digest(&bytes)))
+        .map(|bytes| sha256_hex(&bytes))
 }
 
 #[derive(Debug)]
@@ -238,10 +238,12 @@ impl CatalogRefresher {
         let mut request = self
             .client(MANIFEST_TIMEOUT)?
             .get(manifest_url.clone());
-        if state.manifest.is_some()
-            && in_step
-            && let Some(etag) = state.etag.as_deref()
-        {
+        let conditional = state
+            .manifest
+            .as_ref()
+            .zip(state.etag.as_deref())
+            .filter(|_| in_step);
+        if let Some((_, etag)) = conditional {
             request = request.header(IF_NONE_MATCH, etag);
         }
         let response = request
@@ -249,15 +251,19 @@ impl CatalogRefresher {
             .await
             .map_err(|e| transport(format!("failed to fetch the catalog manifest: {}", e.without_url())))?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-            return state
-                .manifest
-                .map(|manifest| RefreshOutcome::Unchanged { manifest })
-                .ok_or_else(|| {
-                    RefreshFailure::new(
-                        RefreshFailureKind::Validation,
-                        "the manifest source answered not modified, but no publication was accepted yet",
-                    )
-                });
+            let Some((manifest, _)) = conditional else {
+                return Err(validation(
+                    "the manifest source answered not modified to a request that named no accepted publication"
+                        .to_string(),
+                ));
+            };
+            if !state.installed_in_step(catalog) {
+                return Err(RefreshFailure::new(
+                    RefreshFailureKind::Conflict,
+                    "the built-in LLM catalog changed during the refresh; try again",
+                ));
+            }
+            return Ok(RefreshOutcome::Unchanged { manifest: manifest.clone() });
         }
         if !response.status().is_success() {
             return Err(transport(format!("the manifest source returned HTTP {}", response.status())));
@@ -277,7 +283,7 @@ impl CatalogRefresher {
         validate_history(state.manifest.as_ref(), &candidate, &state.seen_version_ids, state.sequence_floor)
             .map_err(|message| RefreshFailure::new(RefreshFailureKind::Rollback, message))?;
 
-        if in_step && state.manifest.as_ref() == Some(&candidate) {
+        if in_step && state.manifest.as_ref() == Some(&candidate) && state.installed_in_step(catalog) {
             state.etag = etag;
             save_state(&state_path, &state)?;
             return Ok(RefreshOutcome::Unchanged { manifest: candidate });
@@ -350,7 +356,7 @@ impl CatalogRefresher {
 
         state.etag = etag;
         state.rolled_back = false;
-        state.installed_sha256 = installed_sha256(catalog);
+        state.installed_sha256 = Some(refresh.sha256.clone());
         if let Err(failure) = save_state(&state_path, &state) {
             tracing::warn!(
                 error = %failure.message,
@@ -643,6 +649,9 @@ mod tests {
     struct Published {
         manifest: Option<Value>,
         catalogs: HashMap<String, Vec<u8>>,
+        /// File written once, the next time the manifest is asked for, before
+        /// the answer: an edit landing while a refresh is running.
+        edit_on_manifest: Option<(std::path::PathBuf, Vec<u8>)>,
     }
 
     struct Source {
@@ -666,11 +675,18 @@ mod tests {
                 .route(
                     "/llm/v1/current.json",
                     axum::routing::get(move |headers: HeaderMap| {
-                        let manifest = manifest_state
-                            .lock()
-                            .unwrap()
-                            .manifest
-                            .clone();
+                        let (manifest, edit) = {
+                            let mut published = manifest_state.lock().unwrap();
+                            (
+                                published.manifest.clone(),
+                                published
+                                    .edit_on_manifest
+                                    .take(),
+                            )
+                        };
+                        if let Some((path, bytes)) = edit {
+                            std::fs::write(path, bytes).unwrap();
+                        }
                         async move {
                             let Some(manifest) = manifest else {
                                 return StatusCode::NOT_FOUND.into_response();
@@ -864,7 +880,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 1,
                 added: 0,
-                skipped: vec![]
+                skipped: vec![],
+                sha256: installed_sha256(&catalog).unwrap()
             }
         );
         assert_eq!(models(&catalog), vec!["gpt-5"]);
@@ -875,6 +892,7 @@ mod tests {
             "https://api.openai.com/v1"
         );
         let state = load_state(&catalog.refresh_state_path()).unwrap();
+        assert_eq!(state.installed_sha256, Some(refresh.sha256));
         assert_eq!(state.manifest, Some(manifest));
         assert!(state.etag.is_some());
         assert_eq!(state.seen_version_ids, BTreeSet::from(["agent-stream:1.0.3".to_string()]));
@@ -1468,11 +1486,120 @@ mod tests {
         assert!(
             failure
                 .message
-                .contains("no publication was accepted yet"),
+                .contains("named no accepted publication"),
             "{}",
             failure.message
         );
         assert_eq!(models(&catalog), vec!["gpt-4o"]);
+    }
+
+    #[tokio::test]
+    async fn a_not_modified_answer_to_an_unconditional_request_is_refused() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher(&source)
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join("llm.json"),
+            catalog_with("gpt-edited").to_string(),
+        )
+        .unwrap();
+        let always_not_modified = CatalogRefresher {
+            manifest_url: format!("{}/not-modified.json", source.base),
+            allow_insecure_source: true,
+        };
+
+        let failure = refused(&always_not_modified, &catalog).await;
+        assert_eq!(failure.kind, RefreshFailureKind::Validation, "{}", failure.message);
+        assert_eq!(models(&catalog), vec!["gpt-edited"]);
+    }
+
+    #[tokio::test]
+    async fn a_not_modified_answer_after_the_catalog_changed_mid_refresh_is_not_unchanged() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        source
+            .published
+            .lock()
+            .unwrap()
+            .edit_on_manifest = Some((
+            directory
+                .path()
+                .join("llm.json"),
+            catalog_with("gpt-edited")
+                .to_string()
+                .into_bytes(),
+        ));
+
+        let failure = refused(&refresher, &catalog).await;
+        assert_eq!(failure.kind, RefreshFailureKind::Conflict, "{}", failure.message);
+        assert_eq!(models(&catalog), vec!["gpt-edited"]);
+
+        let again = refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        assert!(matches!(again, RefreshOutcome::Updated { .. }), "{again:?}");
+        assert_eq!(models(&catalog), vec!["gpt-5"]);
+    }
+
+    #[tokio::test]
+    async fn a_catalog_edited_mid_refresh_is_installed_again_under_the_same_publication() {
+        let source = Source::start().await;
+        let _allowed = source.allow();
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = store(&directory);
+        let refresher = refresher(&source);
+        source.publish(1, "1.0.3", &catalog_with("gpt-5"), |_| {});
+        refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        let mut state = load_state(&catalog.refresh_state_path()).unwrap();
+        state.etag = None;
+        save_state(&catalog.refresh_state_path(), &state).unwrap();
+        source
+            .published
+            .lock()
+            .unwrap()
+            .edit_on_manifest = Some((
+            directory
+                .path()
+                .join("llm.json"),
+            catalog_with("gpt-edited")
+                .to_string()
+                .into_bytes(),
+        ));
+
+        let outcome = refresher
+            .refresh(&catalog)
+            .await
+            .unwrap();
+        let RefreshOutcome::Updated { refresh, .. } = outcome else {
+            panic!("expected an update, got {outcome:?}");
+        };
+        assert_eq!(models(&catalog), vec!["gpt-5"]);
+        assert_eq!(
+            load_state(&catalog.refresh_state_path())
+                .unwrap()
+                .installed_sha256,
+            Some(refresh.sha256)
+        );
     }
 
     #[tokio::test]
@@ -1672,7 +1799,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 1,
                 added: 0,
-                skipped: vec!["Acme".to_string()]
+                skipped: vec!["Acme".to_string()],
+                sha256: installed_sha256(&catalog).unwrap()
             }
         );
         assert_eq!(std::fs::read_to_string(&custom_path).unwrap(), custom);

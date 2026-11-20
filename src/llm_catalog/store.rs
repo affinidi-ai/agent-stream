@@ -358,30 +358,21 @@ impl LlmProviderCatalog {
     /// must satisfy the embedded JSON schema, every provider must carry a valid
     /// identity, no custom `enum_value` may reuse a built-in provider id, no
     /// custom `enum_value` may be duplicated, and a new or changed
-    /// `default_base_url` must resolve to a public address. On success returns
-    /// the stored providers array.
+    /// `default_base_url` must resolve to a public address. The built-in ids
+    /// are checked again under the write lock, so a refresh that adds a
+    /// matching provider during the address check refuses the save. On
+    /// success returns the stored providers array.
     pub async fn save_custom(
         &self,
         doc: Value,
     ) -> Result<Vec<Value>, CatalogError> {
         validate_against_schema(&doc)?;
         let mut providers = extract_providers(&doc);
-        let builtin_enums: HashSet<String> = self
-            .read_doc()?
-            .iter()
-            .filter_map(|p| provider_enum_value(p).map(|e| e.to_ascii_lowercase()))
-            .collect();
+        self.refuse_builtin_ids(&providers)?;
         let mut seen = HashSet::new();
         for provider in &providers {
             let enum_value = validate_provider(provider)?;
-            let lowered = enum_value.to_ascii_lowercase();
-            if builtin_enums.contains(&lowered) {
-                return Err(CatalogError::Validation(format!(
-                    "custom provider '{}' reuses a built-in provider id — choose a unique enum_value",
-                    enum_value
-                )));
-            }
-            if !seen.insert(lowered) {
+            if !seen.insert(enum_value.to_ascii_lowercase()) {
                 return Err(CatalogError::Validation(format!(
                     "custom provider '{}' is defined more than once",
                     enum_value
@@ -396,8 +387,33 @@ impl LlmProviderCatalog {
             check_base_url(provider, stored_provider).await?;
         }
         let _guard = self.write_lock.lock().await;
+        self.refuse_builtin_ids(&providers)?;
         self.write_custom_doc(&providers)?;
         Ok(providers)
+    }
+
+    /// Refuse custom providers whose `enum_value` matches, ignoring case, a
+    /// provider in the built-in catalog as it is on disk now.
+    fn refuse_builtin_ids(
+        &self,
+        providers: &[Value],
+    ) -> Result<(), CatalogError> {
+        let builtin_enums: HashSet<String> = self
+            .read_doc()?
+            .iter()
+            .filter_map(|p| provider_enum_value(p).map(str::to_ascii_lowercase))
+            .collect();
+        match providers
+            .iter()
+            .filter_map(provider_enum_value)
+            .find(|e| builtin_enums.contains(&e.to_ascii_lowercase()))
+        {
+            Some(enum_value) => Err(CatalogError::Validation(format!(
+                "custom provider '{}' reuses a built-in provider id — choose a unique enum_value",
+                enum_value
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn write_custom_doc(
@@ -570,6 +586,7 @@ impl LlmProviderCatalog {
             providers: providers.len(),
             added,
             skipped,
+            sha256: sha256_hex(&serialized),
         })
     }
 
@@ -823,6 +840,15 @@ pub struct BuiltinRefresh {
     /// Ids of providers new in the download that were skipped because a
     /// custom provider uses the same id.
     pub skipped: Vec<String>,
+    /// SHA-256 of the `llm.json` this refresh wrote, taken while the catalog
+    /// was locked, so a later edit is never recorded as the refresh's catalog.
+    pub sha256: String,
+}
+
+/// Lowercase hex SHA-256 of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Whether the download holds a provider id `stored` does not.
@@ -845,7 +871,8 @@ const REFRESHED_PROVIDER_FIELDS: [&str; 4] = ["models", "endpoints", "endpoint_p
 
 /// The stored provider with [`REFRESHED_PROVIDER_FIELDS`] replaced by the
 /// download's values; a field the download omits is removed. Model `enabled`
-/// switches follow [`carry_model_switches`].
+/// switches follow [`carry_model_switches`], and disabled models follow
+/// [`keep_disabled_models`].
 fn merge_refreshed_provider(
     stored: &Value,
     downloaded: &Value,
@@ -864,9 +891,49 @@ fn merge_refreshed_provider(
         }
         if let Some(models) = fields.get_mut("models") {
             carry_model_switches(stored, models);
+            keep_disabled_models(stored, models);
         }
     }
     merged
+}
+
+/// Append each stored model with `"enabled": false` that the download omits.
+/// The model gate allows a model the catalog does not list, so dropping a
+/// disabled model would make it callable again.
+fn keep_disabled_models(
+    stored: &Value,
+    models: &mut Value,
+) {
+    let Some(models) = models.as_array_mut() else {
+        return;
+    };
+    let kept: Vec<Value> = stored
+        .get("models")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|stored| {
+            stored
+                .get("enabled")
+                .and_then(Value::as_bool)
+                == Some(false)
+        })
+        .filter(|stored| {
+            let value = stored
+                .get("value")
+                .and_then(Value::as_str);
+            value.is_some()
+                && !models.iter().any(|model| {
+                    model
+                        .get("value")
+                        .and_then(Value::as_str)
+                        == value
+                })
+        })
+        .cloned()
+        .collect();
+    models.extend(kept);
 }
 
 /// Give each downloaded model the `enabled` switch of the stored model with the
@@ -1273,6 +1340,11 @@ mod tests {
         models: Value,
     ) -> Value {
         json!({ "enum_value": enum_value, "name": format!("Provider {}", enum_value), "endpoints": [], "models": models })
+    }
+
+    /// SHA-256 of the store's `llm.json` as it is on disk now.
+    fn installed(store: &LlmProviderCatalog) -> String {
+        sha256_hex(&std::fs::read(&store.path).unwrap())
     }
 
     /// A provider listing one model, as a refresh requires of a provider it adds.
@@ -1810,6 +1882,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_custom_rechecks_builtin_ids_under_the_write_lock() {
+        let (store, custom) = store_with_builtin("custom_collision_race");
+        let guard = store.write_lock.lock().await;
+        let save = store.save_custom(json!({ "providers": [provider("acme")] }));
+        tokio::pin!(save);
+        assert!(futures::poll!(&mut save).is_pending(), "save waits for the write lock");
+
+        std::fs::write(&store.path, json!({ "providers": [provider("openai"), provider("ACME")] }).to_string())
+            .unwrap();
+        drop(guard);
+
+        let result = save.await;
+        assert!(matches!(
+            &result,
+            Err(CatalogError::Validation(message)) if message.contains("reuses a built-in provider id")
+        ));
+        assert!(!custom.exists(), "nothing was written");
+    }
+
+    #[tokio::test]
     async fn save_custom_rejects_duplicate_within_custom() {
         let (store, _custom) = store_with_builtin("custom_dup");
         let result = store
@@ -1919,7 +2011,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 3,
                 added: 2,
-                skipped: vec![]
+                skipped: vec![],
+                sha256: installed(&store)
             }
         );
 
@@ -2057,7 +2150,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 2,
                 added: 0,
-                skipped: vec![]
+                skipped: vec![],
+                sha256: installed(&store)
             }
         );
 
@@ -2157,7 +2251,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 2,
                 added: 1,
-                skipped: vec![]
+                skipped: vec![],
+                sha256: installed(&store)
             }
         );
         let added = stored_provider(&store, "acme");
@@ -2246,6 +2341,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refresh_keeps_a_disabled_model_the_download_omits() {
+        let catalog = temp_path("refresh_keeps_disabled_omitted");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let openai = provider_with_models(
+            "openai",
+            json!([
+                { "name": "Off", "value": "off", "enabled": false },
+                { "name": "On", "value": "on" },
+                { "name": "Gone", "value": "gone" }
+            ]),
+        );
+        std::fs::write(&catalog, json!({ "providers": [openai] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [
+                provider_with_models("openai", json!([{ "name": "On", "value": "on" }]))
+            ] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("openai", "off"), Some(false), "an omitted disabled model stays off");
+        assert_eq!(store.model_enabled("openai", "on"), Some(true));
+        assert_eq!(store.model_enabled("openai", "gone"), None, "an omitted enabled model is removed");
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_an_empty_models_array_keeps_disabled_models() {
+        let catalog = temp_path("refresh_keeps_disabled_empty");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let openai = provider_with_models(
+            "openai",
+            json!([
+                { "name": "Off", "value": "off", "enabled": false },
+                { "name": "On", "value": "on" }
+            ]),
+        );
+        std::fs::write(&catalog, json!({ "providers": [openai] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        store
+            .refresh_builtin(json!({ "providers": [provider_with_models("openai", json!([]))] }))
+            .await
+            .unwrap();
+        assert_eq!(store.model_enabled("openai", "off"), Some(false), "a disabled model survives models: []");
+        let openai = store
+            .list_providers()
+            .unwrap()
+            .into_iter()
+            .find(|p| provider_enum_value(p) == Some("openai"))
+            .unwrap();
+        assert_eq!(openai["models"], json!([{ "name": "Off", "value": "off", "enabled": false }]));
+    }
+
+    #[tokio::test]
     async fn refresh_skips_a_new_provider_whose_id_matches_a_custom_provider() {
         let (store, custom) = store_with_builtin("refresh_custom_collision");
         let custom_acme = with_base_url(provider("acme"), "https://custom.example/v1");
@@ -2262,7 +2411,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 1,
                 added: 0,
-                skipped: vec!["ACME".to_string()]
+                skipped: vec!["ACME".to_string()],
+                sha256: installed(&store)
             }
         );
         assert!(
@@ -2325,7 +2475,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 1,
                 added: 0,
-                skipped: vec!["Acme".to_string()]
+                skipped: vec!["Acme".to_string()],
+                sha256: installed(&store)
             }
         );
     }
@@ -2356,7 +2507,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 1,
                 added: 0,
-                skipped: vec![]
+                skipped: vec![],
+                sha256: installed(&store)
             }
         );
     }
@@ -2441,7 +2593,8 @@ mod tests {
             BuiltinRefresh {
                 providers: 1,
                 added: 0,
-                skipped: vec![]
+                skipped: vec![],
+                sha256: installed(&store)
             }
         );
         let openai = stored_provider(&store, "openai");
