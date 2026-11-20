@@ -459,14 +459,12 @@ impl LLMHandler {
         let failover = pipe_config
             .failover
             .iter()
-            .filter(|failover| failover.enabled)
             .flat_map(|failover| failover.targets.iter())
             .enumerate()
             .map(|(idx, target)| (format!("failover target {}", idx + 1), &target.llm));
         let load_balancing = pipe_config
             .load_balancing
             .iter()
-            .filter(|lb| lb.enabled)
             .flat_map(|lb| lb.targets.iter())
             .enumerate()
             .map(|(idx, target)| (format!("load balancing target {}", idx + 1), &target.llm));
@@ -474,7 +472,11 @@ impl LLMHandler {
             .routing_rules
             .iter()
             .enumerate()
-            .filter(|(_, rule)| rule.target.variant.is_none())
+            .filter(|(_, rule)| {
+                rule.target
+                    .variant_alias()
+                    .is_none()
+            })
             .filter_map(|(idx, rule)| {
                 rule.target
                     .llm
@@ -1284,10 +1286,28 @@ mod tests {
                     }),
                 ),
                 (
+                    "failover target 1",
+                    Box::new(|p| {
+                        p.failover = Some(
+                            serde_json::from_value(json!({ "enabled": false, "targets": [{ "llm": target }] }))
+                                .unwrap(),
+                        )
+                    }),
+                ),
+                (
                     "load balancing target 1",
                     Box::new(|p| {
                         p.load_balancing = Some(
                             serde_json::from_value(json!({ "enabled": true, "targets": [{ "llm": target }] })).unwrap(),
+                        )
+                    }),
+                ),
+                (
+                    "load balancing target 1",
+                    Box::new(|p| {
+                        p.load_balancing = Some(
+                            serde_json::from_value(json!({ "enabled": false, "targets": [{ "llm": target }] }))
+                                .unwrap(),
                         )
                     }),
                 ),
@@ -1298,6 +1318,30 @@ mod tests {
                             serde_json::from_value(json!({
                                 "match": { "kind": "header", "name": "x-route", "equals": "acme" },
                                 "target": { "llm": target }
+                            }))
+                            .unwrap(),
+                        ]
+                    }),
+                ),
+                (
+                    "routing rule 1",
+                    Box::new(|p| {
+                        p.routing_rules = vec![
+                            serde_json::from_value(json!({
+                                "match": { "kind": "header", "name": "x-route", "equals": "acme" },
+                                "target": { "variant": "", "llm": target }
+                            }))
+                            .unwrap(),
+                        ]
+                    }),
+                ),
+                (
+                    "routing rule 1",
+                    Box::new(|p| {
+                        p.routing_rules = vec![
+                            serde_json::from_value(json!({
+                                "match": { "kind": "header", "name": "x-route", "equals": "acme" },
+                                "target": { "variant": "  ", "llm": target }
                             }))
                             .unwrap(),
                         ]
@@ -1338,28 +1382,12 @@ mod tests {
         let target = acme_target("acme-2");
         let cases: Vec<(&str, Configure<'_>)> = vec![
             (
-                "disabled failover",
-                Box::new(|p| {
-                    p.failover = Some(
-                        serde_json::from_value(json!({ "enabled": false, "targets": [{ "llm": target }] })).unwrap(),
-                    )
-                }),
-            ),
-            (
-                "disabled load balancing",
-                Box::new(|p| {
-                    p.load_balancing = Some(
-                        serde_json::from_value(json!({ "enabled": false, "targets": [{ "llm": target }] })).unwrap(),
-                    )
-                }),
-            ),
-            (
                 "routing rule that names a variant",
                 Box::new(|p| {
                     p.routing_rules = vec![
                         serde_json::from_value(json!({
                             "match": { "kind": "header", "name": "x-route", "equals": "acme" },
-                            "target": { "variant": "", "llm": target }
+                            "target": { "variant": "strict", "llm": target }
                         }))
                         .unwrap(),
                     ]

@@ -93,7 +93,10 @@ changes:
         administrator saves an added provider with enabled true, a Surface naming a model it does not
         list is refused as well. A Surface save now checks disabled models on failover, load-balancing
         and inline routing targets and on each enabled Variant, not only on the primary model, Judge,
-        Jury and Decider, so a disabled model can no longer be saved as a backup target.
+        Jury and Decider, so a disabled model can no longer be saved as a backup target. Failover and
+        load-balancing targets are checked even when that block is turned off, since per-request
+        routing can still select them, and a routing rule with a blank Variant is checked as the
+        inline target it routes to.
   breaking:
     - timestamp: '2026-11-19T05:41:50.000Z'
       title: Point llm_catalog.refresh_url at a catalog manifest, not a catalog file

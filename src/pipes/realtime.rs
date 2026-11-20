@@ -1541,9 +1541,7 @@ fn select_realtime_variant(pipe: &PipeConfig) -> Option<String> {
         .find_map(|rule| match &rule.match_on {
             crate::pipes::config::RoutingMatch::Modality { has } if has == "realtime" => rule
                 .target
-                .variant
-                .as_ref()
-                .filter(|a| !a.trim().is_empty())
+                .variant_alias()
                 .cloned(),
             _ => None,
         })
