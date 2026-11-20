@@ -572,6 +572,8 @@ impl LlmProviderCatalog {
             CatalogError::Io(format!("failed to back up existing catalog to {}: {}", backup.display(), e))
         })?;
         write_file_atomically(&self.path, &serialized).map_err(|e| {
+            // A failed directory sync leaves the new file in place.
+            self.invalidate_cache();
             CatalogError::Io(format!("failed to write refreshed catalog {}: {}", self.path.display(), e))
         })?;
 
@@ -691,7 +693,11 @@ impl LlmProviderCatalog {
     /// when it exists but is explicitly disabled (`"enabled": false`), and
     /// `None` when the provider or model is not present in the catalog. Callers
     /// treat `None` as "not governed by the catalog" so unlisted custom or
-    /// moderation models stay usable. Provider matching is case-insensitive.
+    /// moderation models stay usable. A provider a refresh added that no
+    /// administrator has enabled yet ([`awaits_approval`]) returns
+    /// `Some(false)` for a model it does not list, so a name the publisher left
+    /// out cannot reach the downloaded base URL. Provider matching is
+    /// case-insensitive.
     pub fn model_enabled(
         &self,
         provider_enum: &str,
@@ -704,16 +710,21 @@ impl LlmProviderCatalog {
                 if !provider_enum_value(provider).is_some_and(|e| e.eq_ignore_ascii_case(provider_enum)) {
                     return None;
                 }
-                provider
+                let listed = provider
                     .get("models")
-                    .and_then(Value::as_array)?
-                    .iter()
-                    .find(|m| {
-                        m.get("value")
-                            .and_then(Value::as_str)
-                            == Some(model)
-                    })
-                    .map(model_is_enabled)
+                    .and_then(Value::as_array)
+                    .and_then(|models| {
+                        models.iter().find(|m| {
+                            m.get("value")
+                                .and_then(Value::as_str)
+                                == Some(model)
+                        })
+                    });
+                match listed {
+                    Some(entry) => Some(model_is_enabled(entry)),
+                    None if awaits_approval(provider) => Some(false),
+                    None => None,
+                }
             })
     }
 
@@ -746,6 +757,7 @@ impl LlmProviderCatalog {
     ) -> Result<Value, CatalogError> {
         let enum_value = validate_provider_document(&provider)?;
         check_base_url(&mut provider, None).await?;
+        keep_approval_marker(&mut provider, None);
         let _guard = self.write_lock.lock().await;
         let mut providers = self.read_doc()?;
         if lowered_enum_values(&providers).contains(&enum_value.to_ascii_lowercase()) {
@@ -782,6 +794,7 @@ impl LlmProviderCatalog {
             .position(|p| provider_enum_value(p) == Some(enum_value))
         {
             Some(idx) => {
+                keep_approval_marker(&mut provider, Some(&providers[idx]));
                 providers[idx] = provider.clone();
                 self.write_doc(&providers)?;
                 Ok(provider)
@@ -991,13 +1004,60 @@ fn carry_model_switches(
     }
 }
 
+/// Set on a provider a refresh added. Until an administrator saves it with
+/// `"enabled": true`, the model gate refuses every model name the provider
+/// does not list ([`LlmProviderCatalog::model_enabled`]). Seeded and
+/// administrator-created providers never carry it, so their unlisted models
+/// (Azure deployments, custom and moderation models) stay usable.
+const AWAITING_APPROVAL_MARKER: &str = "added_by_refresh";
+
+/// Whether `provider` was added by a refresh and no administrator has enabled
+/// it since.
+fn awaits_approval(provider: &Value) -> bool {
+    provider
+        .get(AWAITING_APPROVAL_MARKER)
+        .and_then(Value::as_bool)
+        == Some(true)
+        && provider
+            .get("enabled")
+            .and_then(Value::as_bool)
+            != Some(true)
+}
+
+/// The server, never the request body, decides [`AWAITING_APPROVAL_MARKER`]:
+/// an administrator save keeps it from the stored provider until the body sets
+/// `"enabled": true`, which approves the provider and clears it.
+fn keep_approval_marker(
+    provider: &mut Value,
+    stored: Option<&Value>,
+) {
+    let keep = stored.is_some_and(|stored| {
+        stored
+            .get(AWAITING_APPROVAL_MARKER)
+            .and_then(Value::as_bool)
+            == Some(true)
+    }) && provider
+        .get("enabled")
+        .and_then(Value::as_bool)
+        != Some(true);
+    if let Some(fields) = provider.as_object_mut() {
+        if keep {
+            fields.insert(AWAITING_APPROVAL_MARKER.to_string(), Value::Bool(true));
+        } else {
+            fields.remove(AWAITING_APPROVAL_MARKER);
+        }
+    }
+}
+
 /// Mark a provider the download added as disabled, together with each of its
-/// models, so none of them is offered or callable until an admin enables it.
+/// models, so none of them is offered or callable until an admin enables it,
+/// and mark it awaiting approval so a model name it does not list is refused.
 fn disable_added_provider(provider: &mut Value) {
     let Some(fields) = provider.as_object_mut() else {
         return;
     };
     fields.insert("enabled".to_string(), Value::Bool(false));
+    fields.insert(AWAITING_APPROVAL_MARKER.to_string(), Value::Bool(true));
     if let Some(models) = fields
         .get_mut("models")
         .and_then(Value::as_array_mut)
@@ -1092,7 +1152,10 @@ fn lowered_enum_values(providers: &[Value]) -> HashSet<String> {
 
 /// Replace `path` with `contents` through `<path>.tmp`, flushed to disk before
 /// the rename, so a reader or a crash sees the old file or the new one, never
-/// a partial one. The temporary file is removed on failure.
+/// a partial one, then sync the parent directory so the rename itself is
+/// durable. The temporary file is removed on failure. An error from the
+/// directory sync is returned although `path` already holds `contents`: the
+/// caller must not report the write as durable.
 pub(crate) fn write_file_atomically(
     path: &Path,
     contents: &[u8],
@@ -1113,11 +1176,42 @@ pub(crate) fn write_file_atomically(
         let _ = std::fs::remove_file(&temporary);
     }
     written?;
-    if let Some(parent) = path.parent()
-        && let Ok(directory) = std::fs::File::open(parent)
-    {
-        let _ = directory.sync_all();
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    sync_directory(parent).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("{} was replaced but its directory could not be synced to disk: {e}", path.display()),
+        )
+    })
+}
+
+/// Flush `directory`'s entries to disk, so a rename into it survives a crash.
+/// A file system that does not support syncing a directory (`EINVAL`,
+/// `ENOTSUP`) is skipped with a debug log: there the rename is as durable as
+/// that file system makes it. Every other failure, including failing to open
+/// the directory, is returned.
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    match std::fs::File::open(directory).and_then(|handle| handle.sync_all()) {
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput) => {
+            tracing::debug!(
+                directory = %directory.display(),
+                error = %e,
+                "Directory sync is not supported here; a rename is only as durable as the file system makes it"
+            );
+            Ok(())
+        }
+        result => result,
     }
+}
+
+/// Windows cannot open a directory as a file to sync it, and NTFS journals the
+/// rename itself, so there is nothing to flush here.
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -2299,6 +2393,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_added_provider_refuses_unlisted_models_until_an_administrator_enables_it() {
+        let catalog = temp_path("refresh_added_unlisted");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let mut azure = provider("azure");
+        azure["enabled"] = json!(false);
+        std::fs::write(&catalog, json!({ "providers": [provider("openai"), azure.clone()] }).to_string()).unwrap();
+        let store = LlmProviderCatalog::new(catalog, None).unwrap();
+
+        let mut acme = with_base_url(
+            provider_with_models("acme", json!([{ "name": "One", "value": "acme-1" }])),
+            "https://93.184.216.34/v1",
+        );
+        acme[AWAITING_APPROVAL_MARKER] = json!(false);
+        store
+            .refresh_builtin(json!({ "providers": [provider("openai"), azure, acme] }))
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "acme")[AWAITING_APPROVAL_MARKER], true);
+        assert_eq!(store.model_enabled("acme", "acme-2"), Some(false), "an unlisted model of an added provider");
+        assert_eq!(store.model_enabled("ACME", "acme-2"), Some(false));
+        assert_eq!(store.model_enabled("azure", "my-deployment"), None, "a seeded disabled provider is unchanged");
+        assert_eq!(store.model_enabled("openai", "custom"), None);
+
+        let mut edited = stored_provider(&store, "acme");
+        edited
+            .as_object_mut()
+            .unwrap()
+            .remove(AWAITING_APPROVAL_MARKER);
+        edited["description"] = json!("edited");
+        store
+            .update_provider("acme", edited.clone())
+            .await
+            .unwrap();
+        assert_eq!(stored_provider(&store, "acme")[AWAITING_APPROVAL_MARKER], true, "an edit alone does not approve");
+        assert_eq!(store.model_enabled("acme", "acme-2"), Some(false));
+
+        edited["enabled"] = json!(true);
+        store
+            .update_provider("acme", edited)
+            .await
+            .unwrap();
+        assert!(
+            stored_provider(&store, "acme")
+                .get(AWAITING_APPROVAL_MARKER)
+                .is_none()
+        );
+        assert_eq!(store.model_enabled("acme", "acme-2"), None);
+        assert_eq!(store.model_enabled("acme", "acme-1"), Some(false), "each listed model is still enabled separately");
+    }
+
+    #[tokio::test]
+    async fn an_administrator_cannot_mark_a_provider_awaiting_approval() {
+        let (store, _custom) = store_with_builtin("approval_marker_from_body");
+        let mut openai = provider("openai");
+        openai[AWAITING_APPROVAL_MARKER] = json!(true);
+        store
+            .update_provider("openai", openai)
+            .await
+            .unwrap();
+        assert!(
+            stored_provider(&store, "openai")
+                .get(AWAITING_APPROVAL_MARKER)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn a_refresh_keeps_each_stored_model_switch() {
         let catalog = temp_path("refresh_model_switches");
         std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
@@ -2706,5 +2867,37 @@ mod tests {
                 .join("occupied.tmp")
                 .exists()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_atomically_reports_a_directory_it_cannot_sync() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("record.json");
+        std::fs::write(&path, b"old").unwrap();
+        // Write and search permission let the rename happen; without read
+        // permission the directory cannot be opened to sync it.
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let opened = std::fs::File::open(directory.path()).is_ok();
+        let written = write_file_atomically(&path, b"new");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        if opened {
+            // Running as root: permissions do not stop the open.
+            return;
+        }
+
+        let error = written.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("was replaced but its directory could not be synced"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 }

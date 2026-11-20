@@ -55,7 +55,8 @@ changes:
       description: >-
         llm.json is now written to a temporary file, flushed to disk and renamed into place, and
         llm.json.bak is a copy, so a refresh no longer leaves a moment with no built-in catalog, during
-        which costs were 0 and the model gate was off. The runtime keeps the last catalog it read while
+        which costs were 0 and the model gate was off. A write whose directory cannot be synced to disk
+        fails instead of reporting success. The runtime keeps the last catalog it read while
         llm.json cannot be read. A refresh no longer undoes an administrator edit made while it ran,
         refreshes and rollbacks run one at a time, and base URL checks of added providers no longer
         block other catalog edits.
@@ -88,7 +89,9 @@ changes:
         refresh added while the save was checking its base URL. A refresh also refuses an endpoint path that does not start
         with a single '/', refuses a new provider that lists no models, and adds new providers with each
         model disabled; a later publication cannot turn those models back on, even by omitting them
-        or sending an empty models array, since a disabled model is kept across refreshes.
+        or sending an empty models array, since a disabled model is kept across refreshes. Until an
+        administrator saves an added provider with enabled true, a Surface naming a model it does not
+        list is refused as well.
   breaking:
     - timestamp: '2026-11-19T05:41:50.000Z'
       title: Point llm_catalog.refresh_url at a catalog manifest, not a catalog file

@@ -339,13 +339,24 @@ impl CatalogRefresher {
         state.rolled_back = true;
         save_state(&state_path, &state)?;
 
+        let before_install = installed_sha256(catalog);
         let refresh = match catalog
             .refresh_builtin(doc)
             .await
         {
             Ok(refresh) => refresh,
             Err(e) => {
-                restore_state(&state_path, previous.as_ref());
+                if installed_sha256(catalog) == before_install {
+                    restore_state(&state_path, previous.as_ref());
+                } else {
+                    // `llm.json` was replaced but could not be confirmed durable.
+                    // The pending record stays: it keeps the version_id burnt and,
+                    // marked rolled back, makes the next refresh install again.
+                    tracing::error!(
+                        error = %e,
+                        "Built-in LLM catalog refresh replaced llm.json but could not confirm it on disk; the next refresh installs the publication again"
+                    );
+                }
                 return Err(match e {
                     CatalogError::Validation(message) => validation(message),
                     CatalogError::Conflict(message) => RefreshFailure::new(RefreshFailureKind::Conflict, message),

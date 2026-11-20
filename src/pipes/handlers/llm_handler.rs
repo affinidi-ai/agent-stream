@@ -1146,6 +1146,34 @@ mod tests {
         assert!(LLMHandler::reject_disabled_models(&llm_pipe("custom-model"), &catalog).is_ok());
     }
 
+    #[tokio::test]
+    async fn rejects_an_unlisted_model_of_a_provider_a_refresh_added() {
+        let catalog = temp_catalog("refresh_added_unlisted", json!([{ "value": "on" }]));
+        catalog
+            .refresh_builtin(json!({ "providers": [
+                { "enum_value": "anthropic", "name": "Anthropic", "endpoints": [], "models": [{ "name": "On", "value": "on" }] },
+                {
+                    "enum_value": "acme",
+                    "name": "Acme",
+                    "default_base_url": "https://93.184.216.34/v1",
+                    "endpoints": [],
+                    "models": [{ "name": "One", "value": "acme-1" }]
+                }
+            ] }))
+            .await
+            .unwrap();
+        let mut pipe = llm_pipe("acme-2");
+        if let PipeType::LLM { provider, .. } = &mut pipe.pipe_type
+            && let LLMProvider::OpenAI { provider_type, .. } = provider.as_mut()
+        {
+            *provider_type = "acme".to_string();
+        }
+
+        let err = LLMHandler::reject_disabled_models(&pipe, &catalog).unwrap_err();
+        assert!(err.contains("acme-2") && err.contains("disabled"), "unexpected message: {err}");
+        assert!(LLMHandler::reject_disabled_models(&llm_pipe("custom-model"), &catalog).is_ok());
+    }
+
     #[test]
     fn rejects_disabled_judge_model() {
         let catalog = temp_catalog(

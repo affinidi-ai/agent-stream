@@ -254,9 +254,13 @@ Refresh is on demand only; nothing polls for a new catalog.
      - A provider only in the download is added with `enabled: false`, and
        each of its models too, after its `default_base_url` passes the
        public-address check a new provider gets. Its models stay off across
-       later refreshes until an administrator enables them. One that lists no
-       models is refused, since a provider without listed models accepts any
-       model name.
+       later refreshes until an administrator enables them. It is also marked
+       `added_by_refresh`, and while it carries that marker a Surface naming
+       a model the provider does not list is refused too. Saving the provider
+       with `enabled: true` approves it and clears the marker; from then on an
+       unlisted model is allowed as for any other provider, and each listed
+       model still needs its own `enabled` switch. The server sets the marker,
+       never the request body. One that lists no models is refused.
      - A provider only in the download whose `enum_value` matches any entry
        of `custom_llm.json` (ignoring case, valid or not) is skipped with a
        warning and named in `skipped`. While `custom_llm.json` exists but
