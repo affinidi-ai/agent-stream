@@ -362,12 +362,14 @@ identified by a random token. The client presents it either way:
 
 A token is never read from the query string.
 
-Sessions last `session_timeout_minutes` (default 20) from their last use. Each request that
-passes the session gate, and each `/auth/check`, pushes the expiry out again, and the gate
-re-sends the cookie with a matching `Max-Age`. Sessions are written to
-`[storage_paths] sessions` (default `../_storage/sessions`), so they survive a restart;
-expired sessions are removed at startup and, in SAML and OIDC modes, every 5 minutes on the
-Active instance.
+Sessions last `session_timeout_minutes` (default 20) from their last use, and never longer
+than `session_max_lifetime_minutes` (default and maximum 1440, one day) after sign-in,
+however active they stay. Each request that passes the session gate, and each `/auth/check`,
+pushes the expiry out again up to that limit, and the gate re-sends the cookie with a
+`Max-Age` matching the time left. An open dashboard keeps its session in use, so the
+lifetime limit is what ends it. Sessions are written to `[storage_paths] sessions` (default
+`../_storage/sessions`), so they survive a restart; expired sessions are removed at startup
+and, in SAML and OIDC modes, every 5 minutes on the Active instance.
 
 A session whose user is no longer approved (status `New` or `Disabled`, or removed) is
 refused with `401` on every protected route.
@@ -488,5 +490,6 @@ Every system-settings and user-settings response sends `prometheus_auth_password
 - [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md): Terms acceptance at registration and
   sign-in.
 - [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md): `auth_mode`,
-  `session_timeout_minutes`, `webauthn`, `saml.json`, `oidc.json`, and `[storage_paths]`.
+  `session_timeout_minutes`, `session_max_lifetime_minutes`, `webauthn`, `saml.json`,
+  `oidc.json`, and `[storage_paths]`.
 - [`../CONTEXT.md`](../CONTEXT.md): the glossary.

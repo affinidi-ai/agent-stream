@@ -1,0 +1,17 @@
+branch: fix/session-absolute-lifetime
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-20T00:00:00.000Z'
+      title: End dashboard sessions one day after sign-in, however active they stay
+      description: >-
+        Every session check pushed the expiry forward, and the dashboard WebSocket checks its
+        session every 30 seconds, so an open dashboard stayed signed in indefinitely. Sessions
+        now also end `session_max_lifetime_minutes` after sign-in (default and maximum 1440).
+        The refresh, startup sweep and periodic cleanup all apply the limit, and the refreshed
+        session cookie's Max-Age never runs past it. A value of 0 or above 1440 stops startup
+        with an error.
+  removed: []
+  security: []
+  breaking: []
