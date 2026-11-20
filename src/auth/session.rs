@@ -11,9 +11,11 @@ use crate::storage::filesystem::{
     StorableEntity, StorageBackend, in_memory_storage_with_timeout, loggable_id, rwlock_storage,
 };
 
-/// The longest a dashboard session may last after sign-in, and the default
-/// for `session_max_lifetime_minutes`.
+/// The longest `session_max_lifetime_minutes` may be set to.
 pub const MAX_SESSION_LIFETIME_MINUTES: u64 = 24 * 60;
+
+/// The default for `session_max_lifetime_minutes`.
+pub const DEFAULT_SESSION_LIFETIME_MINUTES: u64 = 12 * 60;
 
 /// Manager for authenticated sessions with filesystem persistence
 pub struct SessionManager {
@@ -115,7 +117,7 @@ impl SessionManager {
         Self {
             storage: in_memory_storage_with_timeout(timeout_minutes),
             timeout_minutes,
-            max_lifetime_minutes: MAX_SESSION_LIFETIME_MINUTES,
+            max_lifetime_minutes: DEFAULT_SESSION_LIFETIME_MINUTES,
             terms_gate_update_lock: RwLock::new(()),
         }
     }
@@ -564,9 +566,20 @@ impl SessionManager {
                 failing,
             }),
             timeout_minutes: 20,
-            max_lifetime_minutes: MAX_SESSION_LIFETIME_MINUTES,
+            max_lifetime_minutes: DEFAULT_SESSION_LIFETIME_MINUTES,
             terms_gate_update_lock: RwLock::new(()),
         }
+    }
+
+    /// Stores `session` as it is, so a test can set its creation and expiry times.
+    pub(crate) async fn store_for_test(
+        &self,
+        session: &Session,
+    ) {
+        self.storage
+            .save(session)
+            .await
+            .unwrap();
     }
 }
 
@@ -829,20 +842,25 @@ mod tests {
     #[tokio::test]
     async fn a_session_never_authenticates_past_its_maximum_lifetime() {
         let mgr = SessionManager::new();
-        let session = stored_session(
-            "long-lived",
-            chrono::Duration::minutes(MAX_SESSION_LIFETIME_MINUTES as i64 + 1),
-            chrono::Duration::minutes(10),
-        );
-        mgr.storage
-            .save(&session)
-            .await
-            .unwrap();
+        let lifetime = chrono::Duration::minutes(DEFAULT_SESSION_LIFETIME_MINUTES as i64);
+        let past = stored_session("long-lived", lifetime + chrono::Duration::minutes(1), chrono::Duration::minutes(10));
+        let inside = stored_session("still-inside", lifetime - chrono::Duration::minutes(1), chrono::Duration::minutes(10));
+        for session in [&past, &inside] {
+            mgr.storage
+                .save(session)
+                .await
+                .unwrap();
+        }
 
         assert!(
             mgr.validate_session_record("long-lived")
                 .await
                 .is_none()
+        );
+        assert!(
+            mgr.validate_session_record("still-inside")
+                .await
+                .is_some()
         );
     }
 
@@ -942,12 +960,11 @@ mod tests {
             .save(&past)
             .await
             .unwrap();
-        let reloaded = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+        mgr.reload_from_storage()
             .await
             .unwrap();
         assert!(
-            !reloaded
-                .sessions()
+            !mgr.sessions()
                 .read()
                 .await
                 .contains_key("past")

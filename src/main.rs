@@ -1114,7 +1114,7 @@ fn build_default_bootstrap(
         metrics_cache_ttl_seconds: 1,
         websocket_require_auth: true,
         session_timeout_minutes: 20,
-        session_max_lifetime_minutes: crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
+        session_max_lifetime_minutes: crate::auth::session::DEFAULT_SESSION_LIFETIME_MINUTES,
         websocket_broadcast_buffer: 500,
         metrics_retention_minutes: 360,
         metrics_cache_ttl_seconds_legacy: 1,
@@ -1154,6 +1154,23 @@ mod bootstrap_generation_tests {
 
         assert_eq!(parsed.server_mode, config.server_mode);
         assert_eq!(parsed.cache_refresh_interval_secs, config.cache_refresh_interval_secs);
+    }
+
+    #[test]
+    fn startup_validation_refuses_a_session_lifetime_out_of_range() {
+        for minutes in [0, 1441] {
+            let mut config = build_default_bootstrap("", "").expect("default bootstrap should be generated");
+            config.session_max_lifetime_minutes = minutes;
+
+            let message = format!(
+                "{:#}",
+                config
+                    .validate()
+                    .expect_err("an out-of-range session lifetime must refuse to start")
+            );
+
+            assert!(message.contains("session_max_lifetime_minutes must be between 1 and 1440"), "{message}");
+        }
     }
 
     #[test]
