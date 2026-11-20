@@ -1,0 +1,11 @@
+branch: fix/saml-multi-valued-attributes
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-20T15:45:20.000Z'
+      title: Map every value of a multi-valued SAML role attribute, highest role wins
+      description: SAML sign-in kept only the first value of each attribute and read only the first attribute statement, so a role mapped from a groups list depended on the order the identity provider sent the groups in. Every value of every attribute statement is now read, each role value is mapped, and the highest mapped role wins, as it does for OIDC role claims. Other attributes, the user ID among them, are still read from the first value in the first attribute statement, so returning users are recognised as before. A person whose groups map to several roles takes the highest of them at their next sign-in.
+  removed: []
+  security: []
+  breaking: []

@@ -88,10 +88,16 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
 - A response that does not validate answers `401`.
 - The first SAML sign-in provisions the user. SAML users are approved at once; the very
   first user on the appliance is the primary `administrator`, and anyone else takes the role
-  `role_mapping` maps their role value to, or `user` when it has no entry. Every later
-  sign-in sets the username, email, name, department and job title again from the identity
-  provider, and the role too for everyone but the primary administrator, who stays
-  `administrator`. See [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
+  `role_mapping` maps their role value to, or `user` when it has no entry. Every value of a
+  multi-valued role attribute, such as a groups list, is checked across all attribute
+  statements, and the highest mapped role wins whatever the order. An identity provider
+  that caps the groups it sends (Microsoft Entra ID past 150) sends no group values at all
+  for a person over the cap, so that person gets `user`; map app roles or a filtered groups
+  claim instead. Other attributes, the user ID among them, use the first value in the first
+  attribute statement. Every later sign-in sets the username, email, name, department and
+  job title again from the identity provider, and the role too for everyone but the primary
+  administrator, who stays `administrator`. See
+  [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
 - When provisioning a new user would pass the appliance user limit, the ACS answers `403`
   with a readable page instead of opening a session.
 - A user who is not approved (for example an administrator disabled or deleted them) is

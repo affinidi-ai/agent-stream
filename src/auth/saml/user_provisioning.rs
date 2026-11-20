@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::auth_config::SamlConfig;
 use crate::auth::saml::graph_api::GraphApiClient;
+use crate::auth::saml::service::SamlAttributes;
 use crate::auth::storage::{PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
 
@@ -26,64 +26,31 @@ pub struct UsernameTaken;
 /// is held too is the sign-in refused with [`UsernameTaken`].
 pub async fn provision_user_from_saml(
     storage: &PasskeyStorage,
-    attributes: &HashMap<String, String>,
+    attributes: &SamlAttributes,
     config: &SamlConfig,
     avatars_storage_path: &str,
 ) -> Result<UserData> {
-    // Extract user attributes using configured mappings
-    let user_id_attr = attributes
-        .get(
-            &config
-                .attribute_mapping
-                .user_id,
-        )
-        .or_else(|| attributes.get("NameID"))
+    let mapping = &config.attribute_mapping;
+    let get = |name: &str| {
+        attributes
+            .identity
+            .get(name)
+            .map(String::as_str)
+    };
+
+    let user_id_attr = get(&mapping.user_id)
+        .or_else(|| get("NameID"))
         .context("User ID not found in SAML attributes")?;
 
-    let username = attributes
-        .get(
-            &config
-                .attribute_mapping
-                .username,
-        )
-        .or_else(|| attributes.get(&config.attribute_mapping.email))
+    let username = get(&mapping.username)
+        .or_else(|| get(&mapping.email))
         .context("Username not found in SAML attributes")?;
 
-    let email = attributes
-        .get(&config.attribute_mapping.email)
-        .map(|s| s.to_string());
-
-    let first_name = attributes
-        .get(
-            &config
-                .attribute_mapping
-                .first_name,
-        )
-        .map(|s| s.to_string());
-
-    let last_name = attributes
-        .get(
-            &config
-                .attribute_mapping
-                .last_name,
-        )
-        .map(|s| s.to_string());
-
-    let department = attributes
-        .get(
-            &config
-                .attribute_mapping
-                .department,
-        )
-        .map(|s| s.to_string());
-
-    let job_title = attributes
-        .get(
-            &config
-                .attribute_mapping
-                .job_title,
-        )
-        .map(|s| s.to_string());
+    let email = get(&mapping.email).map(str::to_string);
+    let first_name = get(&mapping.first_name).map(str::to_string);
+    let last_name = get(&mapping.last_name).map(str::to_string);
+    let department = get(&mapping.department).map(str::to_string);
+    let job_title = get(&mapping.job_title).map(str::to_string);
 
     // Determine role from SAML attributes
     let role = determine_role(attributes, config);
@@ -101,8 +68,8 @@ pub async fn provision_user_from_saml(
         if user.status != UserStatus::Approved {
             return Err(anyhow::Error::new(UserNotApproved));
         }
-        let username = if user.username == *username {
-            username.clone()
+        let username = if user.username == username {
+            username.to_string()
         } else {
             resolve_username(storage, username, user_id_attr, Some(&user.user_id)).await?
         };
@@ -168,7 +135,7 @@ pub async fn provision_user_from_saml(
             job_title,
             avatar_path: None,
             last_logged_in: Some(now),
-            saml_id: Some(user_id_attr.clone()),
+            saml_id: Some(user_id_attr.to_string()),
             oidc: None,
             deleted_at: None,
         };
@@ -239,25 +206,28 @@ async fn resolve_username(
 /// The role a value without a `role_mapping` entry was granted by name before
 /// only explicit entries granted roles, so an operator upgrading can see which
 /// entry to add. Grants nothing itself.
-fn name_once_granting_a_role(saml_role: &str) -> Option<&'static str> {
+fn name_once_granting_a_role(saml_role: &str) -> Option<UserRole> {
     match saml_role
         .to_lowercase()
         .as_str()
     {
-        "administrator" | "admin" => Some("administrator"),
-        "poweruser" | "power_user" | "power-user" => Some("poweruser"),
+        "administrator" | "admin" => Some(UserRole::Administrator),
+        "poweruser" | "power_user" | "power-user" => Some(UserRole::PowerUser),
         _ => None,
     }
 }
 
-/// Determine user role from SAML attributes and role mapping. Only an explicit
-/// `role_mapping` entry grants a role, matched against the identity provider's
-/// value exactly: an unmapped value, whatever its name or case, is `User`, so
-/// an identity provider cannot grant administrator by naming a role `admin`.
+/// Determine user role from SAML attributes and role mapping: the highest role
+/// any value of the role attribute maps to, so the order the identity provider
+/// sends the values in does not matter. Only an explicit `role_mapping` entry
+/// grants a role, matched against the identity provider's value exactly: an
+/// unmapped value, whatever its name or case, is `User`, so an identity
+/// provider cannot grant administrator by naming a role `admin`.
 fn determine_role(
-    attributes: &HashMap<String, String>,
+    attributes: &SamlAttributes,
     config: &SamlConfig,
 ) -> UserRole {
+    let attributes = &attributes.values;
     let role_attr = &config.attribute_mapping.role;
     info!(
         "determine_role: role attribute key='{}', role_mapping keys={:?}, available SAML attributes={:?}",
@@ -271,50 +241,84 @@ fn determine_role(
             .collect::<Vec<_>>()
     );
 
-    // Get role attribute value
-    if let Some(saml_role) = attributes.get(role_attr) {
-        info!("determine_role: SAML role value received = '{}'", saml_role);
-
-        // Check role mapping
-        if let Some(mapped_role) = config
-            .role_mapping
-            .get(saml_role)
-        {
-            let resolved = match mapped_role
-                .to_lowercase()
-                .as_str()
-            {
-                "administrator" => UserRole::Administrator,
-                "poweruser" => UserRole::PowerUser,
-                "user" => UserRole::User,
-                _ => {
-                    warn!(
-                        "determine_role: role_mapping maps '{}' to unknown role '{}'; expected administrator, poweruser or user",
-                        saml_role, mapped_role
-                    );
-                    UserRole::User
-                }
-            };
-            info!(
-                "determine_role: matched explicit role_mapping '{}' -> '{}' -> {:?}",
-                saml_role, mapped_role, resolved
-            );
-            return resolved;
-        }
-
-        match name_once_granting_a_role(saml_role) {
-            Some(role) => warn!(
-                "determine_role: no role_mapping entry for '{}', defaulting to User; earlier versions granted {} for this name, so add \"{}\": \"{}\" to role_mapping to keep it",
-                saml_role, role, saml_role, role
-            ),
-            None => info!("determine_role: no role_mapping entry for '{}', defaulting to User", saml_role),
-        }
+    let Some(saml_roles) = attributes.get(role_attr) else {
+        info!("determine_role: role attribute '{}' not present in SAML attributes, defaulting to User", role_attr);
         return UserRole::User;
+    };
+
+    let resolved = saml_roles
+        .iter()
+        .map(|saml_role| role_for_value(saml_role, config))
+        .max_by_key(UserRole::rank)
+        .unwrap_or(UserRole::User);
+
+    for (saml_role, role) in legacy_role_hints(saml_roles, config, &resolved) {
+        warn!(
+            "determine_role: no role_mapping entry for '{}'; earlier versions granted {} for this name, so add \"{}\": \"{}\" to role_mapping to keep it",
+            saml_role, role, saml_role, role
+        );
     }
 
-    info!("determine_role: role attribute '{}' not present in SAML attributes, defaulting to User", role_attr);
-    // Default to User role
-    UserRole::User
+    info!("determine_role: {} SAML role values resolve to {:?}", saml_roles.len(), resolved);
+    resolved
+}
+
+/// The unmapped role values whose name earlier versions granted a role higher
+/// than `resolved`, each once with that role, so the operator can be told
+/// which `role_mapping` entry to add.
+fn legacy_role_hints<'a>(
+    saml_roles: &'a [String],
+    config: &SamlConfig,
+    resolved: &UserRole,
+) -> Vec<(&'a str, UserRole)> {
+    let mut seen = std::collections::HashSet::new();
+    saml_roles
+        .iter()
+        .filter(|saml_role| seen.insert(saml_role.as_str()))
+        .filter(|saml_role| {
+            !config
+                .role_mapping
+                .contains_key(saml_role.as_str())
+        })
+        .filter_map(|saml_role| {
+            name_once_granting_a_role(saml_role)
+                .filter(|role| role.rank() > resolved.rank())
+                .map(|role| (saml_role.as_str(), role))
+        })
+        .collect()
+}
+
+/// The role one value of the role attribute maps to, or `User` when
+/// `role_mapping` has no entry for it.
+fn role_for_value(
+    saml_role: &str,
+    config: &SamlConfig,
+) -> UserRole {
+    let Some(mapped_role) = config
+        .role_mapping
+        .get(saml_role)
+    else {
+        debug!("determine_role: no role_mapping entry for '{}'", saml_role);
+        return UserRole::User;
+    };
+
+    let resolved = match mapped_role
+        .to_lowercase()
+        .as_str()
+    {
+        "administrator" => UserRole::Administrator,
+        "poweruser" => UserRole::PowerUser,
+        "user" => UserRole::User,
+        _ => {
+            warn!(
+                "determine_role: role_mapping maps '{}' to unknown role '{}'; expected administrator, poweruser or user",
+                saml_role, mapped_role
+            );
+            UserRole::User
+        }
+    };
+    debug!("determine_role: matched explicit role_mapping '{}' -> '{}' -> {:?}", saml_role, mapped_role, resolved);
+    resolved
 }
 
 /// Fetch avatar from Microsoft Graph API and save to disk
@@ -358,6 +362,7 @@ async fn fetch_and_save_avatar(
 mod tests {
     use super::*;
     use crate::auth::auth_config::SamlAttributeMapping;
+    use std::collections::HashMap;
 
     fn config() -> SamlConfig {
         SamlConfig {
@@ -381,20 +386,30 @@ mod tests {
         }
     }
 
-    fn attributes(id: &str) -> HashMap<String, String> {
-        HashMap::from([("id".to_string(), id.to_string()), ("username".to_string(), id.to_string())])
+    fn attributes(id: &str) -> SamlAttributes {
+        attributes_named(id, id)
     }
 
     fn attributes_with_role(
         id: &str,
         role: &str,
-    ) -> HashMap<String, String> {
+    ) -> SamlAttributes {
+        attributes_with_roles(id, &[role])
+    }
+
+    fn attributes_with_roles(
+        id: &str,
+        roles: &[&str],
+    ) -> SamlAttributes {
         let mut attributes = attributes(id);
-        attributes.insert(
+        attributes.values.insert(
             config()
                 .attribute_mapping
                 .role,
-            role.to_string(),
+            roles
+                .iter()
+                .map(|role| role.to_string())
+                .collect(),
         );
         attributes
     }
@@ -435,16 +450,68 @@ mod tests {
     #[test]
     fn an_old_fallback_name_is_recognised_so_the_operator_is_warned() {
         for (value, role) in [
-            ("admin", Some("administrator")),
-            ("ADMINISTRATOR", Some("administrator")),
-            ("PowerUser", Some("poweruser")),
-            ("power_user", Some("poweruser")),
-            ("power-user", Some("poweruser")),
+            ("admin", Some(UserRole::Administrator)),
+            ("ADMINISTRATOR", Some(UserRole::Administrator)),
+            ("PowerUser", Some(UserRole::PowerUser)),
+            ("power_user", Some(UserRole::PowerUser)),
+            ("power-user", Some(UserRole::PowerUser)),
             ("staff", None),
             ("admins", None),
         ] {
             assert_eq!(name_once_granting_a_role(value), role, "{value}");
         }
+    }
+
+    #[test]
+    fn an_old_fallback_name_is_hinted_only_when_it_would_have_granted_more() {
+        let roles = |values: &[&str]| -> Vec<String> {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect()
+        };
+        let unmapped = config_mapping(&[]);
+        let admin_roles = roles(&["admin"]);
+        assert_eq!(
+            legacy_role_hints(&admin_roles, &unmapped, &UserRole::User),
+            vec![("admin", UserRole::Administrator)]
+        );
+
+        let ops_mapped = config_mapping(&[("ops", "poweruser")]);
+        let admin_and_ops = roles(&["admin", "ops"]);
+        assert_eq!(
+            legacy_role_hints(&admin_and_ops, &ops_mapped, &UserRole::PowerUser),
+            vec![("admin", UserRole::Administrator)]
+        );
+
+        let admins_mapped = config_mapping(&[("admins", "administrator")]);
+        let poweruser_and_admins = roles(&["poweruser", "admins"]);
+        assert_eq!(
+            legacy_role_hints(&poweruser_and_admins, &admins_mapped, &UserRole::Administrator),
+            Vec::<(&str, UserRole)>::new()
+        );
+
+        let admin_mapped = config_mapping(&[("admin", "administrator")]);
+        assert_eq!(
+            legacy_role_hints(&admin_roles, &admin_mapped, &UserRole::Administrator),
+            Vec::<(&str, UserRole)>::new()
+        );
+
+        let admin_and_admins = roles(&["admin", "admins"]);
+        assert_eq!(
+            legacy_role_hints(&admin_and_admins, &admins_mapped, &UserRole::Administrator),
+            Vec::<(&str, UserRole)>::new(),
+            "a name granting the role already resolved is not hinted"
+        );
+        assert_eq!(
+            legacy_role_hints(&roles(&["poweruser"]), &unmapped, &UserRole::PowerUser),
+            Vec::<(&str, UserRole)>::new()
+        );
+        assert_eq!(
+            legacy_role_hints(&roles(&["admin", "admin"]), &unmapped, &UserRole::User),
+            vec![("admin", UserRole::Administrator)],
+            "a repeated value is hinted once"
+        );
     }
 
     #[test]
@@ -477,6 +544,103 @@ mod tests {
         let config = config_mapping(&[("admin", "root")]);
         assert_eq!(determine_role(&attributes_with_role("alice", "admin"), &config), UserRole::User);
         assert_eq!(determine_role(&attributes("alice"), &config), UserRole::User);
+    }
+
+    #[test]
+    fn the_highest_mapped_role_among_several_values_wins_whatever_the_order() {
+        let config = config_mapping(&[("admins", "administrator"), ("ops", "poweruser"), ("staff", "user")]);
+        for roles in [["staff", "admins"], ["admins", "staff"]] {
+            assert_eq!(
+                determine_role(&attributes_with_roles("alice", &roles), &config),
+                UserRole::Administrator,
+                "{roles:?}"
+            );
+        }
+        for roles in [["staff", "ops"], ["ops", "staff"]] {
+            assert_eq!(
+                determine_role(&attributes_with_roles("alice", &roles), &config),
+                UserRole::PowerUser,
+                "{roles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmapped_values_beside_a_mapped_one_do_not_lower_or_raise_it() {
+        let config = config_mapping(&[("ops", "poweruser")]);
+        assert_eq!(
+            determine_role(&attributes_with_roles("alice", &["admin", "ops", "other"]), &config),
+            UserRole::PowerUser
+        );
+        assert_eq!(determine_role(&attributes_with_roles("alice", &["admin", "other"]), &config), UserRole::User);
+        assert_eq!(determine_role(&attributes_with_roles("alice", &[]), &config), UserRole::User);
+    }
+
+    #[tokio::test]
+    async fn a_returning_user_with_several_role_values_gets_the_highest_whatever_the_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let config = config_mapping(&[("admins", "administrator"), ("staff", "user")]);
+        provision_user_from_saml(&storage, &attributes("primary"), &config, "")
+            .await
+            .unwrap();
+
+        for roles in [["staff", "admins"], ["admins", "staff"]] {
+            let bob = provision_user_from_saml(&storage, &attributes_with_roles("bob", &roles), &config, "")
+                .await
+                .unwrap();
+            assert_eq!(bob.role, UserRole::Administrator, "{roles:?}");
+            assert_eq!(bob.saml_id.as_deref(), Some("bob"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_user_id_falls_back_to_the_name_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let attributes = SamlAttributes {
+            identity: HashMap::from([
+                ("NameID".to_string(), "name-id-7".to_string()),
+                ("username".to_string(), "carol".to_string()),
+            ]),
+            values: HashMap::new(),
+        };
+
+        let first = provision_user_from_saml(&storage, &attributes, &config(), "")
+            .await
+            .unwrap();
+        assert_eq!(first.saml_id.as_deref(), Some("name-id-7"));
+
+        let again = provision_user_from_saml(&storage, &attributes, &config(), "")
+            .await
+            .unwrap();
+        assert_eq!(again.user_id, first.user_id, "the same NameID signs in as the same user");
+    }
+
+    #[tokio::test]
+    async fn an_assertion_with_neither_a_user_id_nor_a_name_id_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let attributes = SamlAttributes {
+            identity: HashMap::from([("username".to_string(), "dave".to_string())]),
+            values: HashMap::from([("id".to_string(), vec!["later-statement-id".to_string()])]),
+        };
+
+        let refused = provision_user_from_saml(&storage, &attributes, &config(), "").await;
+        assert_eq!(
+            refused
+                .unwrap_err()
+                .to_string(),
+            "User ID not found in SAML attributes"
+        );
+        assert!(
+            storage
+                .list_users()
+                .await
+                .unwrap()
+                .is_empty(),
+            "no user is created"
+        );
     }
 
     #[tokio::test]
@@ -515,8 +679,14 @@ mod tests {
     fn attributes_named(
         id: &str,
         username: &str,
-    ) -> HashMap<String, String> {
-        HashMap::from([("id".to_string(), id.to_string()), ("username".to_string(), username.to_string())])
+    ) -> SamlAttributes {
+        SamlAttributes {
+            identity: HashMap::from([
+                ("id".to_string(), id.to_string()),
+                ("username".to_string(), username.to_string()),
+            ]),
+            values: HashMap::new(),
+        }
     }
 
     #[tokio::test]
