@@ -200,6 +200,21 @@ impl SessionManager {
         session.created_at + chrono::Duration::minutes(self.max_lifetime_minutes as i64)
     }
 
+    /// The `Max-Age` for a session cookie re-sent at `now`: the idle timeout,
+    /// cut short by the end of the session's lifetime. It reads only
+    /// `created_at`, so a copy of `session` taken earlier gives the same answer.
+    pub fn cookie_max_age_seconds(
+        &self,
+        session: &Session,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> u64 {
+        let lifetime_left = (self.lifetime_end(session) - now)
+            .num_seconds()
+            .max(0) as u64;
+        self.timeout_seconds()
+            .min(lifetime_left)
+    }
+
     /// Whether `session` has ended at `now`: idle past its expiry, or past its
     /// maximum lifetime. Both are checked because a stored `expires_at` may
     /// predate the lifetime limit.
@@ -905,6 +920,32 @@ mod tests {
 
         assert!(refreshed.expires_at >= before + chrono::Duration::minutes(20));
         assert!(refreshed.expires_at < session.created_at + chrono::Duration::minutes(60));
+    }
+
+    #[tokio::test]
+    async fn cookie_max_age_is_the_timeout_even_after_the_expiry_snapshot_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let snapshot = stored_session("slow-request", chrono::Duration::minutes(5), -chrono::Duration::minutes(1));
+
+        assert_eq!(mgr.cookie_max_age_seconds(&snapshot, chrono::Utc::now()), 1200);
+    }
+
+    #[tokio::test]
+    async fn cookie_max_age_ends_with_the_session_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let near_the_end = stored_session("near-the-end", chrono::Duration::minutes(50), chrono::Duration::minutes(5));
+        let past_the_end = stored_session("past-the-end", chrono::Duration::minutes(61), chrono::Duration::minutes(5));
+        let now = chrono::Utc::now();
+
+        let max_age = mgr.cookie_max_age_seconds(&near_the_end, now);
+        assert!((599..=600).contains(&max_age), "Max-Age {max_age} must end with the lifetime");
+        assert_eq!(mgr.cookie_max_age_seconds(&past_the_end, now), 0);
     }
 
     #[tokio::test]
