@@ -264,15 +264,17 @@ fn determine_role(
 }
 
 /// The unmapped role values whose name earlier versions granted a role higher
-/// than `resolved`, each with that role, so the operator can be told which
-/// `role_mapping` entry to add.
+/// than `resolved`, each once with that role, so the operator can be told
+/// which `role_mapping` entry to add.
 fn legacy_role_hints<'a>(
     saml_roles: &'a [String],
     config: &SamlConfig,
     resolved: &UserRole,
 ) -> Vec<(&'a str, UserRole)> {
+    let mut seen = std::collections::HashSet::new();
     saml_roles
         .iter()
+        .filter(|saml_role| seen.insert(saml_role.as_str()))
         .filter(|saml_role| {
             !config
                 .role_mapping
@@ -505,6 +507,11 @@ mod tests {
             legacy_role_hints(&roles(&["poweruser"]), &unmapped, &UserRole::PowerUser),
             Vec::<(&str, UserRole)>::new()
         );
+        assert_eq!(
+            legacy_role_hints(&roles(&["admin", "admin"]), &unmapped, &UserRole::User),
+            vec![("admin", UserRole::Administrator)],
+            "a repeated value is hinted once"
+        );
     }
 
     #[test]
@@ -620,7 +627,12 @@ mod tests {
         };
 
         let refused = provision_user_from_saml(&storage, &attributes, &config(), "").await;
-        assert!(refused.is_err());
+        assert_eq!(
+            refused
+                .unwrap_err()
+                .to_string(),
+            "User ID not found in SAML attributes"
+        );
         assert!(
             storage
                 .list_users()
