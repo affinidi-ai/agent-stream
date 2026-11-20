@@ -10,6 +10,17 @@ pub enum UserRole {
     User,
 }
 
+impl UserRole {
+    /// Orders roles by the access they grant, so the highest of several can be chosen.
+    pub fn rank(&self) -> u8 {
+        match self {
+            UserRole::User => 0,
+            UserRole::PowerUser => 1,
+            UserRole::Administrator => 2,
+        }
+    }
+}
+
 impl std::fmt::Display for UserRole {
     fn fmt(
         &self,

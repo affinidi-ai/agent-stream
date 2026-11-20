@@ -48,14 +48,6 @@ pub fn unmet_required_claim<'a>(
         .map(|(claim, _)| claim.as_str())
 }
 
-fn rank(role: &UserRole) -> u8 {
-    match role {
-        UserRole::User => 0,
-        UserRole::PowerUser => 1,
-        UserRole::Administrator => 2,
-    }
-}
-
 /// The role the token's values of `mapping.claim` grant: the highest role any
 /// value maps to, or `mapping.unmapped` when none maps. `None` means the
 /// account gets no access.
@@ -66,7 +58,7 @@ pub fn mapped_role(
     claim_values(claims, &mapping.claim)
         .into_iter()
         .filter_map(|value| role_for_value(value, mapping))
-        .max_by_key(rank)
+        .max_by_key(UserRole::rank)
         .or_else(|| mapping.unmapped.clone())
 }
 
@@ -89,7 +81,7 @@ fn role_for_value(
         .iter()
         .filter(|(matcher, _)| matches!(matcher, ValueMatcher::Regex(_)) && matcher.matches_str(value))
         .map(|(_, role)| role.clone())
-        .max_by_key(rank)
+        .max_by_key(UserRole::rank)
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use openssl::pkey::PKey;
 use openssl::x509::X509;
 use samael::crypto::{CertificateDer, Crypto, CryptoProvider};
-use samael::schema::{Assertion, Conditions, Response};
+use samael::schema::{Assertion, AttributeStatement, Conditions, Response};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::OnceLock;
@@ -475,33 +475,8 @@ impl SamlService {
     pub fn extract_attributes(
         &self,
         assertion: &Assertion,
-    ) -> Result<HashMap<String, String>> {
-        let mut attributes = HashMap::new();
-
-        // attribute_statements is Option<Vec<AttributeStatement>>
-        if let Some(statements) = &assertion.attribute_statements
-            && let Some(attribute_statement) = statements.first()
-        {
-            for attr in &attribute_statement.attributes {
-                // Use 'values' instead of 'attribute_values' per samael API
-                if let Some(attr_value) = attr.values.first() {
-                    // AttributeValue has a 'value: Option<String>' field
-                    // attr.name is also Option<String>
-                    if let (Some(name), Some(text)) = (&attr.name, &attr_value.value) {
-                        attributes.insert(name.clone(), text.clone());
-                    }
-                }
-            }
-        }
-
-        // Also extract NameID if present
-        if let Some(subject) = &assertion.subject
-            && let Some(name_id) = &subject.name_id
-        {
-            attributes.insert("NameID".to_string(), name_id.value.clone());
-        }
-
-        Ok(attributes)
+    ) -> Result<SamlAttributes> {
+        Ok(assertion_attributes(assertion))
     }
 
     /// Get configuration
@@ -908,10 +883,244 @@ fn extract_cert_b64s(xml: &str) -> Vec<String> {
     out
 }
 
+/// The attributes of an assertion, read two ways.
+#[derive(Debug, Default)]
+pub struct SamlAttributes {
+    /// One value per attribute from the first attribute statement, read as
+    /// earlier versions did, so the user ID a returning person is recognised
+    /// by does not change.
+    pub identity: HashMap<String, String>,
+    /// Every value of every attribute statement, for the role attribute.
+    pub values: HashMap<String, Vec<String>>,
+}
+
+/// The attributes of an assertion, with the subject's `NameID` among the
+/// identity values only.
+fn assertion_attributes(assertion: &Assertion) -> SamlAttributes {
+    let statements = assertion
+        .attribute_statements
+        .as_deref()
+        .unwrap_or_default();
+    let mut identity = first_statement_values(statements);
+
+    if let Some(subject) = &assertion.subject
+        && let Some(name_id) = &subject.name_id
+    {
+        identity.insert("NameID".to_string(), name_id.value.clone());
+    }
+
+    SamlAttributes {
+        identity,
+        values: attribute_values(statements),
+    }
+}
+
+/// The first value of each attribute in the first attribute statement. An
+/// attribute with no first value is left out, and a name repeated in the
+/// statement takes its last occurrence.
+fn first_statement_values(statements: &[AttributeStatement]) -> HashMap<String, String> {
+    statements
+        .first()
+        .into_iter()
+        .flat_map(|statement| &statement.attributes)
+        .filter_map(|attr| {
+            Some((
+                attr.name.clone()?,
+                attr.values
+                    .first()?
+                    .value
+                    .clone()?,
+            ))
+        })
+        .collect()
+}
+
+/// The values of each named attribute across all attribute statements, in
+/// document order. An attribute named in several statements keeps all of them.
+fn attribute_values(statements: &[AttributeStatement]) -> HashMap<String, Vec<String>> {
+    let mut attributes: HashMap<String, Vec<String>> = HashMap::new();
+    for attr in statements
+        .iter()
+        .flat_map(|statement| &statement.attributes)
+    {
+        let Some(name) = &attr.name else { continue };
+        attributes
+            .entry(name.clone())
+            .or_default()
+            .extend(
+                attr.values
+                    .iter()
+                    .filter_map(|value| value.value.clone()),
+            );
+    }
+    attributes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use samael::schema::{AudienceRestriction, Status, StatusCode, SubjectConfirmation, SubjectConfirmationData};
+    use samael::attribute::{Attribute, AttributeValue};
+    use samael::schema::{
+        AudienceRestriction, Issuer, Status, StatusCode, Subject, SubjectConfirmation, SubjectConfirmationData,
+        SubjectNameID,
+    };
+
+    fn statement(attributes: &[(&str, &[&str])]) -> AttributeStatement {
+        AttributeStatement {
+            attributes: attributes
+                .iter()
+                .map(|(name, values)| Attribute {
+                    friendly_name: None,
+                    name: Some(name.to_string()),
+                    name_format: None,
+                    values: values
+                        .iter()
+                        .map(|value| AttributeValue {
+                            attribute_type: None,
+                            value: Some(value.to_string()),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn every_value_of_a_multi_valued_attribute_is_kept_in_order() {
+        let attributes = attribute_values(&[statement(&[("groups", &["staff", "admins"]), ("email", &["a@x.test"])])]);
+        assert_eq!(attributes["groups"], vec!["staff", "admins"]);
+        assert_eq!(attributes["email"], vec!["a@x.test"]);
+    }
+
+    #[test]
+    fn attributes_in_later_statements_are_kept_and_merged_by_name() {
+        let attributes = attribute_values(&[
+            statement(&[("groups", &["staff"])]),
+            statement(&[("groups", &["admins"]), ("department", &["ops"])]),
+        ]);
+        assert_eq!(attributes["groups"], vec!["staff", "admins"]);
+        assert_eq!(attributes["department"], vec!["ops"]);
+    }
+
+    #[test]
+    fn no_statements_give_no_attributes() {
+        assert!(attribute_values(&[]).is_empty());
+        assert!(first_statement_values(&[]).is_empty());
+    }
+
+    fn statement_with_empty_value(
+        name: &str,
+        then: &str,
+    ) -> AttributeStatement {
+        let mut statement = statement(&[(name, &[then])]);
+        statement.attributes[0]
+            .values
+            .insert(
+                0,
+                AttributeValue {
+                    attribute_type: None,
+                    value: None,
+                },
+            );
+        statement
+    }
+
+    #[test]
+    fn an_empty_value_is_dropped_from_the_values() {
+        let attributes = attribute_values(&[statement_with_empty_value("groups", "admins")]);
+        assert_eq!(attributes["groups"], vec!["admins"]);
+    }
+
+    #[test]
+    fn identity_values_come_from_the_first_statement_only() {
+        let identity = first_statement_values(&[
+            statement(&[("id", &["first-id", "second-id"])]),
+            statement(&[("id", &["later-id"]), ("email", &["a@x.test"])]),
+        ]);
+        assert_eq!(
+            identity
+                .get("id")
+                .map(String::as_str),
+            Some("first-id")
+        );
+        assert_eq!(identity.get("email"), None, "an attribute only in a later statement is not an identity value");
+    }
+
+    #[test]
+    fn an_identity_attribute_with_an_empty_first_value_is_absent() {
+        let identity = first_statement_values(&[statement_with_empty_value("id", "next-id")]);
+        assert_eq!(identity.get("id"), None);
+    }
+
+    fn assertion(
+        name_id: Option<&str>,
+        statements: Vec<AttributeStatement>,
+    ) -> Assertion {
+        Assertion {
+            id: "assertion-1".to_string(),
+            issue_instant: Utc::now(),
+            version: "2.0".to_string(),
+            issuer: Issuer {
+                name_qualifier: None,
+                sp_name_qualifier: None,
+                format: None,
+                sp_provided_id: None,
+                value: Some("https://idp.example".to_string()),
+            },
+            signature: None,
+            subject: name_id.map(|value| Subject {
+                name_id: Some(SubjectNameID {
+                    format: None,
+                    value: value.to_string(),
+                }),
+                subject_confirmations: None,
+            }),
+            conditions: None,
+            authn_statements: None,
+            attribute_statements: Some(statements),
+        }
+    }
+
+    #[test]
+    fn the_name_id_is_an_identity_value_and_never_a_role_value() {
+        let attributes = assertion_attributes(&assertion(
+            Some("name-id-1"),
+            vec![
+                statement(&[("groups", &["staff"])]),
+                statement(&[("id", &["later-id"]), ("groups", &["admins"])]),
+            ],
+        ));
+        assert_eq!(
+            attributes
+                .identity
+                .get("NameID")
+                .map(String::as_str),
+            Some("name-id-1")
+        );
+        assert_eq!(attributes.identity.get("id"), None, "a user ID only in a later statement is not an identity value");
+        assert!(!attributes.values.contains_key("NameID"));
+        assert_eq!(attributes.values["groups"], vec!["staff", "admins"]);
+    }
+
+    #[test]
+    fn an_assertion_without_a_subject_or_statements_gives_no_attributes() {
+        let mut bare = assertion(None, Vec::new());
+        bare.attribute_statements = None;
+        let attributes = assertion_attributes(&bare);
+        assert!(attributes.identity.is_empty());
+        assert!(attributes.values.is_empty());
+    }
+
+    #[test]
+    fn a_name_repeated_in_the_first_statement_takes_its_last_occurrence() {
+        let identity = first_statement_values(&[statement(&[("id", &["one"]), ("id", &["two"])])]);
+        assert_eq!(
+            identity
+                .get("id")
+                .map(String::as_str),
+            Some("two")
+        );
+    }
 
     const BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
 
