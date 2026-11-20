@@ -363,7 +363,7 @@ identified by a random token. The client presents it either way:
 A token is never read from the query string.
 
 Sessions last `session_timeout_minutes` (default 20) from their last use, and never longer
-than `session_max_lifetime_minutes` (default and maximum 1440, one day) after sign-in,
+than `session_max_lifetime_minutes` (default 720, twelve hours; at most 1440) after sign-in,
 however active they stay. Each request that passes the session gate, and each `/auth/check`,
 pushes the expiry out again up to that limit, and the gate re-sends the cookie with a
 `Max-Age` matching the time left. An open dashboard keeps its session in use, so the

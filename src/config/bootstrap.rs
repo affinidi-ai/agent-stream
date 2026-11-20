@@ -450,12 +450,12 @@ mod tests {
     }
 
     #[test]
-    fn session_max_lifetime_defaults_to_a_day() {
+    fn session_max_lifetime_defaults_to_twelve_hours() {
         let (_dir, root) = temp_root();
 
         let config = load(root.as_path(), MINIMAL_CONFIG);
 
-        assert_eq!(config.session_max_lifetime_minutes, 1440);
+        assert_eq!(config.session_max_lifetime_minutes, 720);
     }
 
     #[test]

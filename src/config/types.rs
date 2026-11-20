@@ -1932,7 +1932,7 @@ pub struct BootstrapConfig {
     pub session_timeout_minutes: u64,
 
     /// Longest a dashboard session lasts after sign-in, in minutes, however
-    /// active it stays (1 to 1440, default 1440)
+    /// active it stays (1 to 1440, default 720)
     #[serde(default = "default_session_max_lifetime_minutes")]
     pub session_max_lifetime_minutes: u64,
 
@@ -2192,7 +2192,7 @@ fn default_session_timeout_minutes() -> u64 {
 }
 
 fn default_session_max_lifetime_minutes() -> u64 {
-    crate::auth::session::MAX_SESSION_LIFETIME_MINUTES
+    crate::auth::session::DEFAULT_SESSION_LIFETIME_MINUTES
 }
 
 fn default_websocket_broadcast_buffer() -> usize {
