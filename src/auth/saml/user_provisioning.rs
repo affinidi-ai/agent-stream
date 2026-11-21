@@ -232,9 +232,7 @@ fn determine_role(
     info!(
         "determine_role: role attribute key='{}', role_mapping entries={}, available SAML attributes={:?}",
         role_attr,
-        config
-            .role_mapping
-            .len(),
+        config.role_mapping.len(),
         attributes
             .keys()
             .collect::<Vec<_>>()
@@ -561,7 +559,9 @@ mod tests {
         let mut config = config_mapping(&[("alice@example.com", "administrator")]);
         let with_name_id = |name_id: &str| {
             let mut attributes = attributes("alice");
-            attributes.values.insert("NameID".to_string(), vec![name_id.to_string()]);
+            attributes
+                .values
+                .insert("NameID".to_string(), vec![name_id.to_string()]);
             attributes
         };
         assert_eq!(
