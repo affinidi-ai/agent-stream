@@ -230,13 +230,19 @@ fn determine_role(
     let attributes = &attributes.values;
     let role_attr = &config.attribute_mapping.role;
     info!(
-        "determine_role: role attribute key='{}', role_mapping keys={:?}, available SAML attributes={:?}",
+        "determine_role: role attribute key='{}', role_mapping entries={}, available SAML attributes={:?}",
         role_attr,
         config
             .role_mapping
-            .keys()
-            .collect::<Vec<_>>(),
+            .len(),
         attributes
+            .keys()
+            .collect::<Vec<_>>()
+    );
+    debug!(
+        "determine_role: role_mapping keys={:?}",
+        config
+            .role_mapping
             .keys()
             .collect::<Vec<_>>()
     );
@@ -264,8 +270,8 @@ fn determine_role(
 }
 
 /// The unmapped role values whose name earlier versions granted a role higher
-/// than `resolved`, each once with that role, so the operator can be told
-/// which `role_mapping` entry to add.
+/// than `resolved`, at most one per role with the first such value in document
+/// order, so the operator can be told which `role_mapping` entry to add.
 fn legacy_role_hints<'a>(
     saml_roles: &'a [String],
     config: &SamlConfig,
@@ -274,7 +280,6 @@ fn legacy_role_hints<'a>(
     let mut seen = std::collections::HashSet::new();
     saml_roles
         .iter()
-        .filter(|saml_role| seen.insert(saml_role.as_str()))
         .filter(|saml_role| {
             !config
                 .role_mapping
@@ -285,6 +290,7 @@ fn legacy_role_hints<'a>(
                 .filter(|role| role.rank() > resolved.rank())
                 .map(|role| (saml_role.as_str(), role))
         })
+        .filter(|(_, role)| seen.insert(role.rank()))
         .collect()
 }
 
@@ -298,7 +304,7 @@ fn role_for_value(
         .role_mapping
         .get(saml_role)
     else {
-        debug!("determine_role: no role_mapping entry for '{}'", saml_role);
+        debug!("determine_role: no role_mapping entry for {:?}", saml_role);
         return UserRole::User;
     };
 
@@ -317,7 +323,7 @@ fn role_for_value(
             UserRole::User
         }
     };
-    debug!("determine_role: matched explicit role_mapping '{}' -> '{}' -> {:?}", saml_role, mapped_role, resolved);
+    debug!("determine_role: matched explicit role_mapping {:?} -> '{}' -> {:?}", saml_role, mapped_role, resolved);
     resolved
 }
 
@@ -508,9 +514,13 @@ mod tests {
             Vec::<(&str, UserRole)>::new()
         );
         assert_eq!(
-            legacy_role_hints(&roles(&["admin", "admin"]), &unmapped, &UserRole::User),
+            legacy_role_hints(&roles(&["admin", "Admin", "ADMIN"]), &unmapped, &UserRole::User),
             vec![("admin", UserRole::Administrator)],
-            "a repeated value is hinted once"
+            "every spelling of a role is hinted once, as the first spelling sent"
+        );
+        assert_eq!(
+            legacy_role_hints(&roles(&["Admin", "poweruser"]), &unmapped, &UserRole::User),
+            vec![("Admin", UserRole::Administrator), ("poweruser", UserRole::PowerUser)]
         );
     }
 
@@ -544,6 +554,25 @@ mod tests {
         let config = config_mapping(&[("admin", "root")]);
         assert_eq!(determine_role(&attributes_with_role("alice", "admin"), &config), UserRole::User);
         assert_eq!(determine_role(&attributes("alice"), &config), UserRole::User);
+    }
+
+    #[test]
+    fn the_name_id_can_be_the_role_source() {
+        let mut config = config_mapping(&[("alice@example.com", "administrator")]);
+        let with_name_id = |name_id: &str| {
+            let mut attributes = attributes("alice");
+            attributes.values.insert("NameID".to_string(), vec![name_id.to_string()]);
+            attributes
+        };
+        assert_eq!(
+            determine_role(&with_name_id("alice@example.com"), &config),
+            UserRole::User,
+            "the NameID grants nothing unless it is the role attribute"
+        );
+
+        config.attribute_mapping.role = "NameID".to_string();
+        assert_eq!(determine_role(&with_name_id("alice@example.com"), &config), UserRole::Administrator);
+        assert_eq!(determine_role(&with_name_id("bob@example.com"), &config), UserRole::User);
     }
 
     #[test]

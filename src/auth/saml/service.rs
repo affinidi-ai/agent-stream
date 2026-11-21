@@ -886,33 +886,32 @@ fn extract_cert_b64s(xml: &str) -> Vec<String> {
 /// The attributes of an assertion, read two ways.
 #[derive(Debug, Default)]
 pub struct SamlAttributes {
-    /// One value per attribute from the first attribute statement, read as
-    /// earlier versions did, so the user ID a returning person is recognised
-    /// by does not change.
+    /// One value per attribute from the first attribute statement, so the user
+    /// ID a returning person is recognised by does not change.
     pub identity: HashMap<String, String>,
-    /// Every value of every attribute statement, for the role attribute.
+    /// Every value of every attribute statement, plus the subject `NameID`, for
+    /// the role attribute.
     pub values: HashMap<String, Vec<String>>,
 }
 
-/// The attributes of an assertion, with the subject's `NameID` among the
-/// identity values only.
+/// The attributes of an assertion. The subject's `NameID` is added to both
+/// maps, replacing any attribute of that name.
 fn assertion_attributes(assertion: &Assertion) -> SamlAttributes {
     let statements = assertion
         .attribute_statements
         .as_deref()
         .unwrap_or_default();
     let mut identity = first_statement_values(statements);
+    let mut values = attribute_values(statements);
 
     if let Some(subject) = &assertion.subject
         && let Some(name_id) = &subject.name_id
     {
         identity.insert("NameID".to_string(), name_id.value.clone());
+        values.insert("NameID".to_string(), vec![name_id.value.clone()]);
     }
 
-    SamlAttributes {
-        identity,
-        values: attribute_values(statements),
-    }
+    SamlAttributes { identity, values }
 }
 
 /// The first value of each attribute in the first attribute statement. An
@@ -1082,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn the_name_id_is_an_identity_value_and_never_a_role_value() {
+    fn the_name_id_is_both_an_identity_value_and_a_single_role_value() {
         let attributes = assertion_attributes(&assertion(
             Some("name-id-1"),
             vec![statement(&[("groups", &["staff"])]), statement(&[("id", &["later-id"]), ("groups", &["admins"])])],
@@ -1095,12 +1094,24 @@ mod tests {
             Some("name-id-1")
         );
         assert_eq!(attributes.identity.get("id"), None, "a user ID only in a later statement is not an identity value");
-        assert!(
-            !attributes
-                .values
-                .contains_key("NameID")
-        );
+        assert_eq!(attributes.values["NameID"], vec!["name-id-1"]);
         assert_eq!(attributes.values["groups"], vec!["staff", "admins"]);
+    }
+
+    #[test]
+    fn the_subject_name_id_replaces_an_attribute_named_name_id() {
+        let attributes = assertion_attributes(&assertion(
+            Some("subject-id"),
+            vec![statement(&[("NameID", &["attribute-id", "other-id"])])],
+        ));
+        assert_eq!(
+            attributes
+                .identity
+                .get("NameID")
+                .map(String::as_str),
+            Some("subject-id")
+        );
+        assert_eq!(attributes.values["NameID"], vec!["subject-id"]);
     }
 
     #[test]
@@ -1121,6 +1132,59 @@ mod tests {
                 .map(String::as_str),
             Some("two")
         );
+    }
+
+    #[tokio::test]
+    async fn a_name_id_role_source_grants_the_role_its_value_maps_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = crate::auth::storage::PasskeyStorage::new(
+            temp.path()
+                .join("passkeys")
+                .to_string_lossy()
+                .to_string(),
+            temp.path()
+                .join("avatars")
+                .to_string_lossy()
+                .to_string(),
+        )
+        .await
+        .unwrap();
+        let config = SamlConfig {
+            idp_entity_id: String::new(),
+            idp_sso_url: String::new(),
+            idp_slo_url: None,
+            sp_entity_id: String::new(),
+            sp_acs_url: String::new(),
+            idp_cert_path: String::new(),
+            attribute_mapping: crate::auth::auth_config::SamlAttributeMapping {
+                user_id: "id".to_string(),
+                username: "username".to_string(),
+                role: "NameID".to_string(),
+                ..Default::default()
+            },
+            role_mapping: HashMap::from([("alice@example.com".to_string(), "administrator".to_string())]),
+            require_encrypted_assertions: false,
+            sign_requests: false,
+            sp_key_path: None,
+            sp_cert_path: None,
+            graph_api: None,
+        };
+        let sign_in = |name_id: &'static str, id: &'static str| {
+            let attributes =
+                assertion_attributes(&assertion(Some(name_id), vec![statement(&[("id", &[id]), ("username", &[id])])]));
+            let storage = &storage;
+            let config = &config;
+            async move {
+                crate::auth::saml::user_provisioning::provision_user_from_saml(storage, &attributes, config, "")
+                    .await
+                    .unwrap()
+                    .role
+            }
+        };
+
+        sign_in("primary@example.com", "primary").await;
+        assert_eq!(sign_in("alice@example.com", "alice").await, crate::auth::types::UserRole::Administrator);
+        assert_eq!(sign_in("bob@example.com", "bob").await, crate::auth::types::UserRole::User);
     }
 
     const BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
