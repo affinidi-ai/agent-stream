@@ -377,7 +377,7 @@ const UsersPage: React.FC = () => {
                                 onDelete={() => handleDelete(user)}
                                 className="btn-sm"
                                 title={DELETE_USER_TITLE}
-                                confirmNotice={deleteConfirmNotice(user)}
+                                confirmNotice={deleteConfirmNotice(user, true)}
                               />
                             )}
                         </td>

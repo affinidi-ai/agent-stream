@@ -306,13 +306,21 @@ record is kept `Disabled` and marked deleted, so that sign-in is refused like an
 user's (`403`, no reason shown; `user_disabled` in the OIDC log).
 
 The endpoint answers `200` with `{"outcome": "removed"}` for a user who signs in with a
-passkey, and `{"outcome": "disabled"}` for a kept record. Deleting a kept record again answers
-`disabled` and does not fire `user.deleted` again. The user API sets `has_oidc_account` to
-`true` for a user with an OIDC account, before and after delete. For such a user the Users and
-Edit User pages show a notice during the delete confirm step, as visible text so it also
-appears on touch devices, and the Users page success message says the record was kept. No
-OIDC wording is shown for other users, and SAML users get the kept-record success message
-without a confirm notice.
+passkey, and `{"outcome": "disabled"}` for a kept record. The `user.deleted` event fires only
+for the call that changed the record, decided while the user lock is held, so two concurrent
+deletes fire it once and a repeat delete of a kept record answers `disabled` without firing it.
+
+The user API sets `has_oidc_account` to `true` for a user with an OIDC account, before and
+after delete. It tells anyone who can read users how the account signs in, and nothing more:
+the issuer and `sub` stay hidden until the record is kept. For such a user the Users and Edit
+User pages show a notice during the delete confirm step, as visible text so it also appears on
+touch devices (a shorter text in the Users table, which shows it on its own line under the row
+actions). The Users page success message says the record was kept. No OIDC wording is shown for
+other users, and SAML users get the kept-record success message without a confirm notice.
+
+Rejecting a pending user on the Notifications page uses the same endpoint. Only passkey
+registrations raise that notification, so the reject confirm has no OIDC notice, and its success
+message says the record was kept if the outcome is `disabled`.
 
 - **Cleared:** first and last name, email, department, job title, avatar link and passkeys.
   The username becomes the user id and the role goes back to `user`.

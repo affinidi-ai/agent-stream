@@ -3,14 +3,16 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { DeleteButton } from '../DeleteButton';
 
 describe('DeleteButton confirm notice', () => {
-  it('shows the notice as visible text during the confirm step only', () => {
+  it('keeps the status region mounted and fills it during the confirm step only', () => {
     render(<DeleteButton onDelete={jest.fn()} confirmNotice="Record is kept." />);
 
-    expect(screen.queryByTestId('delete-confirm-notice')).toBeNull();
+    const region = screen.getByRole('status');
+    expect(region.textContent).toBe('');
 
     fireEvent.click(screen.getByRole('button'));
 
-    expect(screen.getByTestId('delete-confirm-notice').textContent).toBe('Record is kept.');
+    expect(screen.getByRole('status')).toBe(region);
+    expect(region.textContent).toBe('Record is kept.');
   });
 
   it('shows no notice when none is given', () => {

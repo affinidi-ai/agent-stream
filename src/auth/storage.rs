@@ -78,6 +78,14 @@ pub enum DeleteOutcome {
     Disabled,
 }
 
+/// The result of a delete: the outcome, and whether this call changed the
+/// record. A delete of a record that is already kept changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteResult {
+    pub outcome: DeleteOutcome,
+    pub changed: bool,
+}
+
 /// An account at an OpenID provider: its issuer and the subject (`sub`) it
 /// gave the account. Together they identify the person; email never does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,7 +450,8 @@ impl PasskeyStorage {
             .count())
     }
 
-    /// Delete a user by id. Returns whether the record was removed or kept. A user who signs in through an OpenID provider or
+    /// Delete a user by id. Reports the outcome and whether this call changed the record.
+    /// A user who signs in through an OpenID provider or
     /// SAML is not removed: the record is scrubbed of profile data and kept
     /// `Disabled` under the provider account, so the next sign-in is refused
     /// instead of creating a new approved user. Deleting a kept record again
@@ -451,7 +460,7 @@ impl PasskeyStorage {
     pub async fn delete_user(
         &self,
         user_id: &str,
-    ) -> Result<DeleteOutcome> {
+    ) -> Result<DeleteResult> {
         let _user_write_guard = self.user_write_guard().await;
         let mut user_data = self
             .load_user_by_id(user_id)
@@ -459,7 +468,10 @@ impl PasskeyStorage {
             .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
 
         if user_data.deleted_at.is_some() {
-            return Ok(DeleteOutcome::Disabled);
+            return Ok(DeleteResult {
+                outcome: DeleteOutcome::Disabled,
+                changed: false,
+            });
         }
 
         let avatar_path = user_data.avatar_path.clone();
@@ -492,7 +504,7 @@ impl PasskeyStorage {
 
         self.remove_avatar_files(&user_data.user_id, avatar_path.as_deref())
             .await;
-        Ok(outcome)
+        Ok(DeleteResult { outcome, changed: true })
     }
 
     /// Remove the uploaded avatar files of a user: the file the stored path
@@ -605,7 +617,7 @@ impl ReloadOnPromotion for PasskeyStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeleteOutcome, OidcIdentity, PasskeyStorage, UserData, UserRole, UserStatus};
+    use super::{DeleteOutcome, DeleteResult, OidcIdentity, PasskeyStorage, UserData, UserRole, UserStatus};
     use crate::config::{LimitDefinition, LimitExceeded, LimitsConfig};
     use crate::server::mode::ReloadOnPromotion;
     use tempfile::tempdir;
@@ -697,8 +709,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome, DeleteOutcome::Removed);
-        assert_eq!(serde_json::to_string(&outcome).unwrap(), "\"removed\"");
+        assert_eq!(
+            outcome,
+            DeleteResult {
+                outcome: DeleteOutcome::Removed,
+                changed: true
+            }
+        );
+        assert_eq!(serde_json::to_string(&outcome.outcome).unwrap(), "\"removed\"");
     }
 
     #[tokio::test]
@@ -719,9 +737,52 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(first, DeleteOutcome::Disabled);
-        assert_eq!(repeat, DeleteOutcome::Disabled);
-        assert_eq!(serde_json::to_string(&first).unwrap(), "\"disabled\"");
+        assert_eq!(first.outcome, DeleteOutcome::Disabled);
+        assert!(first.changed);
+        assert_eq!(repeat.outcome, DeleteOutcome::Disabled);
+        assert!(!repeat.changed);
+        assert_eq!(serde_json::to_string(&first.outcome).unwrap(), "\"disabled\"");
+    }
+
+    #[tokio::test]
+    async fn only_one_of_two_concurrent_deletes_changes_the_record() {
+        let temp_dir = tempdir().unwrap();
+        let storage = std::sync::Arc::new(storage_in(temp_dir.path()).await);
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+
+        let (a, b) = tokio::join!(
+            {
+                let storage = storage.clone();
+                async move {
+                    storage
+                        .delete_user("oidc-1")
+                        .await
+                        .unwrap()
+                }
+            },
+            {
+                let storage = storage.clone();
+                async move {
+                    storage
+                        .delete_user("oidc-1")
+                        .await
+                        .unwrap()
+                }
+            }
+        );
+
+        assert_eq!(
+            [a.changed, b.changed]
+                .iter()
+                .filter(|c| **c)
+                .count(),
+            1
+        );
+        assert_eq!(a.outcome, DeleteOutcome::Disabled);
+        assert_eq!(b.outcome, DeleteOutcome::Disabled);
     }
 
     #[tokio::test]

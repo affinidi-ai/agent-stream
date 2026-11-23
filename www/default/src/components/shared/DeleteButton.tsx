@@ -76,10 +76,14 @@ export const DeleteButton: React.FC<DeleteButtonProps> = ({
           </>
         )}
       </button>
-      {isConfirming && confirmNotice && (
-        <span className="small text-danger ms-2" role="status" data-testid="delete-confirm-notice">
-          {confirmNotice}
-        </span>
+      {confirmNotice !== undefined && (
+        <div
+          className={`small text-danger w-100${isConfirming ? ' mt-1' : ''}`}
+          role="status"
+          data-testid="delete-confirm-notice"
+        >
+          {isConfirming ? confirmNotice : ''}
+        </div>
       )}
       {isConfirming && (
         <style>{`

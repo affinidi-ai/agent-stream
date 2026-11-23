@@ -6,8 +6,9 @@ changes:
       title: Report whether deleting a user removed or kept the record
       description: >-
         The delete response reports an outcome of removed or disabled, so an API client can
-        tell that an OpenID Connect or SAML user's record was kept. Deleting a kept record again answers disabled without firing user.deleted
-        again. The user API also returns has_oidc_account for users with an OpenID Connect
+        tell that an OpenID Connect or SAML user's record was kept. Deleting a kept record again answers
+        disabled. The user.deleted event is now decided under the user lock, so concurrent
+        deletes fire it once. The user API also returns has_oidc_account for users with an OpenID Connect
         account.
     - timestamp: '2026-11-23T10:30:01.000Z'
       title: Tell the admin when deleting an OIDC user keeps the record
