@@ -92,7 +92,8 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
   multi-valued role attribute, such as a groups list, is checked across all attribute
   statements, and the highest mapped role wins whatever the order, so any one mapped value
   grants its role: map only groups or app roles the identity provider controls, never ones
-  people can create or join themselves. An identity provider
+  people can create or join themselves, and map group object IDs or app-role values rather
+  than group display names, which are not unique. An identity provider
   that caps the groups it sends (Microsoft Entra ID past 150) sends no group values at all
   for a person over the cap, so that person gets `user`; map app roles or a filtered groups
   claim instead. Other attributes, the user ID among them, use the first value in the first
