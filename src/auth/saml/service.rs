@@ -948,33 +948,13 @@ fn attribute_values(statements: &[AttributeStatement]) -> HashMap<String, Vec<St
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+mod tests {
     use super::*;
-    use samael::attribute::{Attribute, AttributeValue};
+    use crate::auth::saml::test_support::{assertion, statement};
+    use samael::attribute::AttributeValue;
     use samael::schema::{
-        AudienceRestriction, Issuer, Status, StatusCode, Subject, SubjectConfirmation, SubjectConfirmationData,
-        SubjectNameID,
+        AudienceRestriction, Status, StatusCode, SubjectConfirmation, SubjectConfirmationData,
     };
-
-    pub(crate) fn statement(attributes: &[(&str, &[&str])]) -> AttributeStatement {
-        AttributeStatement {
-            attributes: attributes
-                .iter()
-                .map(|(name, values)| Attribute {
-                    friendly_name: None,
-                    name: Some(name.to_string()),
-                    name_format: None,
-                    values: values
-                        .iter()
-                        .map(|value| AttributeValue {
-                            attribute_type: None,
-                            value: Some(value.to_string()),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        }
-    }
 
     #[test]
     fn every_value_of_a_multi_valued_attribute_is_kept_in_order() {
@@ -1041,35 +1021,6 @@ pub(super) mod tests {
     fn an_identity_attribute_with_an_empty_first_value_is_absent() {
         let identity = first_statement_values(&[statement_with_empty_value("id", "next-id")]);
         assert_eq!(identity.get("id"), None);
-    }
-
-    pub(crate) fn assertion(
-        name_id: Option<&str>,
-        statements: Vec<AttributeStatement>,
-    ) -> Assertion {
-        Assertion {
-            id: "assertion-1".to_string(),
-            issue_instant: Utc::now(),
-            version: "2.0".to_string(),
-            issuer: Issuer {
-                name_qualifier: None,
-                sp_name_qualifier: None,
-                format: None,
-                sp_provided_id: None,
-                value: Some("https://idp.example".to_string()),
-            },
-            signature: None,
-            subject: name_id.map(|value| Subject {
-                name_id: Some(SubjectNameID {
-                    format: None,
-                    value: value.to_string(),
-                }),
-                subject_confirmations: None,
-            }),
-            conditions: None,
-            authn_statements: None,
-            attribute_statements: Some(statements),
-        }
     }
 
     #[test]

@@ -258,7 +258,7 @@ fn determine_role(
 
     for (saml_role, role) in legacy_role_hints(saml_roles, config, &resolved) {
         warn!(
-            "determine_role: no role_mapping entry for '{}'; earlier versions granted {} for this name, so add \"{}\": \"{}\" to role_mapping to keep it",
+            "determine_role: no role_mapping entry for {:?}; earlier versions granted {} for this name, so add {:?}: \"{}\" to role_mapping to keep it",
             saml_role, role, saml_role, role
         );
     }
@@ -314,7 +314,7 @@ fn role_for_value(
         "user" => UserRole::User,
         _ => {
             warn!(
-                "determine_role: role_mapping maps '{}' to unknown role '{}'; expected administrator, poweruser or user",
+                "determine_role: role_mapping maps {:?} to unknown role {:?}; expected administrator, poweruser or user",
                 saml_role, mapped_role
             );
             UserRole::User
@@ -577,7 +577,7 @@ mod tests {
     #[tokio::test]
     async fn a_name_id_role_source_grants_the_role_its_value_maps_to() {
         use crate::auth::saml::service::assertion_attributes;
-        use crate::auth::saml::service::tests::{assertion, statement};
+        use crate::auth::saml::test_support::{assertion, statement};
 
         let temp = tempfile::tempdir().unwrap();
         let storage = storage(&temp).await;
