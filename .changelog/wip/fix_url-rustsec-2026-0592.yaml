@@ -1,0 +1,14 @@
+branch: fix/url-rustsec-2026-0592
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-23T00:00:00.000Z'
+      title: Update the url crate to 2.5.9 for RUSTSEC-2026-0592
+      description: >-
+        Versions up to and including 1.0.2 depend on url 2.5.8, which can overflow the
+        stack when computing the origin of nested blob URLs (RUSTSEC-2026-0592). The
+        lockfile now pins url 2.5.9 and form_urlencoded 1.2.3, so cargo audit passes again.
+  breaking: []
