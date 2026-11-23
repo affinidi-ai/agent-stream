@@ -1,0 +1,21 @@
+branch: fix/bump-rust-deps
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-18T09:00:00.000Z'
+      title: Upgrade lettre to 0.11.24 to fix known dependency vulnerabilities
+      description: >-
+        Upgrade the lettre email library from 0.11.22 to 0.11.24, and its email-encoding
+        dependency from 0.4.1 to 0.4.3. Versions of lettre below 0.11.24 are affected;
+        0.11.24 fixes RUSTSEC-2026-0560 (STARTTLS response injection lets a
+        man-in-the-middle forge SMTP replies, medium 4.8), RUSTSEC-2026-0561 (missing
+        dot-stuffing after a bare LF or CR allows SMTP command injection),
+        RUSTSEC-2026-0562 (an EHLO reply line of only white space causes a panic),
+        RUSTSEC-2026-0563 (messages for an address with a quoted local part are sent to a
+        different address), RUSTSEC-2026-0564 (a mailbox display name containing CR or LF
+        causes a panic) and RUSTSEC-2026-0565 (unbounded buffering of an SMTP reply lets a
+        malicious server exhaust memory). No configuration or behaviour changes are required.
+  breaking: []

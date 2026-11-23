@@ -88,10 +88,21 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
 - A response that does not validate answers `401`.
 - The first SAML sign-in provisions the user. SAML users are approved at once; the very
   first user on the appliance is the primary `administrator`, and anyone else takes the role
-  `role_mapping` maps their role value to, or `user` when it has no entry. Every later
-  sign-in sets the username, email, name, department and job title again from the identity
-  provider, and the role too for everyone but the primary administrator, who stays
-  `administrator`. See [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
+  `role_mapping` maps their role value to, or `user` when it has no entry. Every value of a
+  multi-valued role attribute, such as a groups list, is checked across all attribute
+  statements, and the highest mapped role wins whatever the order, so any one mapped value
+  grants its role: map only groups or app roles the identity provider controls, never ones
+  people can create or join themselves. An identity provider
+  that caps the groups it sends (Microsoft Entra ID past 150) sends no group values at all
+  for a person over the cap, so that person gets `user`; map app roles or a filtered groups
+  claim instead. Other attributes, the user ID among them, use the first value in the first
+  attribute statement. The subject's `NameID` is available as the attribute `NameID`,
+  replacing any attribute of that name, so it can be the role source and is the user ID when
+  the first attribute statement has no first value for the mapped user-ID attribute. Every
+  later sign-in sets the username, email, name, department and job title again from the
+  identity provider, and the role too for everyone but the primary administrator, who stays
+  `administrator`. See
+  [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md#samljson).
 - When provisioning a new user would pass the appliance user limit, the ACS answers `403`
   with a readable page instead of opening a session.
 - A user who is not approved (for example an administrator disabled or deleted them) is
@@ -378,12 +389,14 @@ identified by a random token. The client presents it either way:
 
 A token is never read from the query string.
 
-Sessions last `session_timeout_minutes` (default 20) from their last use. Each request that
-passes the session gate, and each `/auth/check`, pushes the expiry out again, and the gate
-re-sends the cookie with a matching `Max-Age`. Sessions are written to
-`[storage_paths] sessions` (default `../_storage/sessions`), so they survive a restart;
-expired sessions are removed at startup and, in SAML and OIDC modes, every 5 minutes on the
-Active instance.
+Sessions last `session_timeout_minutes` (default 20) from their last use, and never longer
+than `session_max_lifetime_minutes` (default 720, twelve hours; at most 1440) after sign-in,
+however active they stay. Each request that passes the session gate, and each `/auth/check`,
+pushes the expiry out again up to that limit, and the gate re-sends the cookie with a
+`Max-Age` of the timeout, or of the lifetime left when that is shorter. An open dashboard keeps its session in use, so the
+lifetime limit is what ends it. Sessions are written to `[storage_paths] sessions` (default
+`../_storage/sessions`), so they survive a restart; expired sessions are removed at startup
+and, in SAML and OIDC modes, every 5 minutes on the Active instance.
 
 A session whose user is no longer approved (status `New` or `Disabled`, or removed) is
 refused with `401` on every protected route.
@@ -408,13 +421,15 @@ variables are set; see [`development/TESTING.md`](development/TESTING.md).
 ## Profile and avatar
 
 These routes act on the caller's own user record, taken from the session (or, for an access
-token, its bound user). They need no permission beyond an approved user.
+token, its bound user). They need no permission beyond an approved user, but an access token
+with explicit scopes may only read them (see
+[`RBAC.md`](RBAC.md#route-access-declarations)).
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
 | `GET /v1/profile` | Any signed-in user | The caller's username, role, status, profile fields, avatar path and last sign-in |
-| `PUT /v1/profile` | Any signed-in user | Update `first_name`, `last_name`, `email`, `department` and `job_title`; omitted fields are kept |
-| `POST /v1/profile/avatar` | Any signed-in user | Upload an avatar as multipart field `avatar`; returns the updated profile |
+| `PUT /v1/profile` | Any signed-in user; refused to an access token with explicit scopes | Update `first_name`, `last_name`, `email`, `department` and `job_title`; omitted fields are kept |
+| `POST /v1/profile/avatar` | Any signed-in user; refused to an access token with explicit scopes | Upload an avatar as multipart field `avatar`; returns the updated profile |
 | `GET /v1/permissions` | Any signed-in user | The caller's permissions (see [`RBAC.md`](RBAC.md#permissions-response)) |
 
 In SAML mode the identity provider overwrites the profile fields at each sign-in; in OIDC
@@ -429,7 +444,7 @@ API prefix without a session.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
-| `POST /v1/uploads/image` | Any signed-in user | Store a dashboard image, such as an LLM provider logo, sent as multipart field `file`; returns `{"path": "uploads/<id>.<ext>"}` |
+| `POST /v1/uploads/image` | Any signed-in user; an access token with explicit scopes needs `pipes.edit` | Store a dashboard image, such as an LLM provider logo, sent as multipart field `file`; returns `{"path": "uploads/<id>.<ext>"}` |
 
 Avatars and uploads share the same checks:
 
@@ -469,9 +484,9 @@ stored per user under `[storage_paths] settings` in `users/<user_id>.json`.
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
-| `GET /v1/user-settings` | Any signed-in user | The effective settings: the caller's overrides applied over the system settings |
-| `POST /v1/user-settings` | Any signed-in user | Set overrides for the fields supplied; returns the effective settings |
-| `DELETE /v1/user-settings` | Any signed-in user | Remove all the caller's overrides |
+| `GET /v1/user-settings` | Any signed-in user; an access token with explicit scopes needs `settings.view`, since the response carries system settings | The effective settings: the caller's overrides applied over the system settings |
+| `POST /v1/user-settings` | Any signed-in user; refused to an access token with explicit scopes | Set overrides for the fields supplied; returns the effective settings |
+| `DELETE /v1/user-settings` | Any signed-in user; refused to an access token with explicit scopes | Remove all the caller's overrides |
 | `GET /v1/user-settings/overrides` | Any signed-in user | Only the caller's overrides |
 
 A user can override `refresh_interval_seconds` (1 to 300), `log_timestamp_format` (`utc`,
@@ -502,5 +517,6 @@ Every system-settings and user-settings response sends `prometheus_auth_password
 - [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md): Terms acceptance at registration and
   sign-in.
 - [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md): `auth_mode`,
-  `session_timeout_minutes`, `webauthn`, `saml.json`, `oidc.json`, and `[storage_paths]`.
+  `session_timeout_minutes`, `session_max_lifetime_minutes`, `webauthn`, `saml.json`,
+  `oidc.json`, and `[storage_paths]`.
 - [`../CONTEXT.md`](../CONTEXT.md): the glossary.

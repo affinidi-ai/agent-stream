@@ -13,7 +13,7 @@ use serde_json::json;
 use tracing::info;
 
 use crate::auth::storage::{PasskeyStorage, UserData};
-use crate::auth::types::{UserRole, UserStatus};
+use crate::auth::types::UserStatus;
 use crate::auth_manager::middleware::AuthGuardOk;
 use crate::auth_manager::pat::PatDelegationContext;
 use crate::auth_manager::resource_scope::{self, RequiredHeader};
@@ -126,14 +126,6 @@ fn validate_target_authority(
         .ok_or((StatusCode::FORBIDDEN, "an access token may manage only itself or its descendants".into()))
 }
 
-fn role_rank(role: &UserRole) -> u8 {
-    match role {
-        UserRole::User => 0,
-        UserRole::PowerUser => 1,
-        UserRole::Administrator => 2,
-    }
-}
-
 fn validate_scope_ceiling(
     rbac: &RbacConfig,
     issuer: &UserData,
@@ -141,7 +133,7 @@ fn validate_scope_ceiling(
     scopes: &[String],
 ) -> Result<(), &'static str> {
     if scopes.is_empty() {
-        return (role_rank(&subject.role) <= role_rank(&issuer.role))
+        return (subject.role.rank() <= issuer.role.rank())
             .then_some(())
             .ok_or("an unscoped access token cannot exceed the issuer's role");
     }
@@ -542,6 +534,7 @@ pub async fn rotate_access_token(
 mod tests {
     use super::*;
     use crate::access_tokens::TOKEN_PREFIX;
+    use crate::auth::types::UserRole;
     use crate::auth_manager::middleware::AuthGuardOk;
     use crate::auth_manager::pat::PatAuthenticator;
     use crate::rbac::RbacConfig;
@@ -612,6 +605,25 @@ mod tests {
 
     async fn admin_users() -> Extension<Arc<PasskeyStorage>> {
         users(vec![user("admin-user", UserRole::Administrator, UserStatus::Approved)]).await
+    }
+
+    #[test]
+    fn an_unscoped_token_cannot_exceed_the_issuers_role() {
+        let rbac = RbacConfig::default();
+        let ceiling = |issuer: UserRole, subject: UserRole| {
+            validate_scope_ceiling(
+                &rbac,
+                &user("issuer", issuer, UserStatus::Approved),
+                &user("subject", subject, UserStatus::Approved),
+                &[],
+            )
+        };
+        let refused = Err("an unscoped access token cannot exceed the issuer's role");
+        assert_eq!(ceiling(UserRole::User, UserRole::Administrator), refused);
+        assert_eq!(ceiling(UserRole::PowerUser, UserRole::Administrator), refused);
+        assert_eq!(ceiling(UserRole::User, UserRole::PowerUser), refused);
+        assert_eq!(ceiling(UserRole::PowerUser, UserRole::PowerUser), Ok(()));
+        assert_eq!(ceiling(UserRole::Administrator, UserRole::User), Ok(()));
     }
 
     /// Seed one live token; returns its (id, raw secret).

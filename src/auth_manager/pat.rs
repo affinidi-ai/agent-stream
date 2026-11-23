@@ -145,7 +145,9 @@ fn canonical_collection_action(
         | (ResourceKind::Mediators, ["compatible" | "check-auth"])
         | (ResourceKind::PipeTemplates, ["import"])
         | (ResourceKind::CredentialProviders, ["validate"]) => Some(CanonicalPathScope::HandlerEnforced),
-        (ResourceKind::Integrations, ["config" | "runtime-variables"]) => Some(CanonicalPathScope::Unscoped),
+        (ResourceKind::Integrations, ["config" | "runtime-variables"]) | (ResourceKind::Pipes, ["config"]) => {
+            Some(CanonicalPathScope::Unscoped)
+        }
         (ResourceKind::Integrations, ["test" | "trigger-multiple"])
         | (ResourceKind::JwtVerificationStrategies, ["validate-jwks-uri"])
         | (ResourceKind::Pipes, ["test-llm-connection"] | ["test-surfaces", "delete"])
@@ -405,5 +407,23 @@ mod tests {
         }
         assert_eq!(classify_canonical_resource_path("/v1/settings"), CanonicalPathScope::Unscoped);
         assert_eq!(classify_canonical_resource_path("/v1/integrations/config"), CanonicalPathScope::Unscoped);
+        assert_eq!(classify_canonical_resource_path("/v1/pipes/config"), CanonicalPathScope::Unscoped);
+        assert_eq!(classify_canonical_resource_path("/api/v1/pipes/config"), CanonicalPathScope::Unscoped);
+        assert_eq!(
+            classify_canonical_resource_path("/v1/pipes/config-chat"),
+            CanonicalPathScope::EnforceId {
+                kind: ResourceKind::Pipes,
+                id: "config-chat".to_string()
+            },
+            "only the catalog path itself is carved out"
+        );
+        assert_eq!(
+            classify_canonical_resource_path("/v1/pipes/config/execute"),
+            CanonicalPathScope::EnforceId {
+                kind: ResourceKind::Pipes,
+                id: "config".to_string()
+            },
+            "a route under a Surface named config keeps its id check"
+        );
     }
 }

@@ -132,7 +132,7 @@ in a deployment.
 | `limits.example.json` | Sets small ceilings (for example 5 LLM Surfaces, 3 Teams, 1 gateway). Copying it unchanged caps a deployment at those numbers. Omit the file for no limits. |
 | `prompt-guard.json` | Read before logging starts. A missing or invalid file leaves built-in Prompt Guard patterns unavailable, and the warning is not written to the log. |
 | `metrics.json` | `opentelemetry` and `cloudwatch` and their nested required fields have no defaults. A file missing any of them fails to parse and OpenTelemetry stays off, with the error on stderr only. |
-| `saml.json` role mapping | Each SAML sign-in sets the user's role again from the identity provider, except the primary administrator's, which is `administrator` at every sign-in. Only a `role_mapping` entry grants a role, and its key must equal the identity provider's value exactly, case and spaces included: a value with no entry is `user` whatever it reads, including `admin` or `Administrator`. The target is read without regard to case, and a target other than `administrator`, `poweruser` or `user` is `user` and logs a warning. An identity provider that sends `Admin` needs `"Admin": "administrator"`, with one entry per spelling it sends. A value with no entry that earlier versions granted by name (`admin`, `administrator`, `poweruser`, `power_user` or `power-user`, in any case) logs a warning naming the entry to add. |
+| `saml.json` role mapping | Each SAML sign-in sets the user's role again from the identity provider, except the primary administrator's, which is `administrator` at every sign-in. Only a `role_mapping` entry grants a role, and its key must equal the identity provider's value exactly, case and spaces included: a value with no entry is `user` whatever it reads, including `admin` or `Administrator`. When the role attribute carries several values, in one attribute statement or across several, each is mapped and the highest role wins, whatever order the identity provider sends them in, so any one mapped value grants its role: map only groups or app roles the identity provider controls, never ones people can create or join themselves. The target is read without regard to case, and a target other than `administrator`, `poweruser` or `user` is `user` and logs a warning. An identity provider that sends `Admin` needs `"Admin": "administrator"`, with one entry per spelling it sends. A value with no entry that earlier versions granted by name (`admin`, `administrator`, `poweruser`, `power_user` or `power-user`, in any case) logs one warning per role, naming the first such value sent, when that name would have granted a higher role than the sign-in resolved. |
 | `oidc.json` `role_mapping` and `required_claims` | Each OIDC sign-in sets the user's role again from the ID token, in both directions, and there is no primary administrator: a mapping that sends a value to `administrator` grants full management access to every account the provider gives that value. A value matches only exactly, case included. Leave `unmapped` at `deny` unless every account at the provider should get a role (startup refuses a granting `unmapped` unless a `required_claims` entry lists only exact values), and set `required_claims` to bind the deployment to your tenant at the provider: a file without it stops startup, because without it every account the provider signs in, from any tenant, can reach the dashboard. A binding is an entry that lists only exact values of a claim that identifies your tenant, such as `org_id`, `tid` or `hd`. `iss`, `aud` and `azp` never count: they are tied to the issuer and `client_id`, so they cannot name a tenant, and a file with only those entries is refused like an empty one. A boolean such as `email_verified` (or the string `"true"` or `"false"`, in any case) or a catch-all `regex:` pattern does not bind on its own. Startup logs the names of the entries that list only exact values; with none, it logs a notice when every entry mixes exact values with patterns or booleans, and a warning when every entry is a boolean or a pattern. A granting `role_mapping.unmapped` needs an entry that lists only exact values, so without one it stops startup. Such a binding leaves it to `role_mapping.values` to keep other tenants out, so map only a claim the provider controls. `allow_any_account` opts out, and startup then logs a warning; it also needs `role_mapping.unmapped` to be `deny`. |
 | `llm_catalog.refresh_url` | Validated when `agent-stream.json` loads, so an unacceptable URL fails startup. An empty or blank value counts as unset: the dashboard does not offer the refresh action. |
 | `secrets.reveal_values` | `true` by default. `false` makes `GET /api/v1/secrets/{id}` answer the record without its value and removes the dashboard's control to show it; values can still be set and replaced. It also refuses any integration create, update or test that would send a stored secret to a new destination, unless every secret it references is the URL its type delivers to (`url_secret_id` for a webhook, `webhook_url_secret_id` for Slack, `redis_url_secret_id` for a stream with `platform: redis`) and nothing else secret or routing goes with it; see [`INTEGRATIONS.md`](INTEGRATIONS.md#secrets-in-integration-configuration). |
@@ -195,7 +195,7 @@ The bootstrap file, read once at startup. Fields and defaults are in
 
 | Section | Controls |
 | --- | --- |
-| top level | `channel_config_source`, `dynamodb_table`, `aws_region`, `aws_profile`, `secrets_backend`, `auth_mode`, `session_timeout_minutes`, `websocket_require_auth`, `websocket_broadcast_buffer`, `metrics_cache_ttl_seconds`, `backup_encryption_key`, `legacy_backup_encryption_keys`, `server_mode`, `cache_refresh_interval_secs` |
+| top level | `channel_config_source`, `dynamodb_table`, `aws_region`, `aws_profile`, `secrets_backend`, `auth_mode`, `session_timeout_minutes`, `session_max_lifetime_minutes`, `websocket_require_auth`, `websocket_broadcast_buffer`, `metrics_cache_ttl_seconds`, `backup_encryption_key`, `legacy_backup_encryption_keys`, `server_mode`, `cache_refresh_interval_secs` |
 | `[config_files]` | Where the other configuration files are |
 | `[storage_paths]` | Where each record kind is persisted, plus the `default_members` and `default_teams` seed directories |
 | `[encryption]` | Encryption at rest. See [`ENCRYPTION_AT_REST.md`](ENCRYPTION_AT_REST.md). |
@@ -217,7 +217,8 @@ The bootstrap file, read once at startup. Fields and defaults are in
 | `channel_config_source` | `"local"` | `local` loads internal surface records from `storage_paths.agent_surfaces`. `dynamodb` loads them from `dynamodb_table` (using `aws_region` and `aws_profile`), falling back to the last snapshot in `storage_paths.config_cache` when DynamoDB is unreachable. Surfaces, Members and Teams always come from `_storage/`. |
 | `secrets_backend` | `"filesystem"` | `filesystem` keeps secrets under `storage_paths.secrets`. It is the only supported value; any other value stops startup with an error. |
 | `auth_mode` | `"passkey"` | `passkey` uses WebAuthn with `agent-stream.json` `webauthn`. `saml` requires `saml.json`; startup fails if it cannot be read. `oidc` requires `oidc.json`; startup fails if it cannot be read or a setting is refused. |
-| `session_timeout_minutes` | `20` | Dashboard session lifetime, for passkey, SAML and OIDC sign-in alike. |
+| `session_timeout_minutes` | `20` | Dashboard session lifetime from last use, for passkey, SAML and OIDC sign-in alike. A session never outlasts `session_max_lifetime_minutes`, so a larger value has no further effect. |
+| `session_max_lifetime_minutes` | `720` | Longest a dashboard session lasts after sign-in, however active it stays. Must be 1 to 1440; any other value stops startup with an error. See [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md). |
 | `server_mode` | `"active"` | `active` or `standby`. See [Server mode](CONFIGURATION_RELOAD.md#server-mode). |
 | `cache_refresh_interval_secs` | `0` | Above 0, cached stores reconcile with disk on this interval and Surface changes written by another node are mounted. See [`CONFIGURATION_RELOAD.md`](CONFIGURATION_RELOAD.md). |
 | `[a2a] max_inflight_dispatches` | `256` | Fabric requests one connection-point listener dispatches concurrently. Must be greater than 0. |
@@ -271,7 +272,8 @@ The example also carries `oob_connection` and `_note_*` keys, which nothing read
 by `[encryption]` in `config.toml`.
 
 Two management reads expose this configuration to any signed-in caller, with no
-permission:
+permission (an access token with explicit scopes needs `pipes.view` for the routing read and
+`settings.view` for networking):
 
 | Route (under `/api`) | Returns |
 | --- | --- |
@@ -340,7 +342,8 @@ The first user to sign in is created as the primary administrator and stays `adm
 at every later sign-in. Every other user's sign-in sets the role from the identity provider
 through `role_mapping` alone (see [Settings with non-obvious effects](#settings-with-non-obvious-effects)),
 so `role_mapping` decides what each user may do. A returning user is recognised by the
-`attribute_mapping.user_id` claim, or by the `NameID` when an assertion lacks that claim, so
+`attribute_mapping.user_id` claim, or by the `NameID` when the first attribute statement has
+no first value for that claim, so
 whoever the identity provider later gives the primary administrator's value signs in as that
 administrator. Map `user_id` to a claim the identity
 provider never reassigns, such as Entra ID's

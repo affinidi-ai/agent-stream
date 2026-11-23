@@ -103,18 +103,35 @@ const PUBLIC_READ_PATH_PREFIXES: &[&str] = &[
 
 /// Returns true if a request for `path` with `method` is public and should
 /// bypass session auth.
-fn is_public_path(
+pub(crate) fn is_public_path(
     method: &Method,
     path: &str,
 ) -> bool {
-    let has_prefix = |prefixes: &[&str]| {
+    public_path_entry(method, path).is_some()
+}
+
+/// The public exact path or prefix that makes a request for `path` with
+/// `method` public, if any.
+pub(crate) fn public_path_entry(
+    method: &Method,
+    path: &str,
+) -> Option<&'static str> {
+    let prefix_of = |prefixes: &'static [&'static str]| {
         prefixes
             .iter()
-            .any(|prefix| path.starts_with(prefix))
+            .copied()
+            .find(|prefix| path.starts_with(prefix))
     };
-    PUBLIC_EXACT_PATHS.contains(&path)
-        || has_prefix(PUBLIC_PROTOCOL_PATH_PREFIXES)
-        || ((method == Method::GET || method == Method::HEAD) && has_prefix(PUBLIC_READ_PATH_PREFIXES))
+    PUBLIC_EXACT_PATHS
+        .iter()
+        .copied()
+        .find(|exact| *exact == path)
+        .or_else(|| prefix_of(PUBLIC_PROTOCOL_PATH_PREFIXES))
+        .or_else(|| {
+            (method == Method::GET || method == Method::HEAD)
+                .then(|| prefix_of(PUBLIC_READ_PATH_PREFIXES))
+                .flatten()
+        })
 }
 
 /// Extract session token from the request's Authorization header or cookies.
@@ -286,14 +303,10 @@ pub async fn require_session_auth(
         // sliding server-side expiration.  Without this the browser-side cookie
         // expires at login-time + timeout even though the server keeps extending
         // the session on every request, causing WebSocket reconnection storms.
-        if let Ok(value) = session_cookie::build_session_cookie(
-            &session_token,
-            state
-                .session_manager
-                .timeout_seconds(),
-        )
-        .parse()
-        {
+        let max_age = state
+            .session_manager
+            .cookie_max_age_seconds(&session, chrono::Utc::now());
+        if let Ok(value) = session_cookie::build_session_cookie(&session_token, max_age).parse() {
             response
                 .headers_mut()
                 .append(SET_COOKIE, value);
@@ -648,7 +661,12 @@ fn feature_guard_middleware(
                 .get::<crate::auth_manager::pat::PatContext>(),
             &guard.feature,
         ) {
-            warn!(feature = ?guard.feature, "require_feature: access token scope excludes this permission");
+            warn!(
+                token_id = crate::auth_manager::route_declarations::token_id(&request),
+                path = %request.uri().path(),
+                feature = ?guard.feature,
+                "require_feature: access token scope excludes this permission"
+            );
             return Err(StatusCode::FORBIDDEN);
         }
 
@@ -1370,6 +1388,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 200, "Cookie-based session should be accepted");
+    }
+
+    /// The `Max-Age` of the session cookie the gate sends back on a request carrying `token`.
+    async fn refreshed_cookie_max_age(
+        app: &Router,
+        token: &str,
+    ) -> i64 {
+        let req = axum::http::Request::builder()
+            .uri("/v1/settings")
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        resp.headers()
+            .get(SET_COOKIE)
+            .expect("the gate re-sends the session cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .find_map(|attribute| {
+                attribute
+                    .trim()
+                    .strip_prefix("Max-Age=")
+            })
+            .expect("the session cookie carries a Max-Age")
+            .parse()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn refreshed_session_cookie_never_outlives_the_session_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(
+            crate::auth::session::SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let now = chrono::Utc::now();
+        sessions
+            .store_for_test(&crate::auth::session::Session {
+                token: "near-the-end".to_string(),
+                username: "alice".to_string(),
+                user_id: "user-1".to_string(),
+                created_at: now - chrono::Duration::minutes(50),
+                expires_at: now + chrono::Duration::minutes(5),
+                terms_gate: TermsSessionGate::AllowedAtLogin,
+                oidc: None,
+            })
+            .await;
+
+        let max_age = refreshed_cookie_max_age(&test_app(sessions), "near-the-end").await;
+
+        assert!((1..=600).contains(&max_age), "Max-Age {max_age} must end by the lifetime end");
+    }
+
+    #[tokio::test]
+    async fn refreshed_session_cookie_lasts_the_timeout_inside_the_lifetime() {
+        let sessions = Arc::new(crate::auth::session::SessionManager::new());
+        let token = sessions
+            .create_session("alice".into(), "user-1".into())
+            .await;
+
+        let max_age = refreshed_cookie_max_age(&test_app(sessions), &token).await;
+
+        assert!((1190..=1200).contains(&max_age), "Max-Age {max_age} must be the 20-minute timeout");
     }
 
     // ── Session token via Authorization Bearer header should work ──

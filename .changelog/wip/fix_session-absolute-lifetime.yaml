@@ -1,0 +1,17 @@
+branch: fix/session-absolute-lifetime
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-20T00:00:00.000Z'
+      title: End dashboard sessions 12 hours after sign-in, however active they stay
+      description: >-
+        Dashboard sessions now end `session_max_lifetime_minutes` after sign-in (default 720,
+        at most 1440), however often they are used, so an open dashboard signs in again at
+        least every 12 hours by default.
+        The refresh, startup sweep and periodic cleanup all apply the limit, and the refreshed
+        session cookie's Max-Age never runs past it. A value of 0 or above 1440 stops startup
+        with an error.
+  removed: []
+  security: []
+  breaking: []

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
+use crate::auth_manager::route_declarations::{public, source_authenticated};
 use crate::config::GatewayConfig;
 
 fn listener_scopes_for_port(
@@ -321,19 +322,19 @@ pub async fn run_port_server(
                 let cp_router = Router::new()
                     .route(
                         "/{cp_id}/did.json",
-                        axum::routing::get(
+                        public(axum::routing::get(
                             crate::gateways::connection_points::handlers::serve_connection_point_did_document::<
                                 crate::gateways::FileSystemConnectionPointStore,
                             >,
-                        ),
+                        )),
                     )
                     .route(
                         "/{cp_id}/did.jsonl",
-                        axum::routing::get(
+                        public(axum::routing::get(
                             crate::gateways::connection_points::handlers::serve_connection_point_did_jsonl::<
                                 crate::gateways::FileSystemConnectionPointStore,
                             >,
-                        ),
+                        )),
                     )
                     .layer(axum::Extension(_bootstrap_config.clone()))
                     .layer(axum::Extension(cp_store));
@@ -347,7 +348,7 @@ pub async fn run_port_server(
                     let target_url = target.clone();
                     let redirect_handler = move || async move { axum::response::Redirect::permanent(&target_url) };
 
-                    app = app.route(&route_config.prefix, axum::routing::get(redirect_handler));
+                    app = app.route(&route_config.prefix, public(axum::routing::get(redirect_handler)));
                 } else {
                     warn!("Redirect route '{}' missing 'target' field", route_name);
                 }
@@ -458,8 +459,8 @@ pub async fn run_port_server(
             // is governed per surface by `document_ingestion.max_file_bytes`.
             const LLM_MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
             let llm_pipe_router = Router::new()
-                .route(&route_path, pipe_methods.clone())
-                .route(&variant_route_path, pipe_methods)
+                .route(&route_path, source_authenticated(pipe_methods.clone()))
+                .route(&variant_route_path, source_authenticated(pipe_methods))
                 .layer(axum::extract::DefaultBodyLimit::max(LLM_MAX_REQUEST_BODY_BYTES))
                 .with_state(handler_state);
 

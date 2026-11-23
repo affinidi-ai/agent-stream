@@ -22,6 +22,7 @@ mod support;
 mod surface_lifecycle;
 mod surface_ownership;
 mod surface_read_access;
+mod surface_run_access;
 mod telemetry_and_accounting;
 mod terms;
 mod usage_governance;

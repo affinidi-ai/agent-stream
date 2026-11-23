@@ -10,9 +10,16 @@ export interface EmbeddingsTarget {
   api_key_secret?: string;
 }
 
+const urlSegment = (s: string): string => {
+  const trimmed = s.replace(/\/+$/, '');
+  return trimmed && !trimmed.startsWith('/') ? `/${trimmed}` : trimmed;
+};
+
 /**
  * Derive the full OpenAI-compatible embeddings endpoint URL for a provider from
- * the catalogue (`default_base_url` + the embeddings endpoint path). The embedder
+ * the catalogue (`default_base_url` + `api_version_prefix` + the embeddings
+ * endpoint path). A provider with no embeddings endpoint falls back to
+ * `/embeddings` under its version prefix, or `/v1` when it has none. The embedder
  * posts `{ model, input }` to this URL, so it only supports providers whose
  * embeddings path is a plain URL (no `{model}` template — that rules out
  * Gemini-style `generateContent` paths). Returns an empty string when the
@@ -22,9 +29,10 @@ export const deriveEmbeddingsUrl = (p: LLMProvider): string => {
   const base = (p.default_base_url ?? '').replace(/\/+$/, '');
   if (!base) return '';
   const ep = (p.endpoints ?? []).find(e => e.capabilities?.includes('embeddings'));
-  const path = ep?.path ?? (p.api_schema === 'openai' || !p.api_schema ? '/v1/embeddings' : '');
+  const path = ep?.path ?? (p.api_schema === 'openai' || !p.api_schema ? '/embeddings' : '');
   if (!path || path.includes('{model}')) return '';
-  return `${base}${path.startsWith('/') ? '' : '/'}${path}`;
+  const prefix = p.api_version_prefix || (ep ? '' : '/v1');
+  return `${base}${urlSegment(prefix)}${urlSegment(path)}`;
 };
 
 interface EmbeddingsTargetEditorProps {

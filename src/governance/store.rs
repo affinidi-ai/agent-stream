@@ -1185,7 +1185,7 @@ impl KeyRing {
         if self
             .current
             .as_ref()
-            .is_some_and(&verifies)
+            .is_some_and(verifies)
         {
             return Ok(false);
         }
