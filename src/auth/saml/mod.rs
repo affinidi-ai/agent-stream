@@ -7,5 +7,8 @@ pub mod handlers;
 pub mod service;
 pub mod user_provisioning;
 
+#[cfg(test)]
+mod test_support;
+
 pub use handlers::*;
 pub use service::SamlService;

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info};
 
-use super::service::SamlService;
+use super::service::{SamlService, assertion_attributes};
 use super::user_provisioning::{UserNotApproved, UsernameTaken, provision_user_from_saml};
 use crate::auth::session::SessionManager;
 use crate::auth::session_cookie::{
@@ -126,14 +126,7 @@ pub async fn saml_acs(
             StatusCode::UNAUTHORIZED
         })?;
 
-    // Extract user attributes
-    let attributes = saml_state
-        .saml_service
-        .extract_attributes(&assertion)
-        .map_err(|e| {
-            error!("Failed to extract SAML attributes: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let attributes = assertion_attributes(&assertion);
 
     // Provision or update user
     let user = match provision_user_from_saml(

@@ -1,0 +1,14 @@
+branch: fix/saml-multi-valued-attributes
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-23T12:00:00.000Z'
+      title: Give SAML users their highest mapped role at their next sign-in
+      description: A person whose role values map to several roles now takes the highest of them at their next SAML sign-in, which can raise existing users, up to administrator, without a config change. Before upgrading, check that every role_mapping entry for a group or role value is meant to grant its role, and map only groups or app roles the identity provider controls.
+  fixed:
+    - timestamp: '2026-11-20T15:45:20.000Z'
+      title: Map every value of a multi-valued SAML role attribute, highest role wins
+      description: SAML sign-in kept only the first value of each attribute and read only the first attribute statement, so a role mapped from a groups list depended on the order the identity provider sent the groups in. Every value of every attribute statement is now read, each role value is mapped, and the highest mapped role wins, as it does for OIDC role claims. Other attributes, the user ID among them, are still read from the first value in the first attribute statement or the subject NameID, so returning users are recognised as before.
+  removed: []
+  security: []
+  breaking: []
