@@ -952,9 +952,7 @@ mod tests {
     use super::*;
     use crate::auth::saml::test_support::{assertion, statement};
     use samael::attribute::AttributeValue;
-    use samael::schema::{
-        AudienceRestriction, Status, StatusCode, SubjectConfirmation, SubjectConfirmationData,
-    };
+    use samael::schema::{AudienceRestriction, Status, StatusCode, SubjectConfirmation, SubjectConfirmationData};
 
     #[test]
     fn every_value_of_a_multi_valued_attribute_is_kept_in_order() {
