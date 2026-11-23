@@ -1,0 +1,14 @@
+branch: fix/cookie-rustsec-2026-0594
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-23T00:00:00.000Z'
+      title: Update the cookie crate to 0.18.3 for RUSTSEC-2026-0594
+      description: >-
+        Versions up to and including 1.0.2 depend on cookie 0.18.1, whose private cookie
+        nonces can repeat in processes that fork (RUSTSEC-2026-0594). The lockfile now
+        pins cookie 0.18.3, so cargo audit passes again.
+  breaking: []
