@@ -8,6 +8,7 @@ interface DeleteButtonProps extends Omit<
   onDelete: () => void | Promise<void>;
   size?: 'sm' | 'md' | 'lg';
   variant?: 'danger' | 'warning' | 'icon-only';
+  confirmNotice?: string;
 }
 
 /**
@@ -24,6 +25,7 @@ export const DeleteButton: React.FC<DeleteButtonProps> = ({
   variant = 'icon-only',
   children,
   title,
+  confirmNotice,
   style: customStyle,
   ...rest
 }) => {
@@ -74,6 +76,15 @@ export const DeleteButton: React.FC<DeleteButtonProps> = ({
           </>
         )}
       </button>
+      {confirmNotice !== undefined && (
+        <div
+          className={`small text-danger w-100${isConfirming ? ' mt-1' : ''}`}
+          role="status"
+          data-testid="delete-confirm-notice"
+        >
+          {isConfirming ? confirmNotice : ''}
+        </div>
+      )}
       {isConfirming && (
         <style>{`
         @keyframes pulse-warning {

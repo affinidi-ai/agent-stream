@@ -87,6 +87,7 @@ scripts work is in [`docs/development/DEVELOPMENT.md`](docs/development/DEVELOPM
 
 - **Every user-visible change** needs a changelog fragment — see rule 3.
 - **Dashboard UI (`www/default/src/**`)** follows the existing dashboard design conventions: reuse the shared shell components, tokens, and dark theme already in the tree; keep page entry files orchestration-focused and extract sections, hooks, helpers, and local types as pages grow.
+- **Delete confirmation:** `DeleteButton` can show a visible notice during its confirm step (`confirmNotice`, in a `role="status"` region that stays mounted). Wording that says what deleting a user does comes from `www/default/src/utils/userDelete.ts`; details are in [`www/default/AGENTS.md`](www/default/AGENTS.md).
 
 For frontend work under `www/default/`, use the scoped instructions at
 [`www/default/AGENTS.md`](www/default/AGENTS.md). They cover the Surface builder elements,

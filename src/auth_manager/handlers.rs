@@ -1,7 +1,7 @@
 use axum::extract::Multipart;
 use axum::{Extension, Json, extract::Path, http::StatusCode};
 
-use super::types::{UpdateProfileRequest, UpdateUserRequest, User};
+use super::types::{DeleteUserResponse, UpdateProfileRequest, UpdateUserRequest, User};
 use crate::auth::storage::{PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
 use crate::auth_manager::pat::PatContext;
@@ -472,7 +472,7 @@ pub async fn delete_user(
     Extension(pat_authenticator): Extension<Option<std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator>>>,
     pat: Option<Extension<PatContext>>,
     Path(user_id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<DeleteUserResponse>, (StatusCode, String)> {
     // Load caller for authorization decisions
     let caller = storage
         .load_user_by_id(&caller_user_id)
@@ -506,8 +506,6 @@ pub async fn delete_user(
         return Err((StatusCode::FORBIDDEN, "Cannot delete administrator users".to_string()));
     }
 
-    let already_deleted = user_data.deleted_at.is_some();
-
     let mut revoked_tokens = 0;
     if let Some(authenticator) = &pat_authenticator {
         revoked_tokens = authenticator
@@ -516,7 +514,7 @@ pub async fn delete_user(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
     }
 
-    storage
+    let deleted = storage
         .delete_user(&user_data.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete user: {}", e)))?;
@@ -527,13 +525,15 @@ pub async fn delete_user(
         caller_user_id = %caller_user_id,
         caller_username = %caller.username,
         target_user_id = %user_id,
-        already_deleted,
+        already_deleted = !deleted.changed,
         revoked_tokens,
         "User deleted by {}",
         caller.username,
     );
 
-    if !already_deleted && let Some(notif_store) = &notification_store {
+    if deleted.changed
+        && let Some(notif_store) = &notification_store
+    {
         let notif = notif_store.clone();
         tokio::spawn(async move {
             crate::integrations::trigger_user_deleted(notif.as_ref(), &user_data).await;
@@ -549,7 +549,7 @@ pub async fn delete_user(
         tracing::info!("Revoked {} active session(s) for deleted user_id={}", revoked, user_id);
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(DeleteUserResponse { outcome: deleted.outcome }))
 }
 
 /// Get current user profile

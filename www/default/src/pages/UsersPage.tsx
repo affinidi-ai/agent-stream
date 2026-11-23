@@ -4,7 +4,9 @@ import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
 import {
-  DELETE_USER_SUCCESS,
+  type DeleteOutcome,
+  deleteConfirmNotice,
+  deleteSuccessMessage,
   DELETE_USER_TITLE,
   isDeletedKeptUser,
   KEPT_ACCOUNT_HEADING,
@@ -43,6 +45,7 @@ interface User {
   avatar_path?: string;
   oidc?: { issuer: string; subject: string };
   saml_id?: string;
+  has_oidc_account?: boolean;
 }
 
 const UsersPage: React.FC = () => {
@@ -104,8 +107,10 @@ const UsersPage: React.FC = () => {
   const handleDelete = useCallback(
     async (user: User) => {
       try {
-        await apiClient.delete(`/users/${user.user_id}`);
-        setSuccess(DELETE_USER_SUCCESS);
+        const { data } = await apiClient.delete<{ outcome?: DeleteOutcome }>(
+          `/users/${user.user_id}`
+        );
+        setSuccess(deleteSuccessMessage(data?.outcome, user));
         setTimeout(() => setSuccess(null), 3000);
         fetchUsers();
       } catch (err: any) {
@@ -372,6 +377,7 @@ const UsersPage: React.FC = () => {
                                 onDelete={() => handleDelete(user)}
                                 className="btn-sm"
                                 title={DELETE_USER_TITLE}
+                                confirmNotice={deleteConfirmNotice(user, true)}
                               />
                             )}
                         </td>
@@ -524,6 +530,7 @@ const UsersPage: React.FC = () => {
                     }}
                     variant="danger"
                     title={DELETE_USER_TITLE}
+                    confirmNotice={deleteConfirmNotice(selectedUser)}
                   >
                     Delete User
                   </DeleteButton>

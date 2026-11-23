@@ -3,6 +3,40 @@ export const DELETE_USER_TITLE =
 
 export const DELETE_USER_SUCCESS = 'User deleted successfully';
 
+export const DELETE_OIDC_USER_NOTICE =
+  'This user signs in with OpenID Connect. Their record is not removed: it is kept disabled under their provider account, so their next sign-in is refused until an administrator approves them again.';
+
+export const DELETE_OIDC_USER_SUCCESS =
+  'User disabled. Their OpenID Connect account stays on a disabled record and is refused at sign-in until an administrator approves them again.';
+
+export const DELETE_KEPT_USER_SUCCESS =
+  'User disabled. Their record is kept and is refused at sign-in until an administrator approves them again.';
+
+export const DELETE_OIDC_USER_NOTICE_SHORT =
+  'OpenID Connect user: the record is kept disabled, not removed.';
+
+export type DeleteOutcome = 'removed' | 'disabled';
+
+export const deleteConfirmNotice = (
+  user: { has_oidc_account?: boolean },
+  compact = false
+): string | undefined => {
+  if (!user.has_oidc_account) {
+    return undefined;
+  }
+  return compact ? DELETE_OIDC_USER_NOTICE_SHORT : DELETE_OIDC_USER_NOTICE;
+};
+
+export const deleteSuccessMessage = (
+  outcome: DeleteOutcome | undefined,
+  user: { has_oidc_account?: boolean }
+): string => {
+  if (outcome !== 'disabled') {
+    return DELETE_USER_SUCCESS;
+  }
+  return user.has_oidc_account ? DELETE_OIDC_USER_SUCCESS : DELETE_KEPT_USER_SUCCESS;
+};
+
 export const KEPT_ACCOUNT_HEADING = 'Deleted:';
 
 export const PROVIDER_ACCOUNT_HEADING = 'Provider account:';
@@ -29,3 +63,8 @@ export const keptAccountDetail = (label: string): string => `kept disabled for t
 
 export const isDeletedKeptUser = (user: KeptAccount & { status: string }): boolean =>
   user.status === 'disabled' && keptAccountLabel(user) !== null;
+
+export const rejectSuccessMessage = (outcome: DeleteOutcome | undefined, name: string): string =>
+  outcome === 'disabled'
+    ? `User '${name}' rejected. Their record is kept and is refused at sign-in until an administrator approves them again.`
+    : `User '${name}' rejected and deleted`;
