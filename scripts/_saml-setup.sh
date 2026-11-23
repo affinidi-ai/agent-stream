@@ -2,7 +2,8 @@
 # Apply SAML authentication configuration to a target env directory.
 # Copies your IdP signing certificate into envs/certs/ (shared) and the target
 # env, switches auth_mode to "saml" in config.toml, and substitutes
-# $AZURE_TENANT and the SP domain placeholders in config/saml.json.
+# $AZURE_TENANT and the SP domain placeholders in config/saml.json, removing a
+# non-null idp_slo_url. A true require_encrypted_assertions stops the script.
 # Optional env: SAML_IDP_CERT (cert path), SAML_SP_ENTITY_ID (SP entity ID).
 #
 # Usage:
@@ -64,6 +65,21 @@ case "${current_idp_cert_path}" in
     exit 1
     ;;
 esac
+
+# A non-null idp_slo_url refuses startup (SAML single logout is not supported),
+# and _prepare.sh never overwrites an existing saml.json, so remove it here.
+if jq -e '.idp_slo_url != null' "${saml_json}" > /dev/null; then
+  saml_json_set 'del(.idp_slo_url)'
+  echo "✅ Removed idp_slo_url (SAML single logout is not supported)"
+fi
+# "require_encrypted_assertions": true refuses startup (encrypted assertions are
+# not supported). Changing it needs a matching IdP change, so refuse here.
+if jq -e '.require_encrypted_assertions == true' "${saml_json}" > /dev/null; then
+  echo "❌ ${saml_json} sets require_encrypted_assertions to true; encrypted SAML assertions are not supported." >&2
+  echo "   Set it to false or remove it, and configure the identity provider to send" >&2
+  echo "   unencrypted signed assertions." >&2
+  exit 1
+fi
 
 # 1. Copy the IdP cert into the shared envs/certs/ directory on every explicit
 # `auth=saml` run, so a rotation rolls out to every env. For Microsoft Entra

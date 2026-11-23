@@ -23,7 +23,7 @@ is called as `/api/auth/login/start`. See
 
 An appliance uses one sign-in mode, set by `auth_mode` in `config.toml` at startup:
 `passkey` (the default), `saml` or `oidc`. Only the routes of the active mode are mounted.
-`saml` reads `saml.json` and fails startup if it cannot be read; `oidc` reads `oidc.json` and
+`saml` reads `saml.json` and fails startup if it cannot be read or any of its settings is refused; `oidc` reads `oidc.json` and
 fails startup if it cannot be read or any of its settings is refused.
 
 | Route | Permission | Purpose |
@@ -119,8 +119,7 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
   for the dashboard and redirects to `/`. The page's one inline script carries a fresh nonce,
   and its `Content-Security-Policy` runs only that script (see
   [Security headers](OBSERVABILITY.md#security-headers)).
-- Signing out ends the appliance session only; it does not sign out of the identity
-  provider.
+- Signing out ends the dashboard session only; see [Known limitations](#known-limitations).
 
 ## OIDC sign-in
 
@@ -509,6 +508,10 @@ Every system-settings and user-settings response sends `prometheus_auth_password
 - No action removes a kept record, because removing it lets the account sign in again. To
   answer an erasure request, delete the record's file from `_storage/`; the account's next
   sign-in then creates a new approved user, so disable the account at the provider first.
+- Accepted risk: SAML single logout is not supported. Signing out ends the dashboard session
+  only and does not sign out of the identity provider, so the next SAML sign-in in that browser
+  can complete without asking for credentials. Sign out of the identity provider as well, or
+  have it require re-authentication.
 
 ## Related
 
