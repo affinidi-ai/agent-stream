@@ -11,7 +11,8 @@ pub enum UserRole {
 }
 
 impl UserRole {
-    /// Orders roles by the access they grant, so the highest of several can be chosen.
+    /// Orders roles by the access they grant, so the highest of several can be chosen
+    /// and the PAT scope ceiling can compare an issuer with its subject.
     pub fn rank(&self) -> u8 {
         match self {
             UserRole::User => 0,

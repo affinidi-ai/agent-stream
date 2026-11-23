@@ -896,7 +896,7 @@ pub struct SamlAttributes {
 
 /// The attributes of an assertion. The subject's `NameID` is added to both
 /// maps, replacing any attribute of that name.
-fn assertion_attributes(assertion: &Assertion) -> SamlAttributes {
+pub(super) fn assertion_attributes(assertion: &Assertion) -> SamlAttributes {
     let statements = assertion
         .attribute_statements
         .as_deref()
@@ -956,7 +956,7 @@ fn attribute_values(statements: &[AttributeStatement]) -> HashMap<String, Vec<St
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use samael::attribute::{Attribute, AttributeValue};
     use samael::schema::{
@@ -964,7 +964,7 @@ mod tests {
         SubjectNameID,
     };
 
-    fn statement(attributes: &[(&str, &[&str])]) -> AttributeStatement {
+    pub(crate) fn statement(attributes: &[(&str, &[&str])]) -> AttributeStatement {
         AttributeStatement {
             attributes: attributes
                 .iter()
@@ -1051,7 +1051,7 @@ mod tests {
         assert_eq!(identity.get("id"), None);
     }
 
-    fn assertion(
+    pub(crate) fn assertion(
         name_id: Option<&str>,
         statements: Vec<AttributeStatement>,
     ) -> Assertion {
@@ -1132,59 +1132,6 @@ mod tests {
                 .map(String::as_str),
             Some("two")
         );
-    }
-
-    #[tokio::test]
-    async fn a_name_id_role_source_grants_the_role_its_value_maps_to() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = crate::auth::storage::PasskeyStorage::new(
-            temp.path()
-                .join("passkeys")
-                .to_string_lossy()
-                .to_string(),
-            temp.path()
-                .join("avatars")
-                .to_string_lossy()
-                .to_string(),
-        )
-        .await
-        .unwrap();
-        let config = SamlConfig {
-            idp_entity_id: String::new(),
-            idp_sso_url: String::new(),
-            idp_slo_url: None,
-            sp_entity_id: String::new(),
-            sp_acs_url: String::new(),
-            idp_cert_path: String::new(),
-            attribute_mapping: crate::auth::auth_config::SamlAttributeMapping {
-                user_id: "id".to_string(),
-                username: "username".to_string(),
-                role: "NameID".to_string(),
-                ..Default::default()
-            },
-            role_mapping: HashMap::from([("alice@example.com".to_string(), "administrator".to_string())]),
-            require_encrypted_assertions: false,
-            sign_requests: false,
-            sp_key_path: None,
-            sp_cert_path: None,
-            graph_api: None,
-        };
-        let sign_in = |name_id: &'static str, id: &'static str| {
-            let attributes =
-                assertion_attributes(&assertion(Some(name_id), vec![statement(&[("id", &[id]), ("username", &[id])])]));
-            let storage = &storage;
-            let config = &config;
-            async move {
-                crate::auth::saml::user_provisioning::provision_user_from_saml(storage, &attributes, config, "")
-                    .await
-                    .unwrap()
-                    .role
-            }
-        };
-
-        sign_in("primary@example.com", "primary").await;
-        assert_eq!(sign_in("alice@example.com", "alice").await, crate::auth::types::UserRole::Administrator);
-        assert_eq!(sign_in("bob@example.com", "bob").await, crate::auth::types::UserRole::User);
     }
 
     const BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";

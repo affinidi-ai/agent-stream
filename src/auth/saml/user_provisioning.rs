@@ -255,6 +255,15 @@ fn determine_role(
         .map(|saml_role| role_for_value(saml_role, config))
         .max_by_key(UserRole::rank)
         .unwrap_or(UserRole::User);
+    let unmapped = saml_roles
+        .iter()
+        .filter(|saml_role| {
+            !config
+                .role_mapping
+                .contains_key(saml_role.as_str())
+        })
+        .count();
+    debug!("determine_role: {} of {} SAML role values have no role_mapping entry", unmapped, saml_roles.len());
 
     for (saml_role, role) in legacy_role_hints(saml_roles, config, &resolved) {
         warn!(
@@ -302,7 +311,6 @@ fn role_for_value(
         .role_mapping
         .get(saml_role)
     else {
-        debug!("determine_role: no role_mapping entry for {:?}", saml_role);
         return UserRole::User;
     };
 
@@ -573,6 +581,33 @@ mod tests {
         config.attribute_mapping.role = "NameID".to_string();
         assert_eq!(determine_role(&with_name_id("alice@example.com"), &config), UserRole::Administrator);
         assert_eq!(determine_role(&with_name_id("bob@example.com"), &config), UserRole::User);
+    }
+
+    #[tokio::test]
+    async fn a_name_id_role_source_grants_the_role_its_value_maps_to() {
+        use crate::auth::saml::service::assertion_attributes;
+        use crate::auth::saml::service::tests::{assertion, statement};
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let mut config = config_mapping(&[("alice@example.com", "administrator")]);
+        config.attribute_mapping.role = "NameID".to_string();
+        let sign_in = |name_id: &'static str, id: &'static str| {
+            let attributes =
+                assertion_attributes(&assertion(Some(name_id), vec![statement(&[("id", &[id]), ("username", &[id])])]));
+            let storage = &storage;
+            let config = &config;
+            async move {
+                provision_user_from_saml(storage, &attributes, config, "")
+                    .await
+                    .unwrap()
+                    .role
+            }
+        };
+
+        sign_in("primary@example.com", "primary").await;
+        assert_eq!(sign_in("alice@example.com", "alice").await, UserRole::Administrator);
+        assert_eq!(sign_in("bob@example.com", "bob").await, UserRole::User);
     }
 
     #[test]
