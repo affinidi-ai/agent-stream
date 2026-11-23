@@ -1,0 +1,29 @@
+branch: fix/prompt-guard-card-and-ssn-patterns
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-23T12:00:00.000Z'
+      title: ⭐ Catch spaced card and SSN numbers in Prompt Guard and fail closed
+      description: >-
+        Affects 1.0.2 and earlier; fixed in the next release. The built-in credit_card
+        Prompt Guard pattern matched only digits written together, so 4545 4545 4545 4545
+        reached the model, and the built-in ssn pattern used look-around the regex engine
+        cannot compile, so it never ran. A rule naming a built-in pattern that was missing
+        or did not compile, or a custom pattern that did not compile, was skipped and the
+        text passed through. credit_card now also matches any 14 to 19 digit number written
+        together or with single spaces or dashes between digits, with no checksum, so mask
+        guards also redact long IDs, timestamps written as digits and adjacent dates. A mask
+        guard applies credit_card after its other rules, so an SSN or phone number written
+        right after a card is masked rather than partly absorbed into the card match. ssn and ssn_simple accept a space or a dash
+        between groups. A Surface whose Prompt Guard has a rule that cannot be evaluated
+        now refuses every request with 502 guardrail_unavailable and code
+        prompt_guard_pattern_unavailable before any upstream call, and saving such a Surface
+        is refused with 400, including when the rule is in a Variant's Prompt Guard. Built-in patterns that cannot be used are logged at ERROR at
+        startup and counted in agent_stream_prompt_guard_pattern_errors_total. An upgrade
+        does not replace a deployed prompt-guard.json: replace it from
+        config/examples/prompt-guard.example.json, or Surfaces whose rules name ssn refuse
+        every request until you do.
+  breaking: []

@@ -38,9 +38,11 @@ until configured.
 On the request side, inside each executor attempt, in this order
 (`execute_once` and `execute_streaming` in [`src/pipes/executor.rs`](../src/pipes/executor.rs)):
 
-1. Pattern guards (`prompt_guard.request`), in list order.
-2. Model PII detectors (`prompt_guard.llm_pii`), on the already-masked text.
-3. Pronoun linking, when any request guard sets `link_pronouns`.
+1. A check that every request and response pattern rule can be evaluated; see
+   [Rules that cannot be evaluated](#rules-that-cannot-be-evaluated).
+2. Pattern guards (`prompt_guard.request`), in list order.
+3. Model PII detectors (`prompt_guard.llm_pii`), on the already-masked text.
+4. Pronoun linking, when any request guard sets `link_pronouns`.
 
 Then the request Expert Witnesses, Judge, and Decider run, then the model. On the
 response side, after the Jury: pattern guards (`prompt_guard.response`), then the
@@ -128,7 +130,12 @@ Each entry in `request` or `response` is `{ "regex": RegexRules, "rejection": Re
 | `rules` | required | Built-in or custom patterns, applied in order. |
 
 A rule is either `{"builtin": "<key>"}` or `{"pattern": "<regex>", "label": "<name>"}`.
-Rules run in sequence, each on the output of the one before. With `reject`,
+Rules run in sequence, each on the output of the one before. In a `mask` guard,
+`credit_card` runs after the guard's other rules wherever it is listed: its pattern can
+run on into a number that follows a card after a single space or dash
+(`4545 4545 4545 4545 123-45-6789`), so the other rules mask that number first. This
+holds within one guard; when `credit_card` and `ssn` are in separate guards, list the
+`ssn` guard first. With `reject`,
 processing stops at the first match, which returns the guard's `rejection` or the
 default 403 body
 `{"error":{"message":"Request rejected: content violates prompt guard policy","type":"prompt_guard_violation","code":"content_policy_violation"}}`.
@@ -146,21 +153,42 @@ Built-in patterns are loaded once at startup from `prompt-guard.json`, named by
 ([`src/pipes/prompt_guard/definitions.rs`](../src/pipes/prompt_guard/definitions.rs)).
 The shipped file is
 [`config/examples/prompt-guard.example.json`](../config/examples/prompt-guard.example.json).
-Each entry has a `key`, `label`, `icon`, `description`, and `regex`. An invalid regex
-is skipped with a warning at load, and a rule naming an unknown key is skipped with a
-warning at request time. `GET /v1/prompt-guard/config` serves the pattern list.
+Each entry has a `key`, `label`, `icon`, `description`, and `regex`. A pattern whose
+regex does not compile cannot be used; see
+[Rules that cannot be evaluated](#rules-that-cannot-be-evaluated).
+`GET /v1/prompt-guard/config` serves the pattern list. An upgrade does not replace a
+deployed `prompt-guard.json`; replace it from the shipped file to pick up pattern fixes.
 
 | Key | Matches |
 | --- | --- |
 | `email` | Email addresses |
-| `ssn` | US Social Security Numbers (`NNN-NN-NNNN`), excluding invalid ranges |
-| `ssn_simple` | Any `NNN-NN-NNNN` |
+| `ssn` | US Social Security Numbers with a dash or space between groups (`NNN-NN-NNNN`, `NNN NN NNNN`), excluding invalid area, group and serial numbers |
+| `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix |
 | `phone_number` | US, international (`+` country code), and Australian mobile numbers |
-| `credit_card` | Visa, Mastercard, Amex, Diners Club, Discover, and JCB numbers |
+| `credit_card` | Visa, Mastercard, Amex, Diners Club, Discover, and JCB numbers, and any 14 to 19 digit number written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`). There is no checksum, so long IDs, timestamps written as digits, grouped references and adjacent dates also match. |
 | `date_of_birth` | Dates preceded by birth keywords (birth, dob, born) |
 | `ip_address` | IPv4 addresses with octet validation |
 | `passport` | US passport numbers |
 | `street_address` | Basic US street addresses |
+
+### Rules that cannot be evaluated
+
+A pattern rule cannot be evaluated when it names a built-in pattern that is not
+defined, whose regex did not compile, or that is unavailable because
+`prompt-guard.json` did not load, or when it is a custom `pattern` that does not
+compile. Prompt Guard fails closed on such a rule:
+
+- Saving a Surface whose enabled Prompt Guard has one is refused with `400`, and the
+  error names the rule.
+- A Surface already stored with one, for example after `prompt-guard.json` changed,
+  refuses every request before any upstream call, whichever side the rule is on, with
+  `502` and
+  `{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`.
+  The guard's `rejection` is not used, and the `WARN` log line names the rule and why.
+  Surfaces without such a rule are unaffected.
+- At startup, each built-in pattern that does not compile, or a file that did not load,
+  is logged at `ERROR` and counted in `agent_stream_prompt_guard_pattern_errors_total`
+  ([OBSERVABILITY.md](OBSERVABILITY.md)).
 
 ## Model-backed detection
 

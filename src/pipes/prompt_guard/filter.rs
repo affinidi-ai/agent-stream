@@ -596,6 +596,77 @@ pub fn apply_response_guards(
     }
 }
 
+/// Body returned when a Prompt Guard rule cannot be evaluated.
+const RULE_UNAVAILABLE_BODY: &str = r#"{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}"#;
+
+/// Why `rule` cannot be evaluated, or `None` when it can.
+fn rule_issue(rule: &RegexRule) -> Option<String> {
+    match rule {
+        RegexRule::Builtin { builtin } => super::definitions::builtin_issue(builtin)
+            .map(|issue| format!("built-in pattern '{builtin}' {}", issue.description())),
+        RegexRule::Pattern { pattern, label } => get_or_compile_regex(pattern)
+            .is_none()
+            .then(|| {
+                format!(
+                    "custom pattern '{}' does not compile",
+                    label
+                        .as_deref()
+                        .unwrap_or(pattern)
+                )
+            }),
+    }
+}
+
+/// The first rule in `config`'s request and response regex guards that cannot
+/// be evaluated, described for logs and errors.
+fn first_rule_issue(config: &PromptGuardConfig) -> Option<String> {
+    config
+        .request
+        .iter()
+        .map(|guard| &guard.regex)
+        .chain(
+            config
+                .response
+                .iter()
+                .map(|guard| &guard.regex),
+        )
+        .flat_map(|rules| rules.rules.iter())
+        .find_map(rule_issue)
+}
+
+/// Refuse a Surface save whose enabled Prompt Guard has a regex rule that
+/// cannot be evaluated: a built-in pattern that is not loaded and compiled, or
+/// a custom pattern that does not compile.
+pub fn validate_regex_rules(config: &PromptGuardConfig) -> Result<(), String> {
+    if !config.enabled {
+        return Ok(());
+    }
+    match first_rule_issue(config) {
+        Some(issue) => Err(format!("Prompt Guard {issue}")),
+        None => Ok(()),
+    }
+}
+
+/// A 502 rejection when an enabled Prompt Guard has a request or response regex
+/// rule that cannot be evaluated, so the request is refused before any
+/// upstream call instead of passing unchecked. `None` when every rule can be
+/// evaluated. The Surface's own `rejection` is not used: the content was not
+/// flagged.
+pub fn unusable_rule_rejection(config: &PromptGuardConfig) -> Option<GuardRejection> {
+    if !config.enabled {
+        return None;
+    }
+    let issue = first_rule_issue(config)?;
+    warn!("Prompt guard rule unavailable, refusing the request: {issue}");
+    Some(GuardRejection {
+        status_code: 502,
+        body: RULE_UNAVAILABLE_BODY.to_string(),
+        content_type: "application/json".to_string(),
+        reason: Some(format!("prompt guard rule unavailable: {issue}")),
+        categories: Vec::new(),
+    })
+}
+
 /// Apply regex guard rules to request messages.
 ///
 /// Scans `messages[].content` in an OpenAI-compatible request body.
@@ -753,10 +824,21 @@ enum RegexResult {
     Mask(String),
 }
 
+/// Whether a mask guard applies `rule` after its other rules. The `credit_card`
+/// pattern can run on into a number that follows a card after a single space or
+/// dash (`4545 4545 4545 4545 123-45-6789`), so the other rules mask that number first.
+fn masks_last(
+    rules: &RegexRules,
+    rule: &RegexRule,
+) -> bool {
+    rules.action == GuardAction::Mask && matches!(rule, RegexRule::Builtin { builtin } if builtin == "credit_card")
+}
+
 /// Apply all regex rules to a text string.
 ///
 /// Rules are processed sequentially — each rule operates on the output of the previous one
-/// (for mask action). For reject action, processing stops at the first match.
+/// (for mask action), with `credit_card` moved after the others (see [`masks_last`]).
+/// For reject action, processing stops at the first match.
 fn apply_regex_rules_to_text(
     text: &str,
     rules: &RegexRules,
@@ -765,7 +847,17 @@ fn apply_regex_rules_to_text(
     let mut current = text.to_string();
     let mut any_modified = false;
 
-    for rule in &rules.rules {
+    let ordered = rules
+        .rules
+        .iter()
+        .filter(|rule| !masks_last(rules, rule))
+        .chain(
+            rules
+                .rules
+                .iter()
+                .filter(|rule| masks_last(rules, rule)),
+        );
+    for rule in ordered {
         match rule {
             RegexRule::Builtin { builtin } => {
                 let ranges: Vec<(std::ops::Range<usize>, String)> =
@@ -775,8 +867,9 @@ fn apply_regex_rules_to_text(
                             .map(|m| (m.range(), m.as_str().to_string()))
                             .collect()
                     } else {
-                        warn!("Prompt guard: built-in pattern '{}' not found in definitions — skipping", builtin);
-                        continue;
+                        let issue = rule_issue(rule).unwrap_or_else(|| format!("built-in pattern '{builtin}'"));
+                        warn!("Prompt guard: {issue} — rejecting");
+                        return RegexResult::Reject(format!("Prompt guard rule unavailable: {issue}"));
                     };
                 let label = super::definitions::get_pattern_definition(builtin)
                     .map(|d| d.label.as_str())
@@ -853,6 +946,9 @@ fn apply_regex_rules_to_text(
                             }
                         }
                     }
+                } else if let Some(issue) = rule_issue(rule) {
+                    warn!("Prompt guard: {issue} — rejecting");
+                    return RegexResult::Reject(format!("Prompt guard rule unavailable: {issue}"));
                 }
             }
         }
@@ -874,10 +970,11 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\\b"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|\\d(?:[ -]?\\d){13,18})\\b"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "\\b(?:(?:\\+1|1)[-. ]?)?(?:\\([2-9]\\d{2}\\)|[2-9]\\d{2})[-. ]?\\d{3}[-. ]?\\d{4}\\b"},
-            {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"}
+            {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
+            {"key": "broken", "label": "Broken", "icon": "fa-ban", "description": "Does not compile", "regex": "(?!x)y"}
         ]
     }"#;
 
@@ -1741,5 +1838,174 @@ mod tests {
         assert!(matches!(result, GuardOutcome::Rejected(_)));
         assert!(logs.contains("custom pattern 'credentials' matched"), "{logs}");
         assert!(!logs.contains("hunter2"), "a log holds the matched value: {logs}");
+    }
+
+    fn mask_guard(builtins: &[&str]) -> Vec<RequestGuard> {
+        vec![RequestGuard {
+            regex: RegexRules {
+                action: GuardAction::Mask,
+                mask_mode: MaskMode::Redact,
+                restore_in_response: false,
+                link_pronouns: false,
+                rules: builtins
+                    .iter()
+                    .map(|b| RegexRule::Builtin { builtin: b.to_string() })
+                    .collect(),
+            },
+            rejection: None,
+        }]
+    }
+
+    #[test]
+    fn a_mask_guard_masks_a_number_right_after_a_card_before_the_card_rule_runs_on_into_it() {
+        init_test_definitions();
+        for rules in [["credit_card", "ssn"], ["ssn", "credit_card"]] {
+            let mut body = make_request("4545 4545 4545 4545 123-45-6789");
+            assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+            assert_eq!(body["messages"][0]["content"], "<CREDIT_CARD> <SSN>", "rules in order {rules:?}");
+        }
+    }
+
+    #[test]
+    fn a_reject_guard_keeps_its_rule_order() {
+        init_test_definitions();
+        let guards = vec![RequestGuard {
+            regex: RegexRules {
+                action: GuardAction::Reject,
+                mask_mode: MaskMode::Redact,
+                restore_in_response: false,
+                link_pronouns: false,
+                rules: vec![
+                    RegexRule::Builtin {
+                        builtin: "credit_card".to_string(),
+                    },
+                    RegexRule::Builtin { builtin: "ssn".to_string() },
+                ],
+            },
+            rejection: None,
+        }];
+        let mut body = make_request("4545 4545 4545 4545 and 123-45-6789");
+        match apply_request_guards(&mut body, &guards) {
+            GuardOutcome::Rejected(rejection) => assert_eq!(rejection.reason.as_deref(), Some("Credit Card detected")),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    // === Unusable rules ===
+
+    fn prompt_guard_with(
+        enabled: bool,
+        request_rule: Option<serde_json::Value>,
+        response_rule: Option<serde_json::Value>,
+    ) -> PromptGuardConfig {
+        let guard = |rule: serde_json::Value| json!({ "regex": { "action": "reject", "rules": [rule] } });
+        serde_json::from_value(json!({
+            "enabled": enabled,
+            "request": request_rule.map(guard).into_iter().collect::<Vec<_>>(),
+            "response": response_rule.map(guard).into_iter().collect::<Vec<_>>(),
+        }))
+        .expect("prompt guard config parses")
+    }
+
+    fn assert_rule_unavailable(
+        config: &PromptGuardConfig,
+        expected_issue: &str,
+    ) {
+        let rejection = unusable_rule_rejection(config).expect("an unusable rule refuses the request");
+        assert_eq!(rejection.status_code, 502);
+        let body: Value = serde_json::from_str(&rejection.body).expect("rejection body is JSON");
+        assert_eq!(body["error"]["type"], "guardrail_unavailable");
+        assert_eq!(body["error"]["code"], "prompt_guard_pattern_unavailable");
+        let reason = rejection
+            .reason
+            .expect("the rejection names the rule");
+        assert!(reason.contains(expected_issue), "unexpected reason: {reason}");
+    }
+
+    #[test]
+    fn a_rule_naming_a_builtin_that_did_not_compile_refuses_the_request_on_either_side() {
+        init_test_definitions();
+        let request = prompt_guard_with(true, Some(json!({ "builtin": "broken" })), None);
+        assert_rule_unavailable(&request, "built-in pattern 'broken' did not compile");
+        let response = prompt_guard_with(true, None, Some(json!({ "builtin": "broken" })));
+        assert_rule_unavailable(&response, "built-in pattern 'broken' did not compile");
+    }
+
+    #[test]
+    fn a_rule_naming_an_unknown_builtin_refuses_the_request_on_either_side() {
+        init_test_definitions();
+        let request = prompt_guard_with(true, Some(json!({ "builtin": "not_a_pattern" })), None);
+        assert_rule_unavailable(&request, "built-in pattern 'not_a_pattern' is not defined");
+        let response = prompt_guard_with(true, None, Some(json!({ "builtin": "not_a_pattern" })));
+        assert_rule_unavailable(&response, "built-in pattern 'not_a_pattern' is not defined");
+    }
+
+    #[test]
+    fn a_custom_pattern_that_does_not_compile_refuses_the_request() {
+        init_test_definitions();
+        let request = prompt_guard_with(true, Some(json!({ "pattern": "(?!x)y", "label": "lookahead" })), None);
+        assert_rule_unavailable(&request, "custom pattern 'lookahead' does not compile");
+        let response = prompt_guard_with(true, None, Some(json!({ "pattern": "(?!x)y" })));
+        assert_rule_unavailable(&response, "custom pattern '(?!x)y' does not compile");
+    }
+
+    #[test]
+    fn usable_rules_and_a_disabled_prompt_guard_refuse_nothing() {
+        init_test_definitions();
+        let usable = prompt_guard_with(true, Some(json!({ "builtin": "ssn" })), Some(json!({ "pattern": r"\d+" })));
+        assert!(unusable_rule_rejection(&usable).is_none());
+        assert_eq!(validate_regex_rules(&usable), Ok(()));
+        let disabled = prompt_guard_with(false, Some(json!({ "builtin": "broken" })), None);
+        assert!(unusable_rule_rejection(&disabled).is_none());
+        assert_eq!(validate_regex_rules(&disabled), Ok(()));
+    }
+
+    #[test]
+    fn saving_unusable_rules_is_refused_naming_the_rule() {
+        init_test_definitions();
+        for (config, expected) in [
+            (
+                prompt_guard_with(true, Some(json!({ "builtin": "not_a_pattern" })), None),
+                "Prompt Guard built-in pattern 'not_a_pattern' is not defined",
+            ),
+            (
+                prompt_guard_with(true, None, Some(json!({ "builtin": "broken" }))),
+                "Prompt Guard built-in pattern 'broken' did not compile",
+            ),
+            (
+                prompt_guard_with(true, Some(json!({ "pattern": "(?!x)y", "label": "lookahead" })), None),
+                "Prompt Guard custom pattern 'lookahead' does not compile",
+            ),
+        ] {
+            assert_eq!(validate_regex_rules(&config), Err(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn applying_a_rule_that_cannot_be_evaluated_rejects_instead_of_passing() {
+        init_test_definitions();
+        for rule in [
+            RegexRule::Builtin { builtin: "broken".to_string() },
+            RegexRule::Builtin {
+                builtin: "not_a_pattern".to_string(),
+            },
+            RegexRule::Pattern {
+                pattern: "(?!x)y".to_string(),
+                label: None,
+            },
+        ] {
+            let mut body = make_request("Summarize the release notes");
+            match apply_request_guards(&mut body, &reject_guard(rule)) {
+                GuardOutcome::Rejected(rejection) => assert!(
+                    rejection
+                        .reason
+                        .as_deref()
+                        .is_some_and(|r| r.starts_with("Prompt guard rule unavailable")),
+                    "unexpected reason: {:?}",
+                    rejection.reason
+                ),
+                other => panic!("expected the unusable rule to reject, got {other:?}"),
+            }
+        }
     }
 }

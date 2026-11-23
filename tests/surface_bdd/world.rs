@@ -201,10 +201,23 @@ impl SurfaceWorld {
         root: &std::path::Path,
         standby: bool,
     ) -> ApplianceProcess {
+        self.start_appliance_with_prompt_guard(root, standby, None)
+            .await
+    }
+
+    /// [`Self::start_appliance`], with `prompt_guard_definitions` in place of
+    /// the shipped Prompt Guard definitions when given.
+    pub async fn start_appliance_with_prompt_guard(
+        &self,
+        root: &std::path::Path,
+        standby: bool,
+        prompt_guard_definitions: Option<&str>,
+    ) -> ApplianceProcess {
         let provider_base_urls = self.provider_base_urls();
         let options = LaunchOptions {
             provider_base_urls: &provider_base_urls,
             standby,
+            prompt_guard_definitions,
             ..LaunchOptions::default()
         };
         match ApplianceProcess::launch(root, &options).await {
@@ -213,6 +226,26 @@ impl SurfaceWorld {
                 panic!("agent-stream exited before it became ready\n\nagent-stream.log tail:\n{log_tail}")
             }
         }
+    }
+
+    /// Stop the running appliance and serve from a new one on the same storage,
+    /// with `prompt_guard_definitions` in place of the shipped Prompt Guard
+    /// definitions when given.
+    pub async fn restart_appliance(
+        &mut self,
+        prompt_guard_definitions: Option<&str>,
+    ) {
+        self.infra
+            .take()
+            .expect("the appliance should be running")
+            ._appliance
+            .stop()
+            .await;
+        let restarted = self
+            .start_appliance_with_prompt_guard(self.temp_dir.path(), false, prompt_guard_definitions)
+            .await;
+        self.serve_from(restarted)
+            .await;
     }
 
     /// Send the operator's and callers' requests to `appliance` from now on,

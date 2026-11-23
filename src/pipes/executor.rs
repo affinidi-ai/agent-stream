@@ -2172,6 +2172,8 @@ impl PipeExecutor {
         self.admit_platform_stages()
             .await?;
 
+        self.refuse_unusable_prompt_guard_rules()?;
+
         // ── Prompt guard (request) ──
         // Mirror the buffered path's request masking so the provider only ever
         // sees pseudonyms and the map for response re-hydration is available: a
@@ -2606,6 +2608,8 @@ impl PipeExecutor {
             self.check_rate_limits(None)
                 .await?;
         }
+
+        self.refuse_unusable_prompt_guard_rules()?;
 
         // ── Prompt guard (request) ──
         if let Some(prompt_guard) = &self.config.prompt_guard
@@ -4049,6 +4053,8 @@ impl PipeExecutor {
         let start = Instant::now();
         let _request_start = std::time::SystemTime::now();
         let trace_id = trace_id.unwrap_or_else(|| format!("pipe-{}", uuid::Uuid::new_v4()));
+
+        self.refuse_unusable_prompt_guard_rules()?;
 
         // ── Prompt guard (request) ──
         // Runs before routing and validation so the Decider and Judge both
@@ -6185,6 +6191,20 @@ impl PipeExecutor {
                 .insert(secret_id.to_string(), secret.clone());
         }
         Ok(resolved)
+    }
+
+    /// Refuse the request before any upstream call when the Surface's Prompt
+    /// Guard has a request or response regex rule that cannot be evaluated.
+    fn refuse_unusable_prompt_guard_rules(&self) -> Result<(), PipeError> {
+        match self
+            .config
+            .prompt_guard
+            .as_ref()
+            .and_then(crate::pipes::prompt_guard::unusable_rule_rejection)
+        {
+            Some(rejection) => Err(PipeError::guard_rejected(rejection, RejectionStage::RegexRequest, "regex")),
+            None => Ok(()),
+        }
     }
 
     /// Run every enabled model-PII detector for a request-side prompt guard.
@@ -9701,6 +9721,46 @@ mod tests {
             assert_eq!(backup.requests(), 1, "precondition: the backup was called");
             assert_eq!(base.header_values(KEY_HEADER), vec!["BASE"]);
             assert_eq!(backup.header_values(KEY_HEADER), vec!["BACKUP"]);
+        }
+
+        #[tokio::test]
+        async fn a_prompt_guard_rule_that_cannot_be_evaluated_refuses_the_call_before_the_upstream() {
+            for rule in [json!({ "builtin": "not_a_pattern" }), json!({ "pattern": "(?!x)y", "label": "lookahead" })] {
+                for side in ["request", "response"] {
+                    for streamed in [false, true] {
+                        let base = CaptureUpstream::answering("hello back").await;
+                        let _allowed = allow(&[&base]);
+                        let mut config = surface(&base.url);
+                        let mut prompt_guard = json!({ "enabled": true });
+                        prompt_guard[side] = json!([{ "regex": { "action": "reject", "rules": [rule.clone()] } }]);
+                        config.prompt_guard = Some(serde_json::from_value(prompt_guard).expect("prompt guard config"));
+                        let executor = PipeExecutor::new_with_secrets(&config, Some(store()));
+                        let result = if streamed {
+                            executor
+                                .execute_streaming(request(), None, CallerCredentials::default(), None)
+                                .await
+                                .map(|_| ())
+                        } else {
+                            executor
+                                .execute(request(), None, None, None, None)
+                                .await
+                                .map(|_| ())
+                        };
+
+                        let case = format!("{rule} on the {side}, streamed: {streamed}");
+                        match result {
+                            Err(PipeError::PromptGuardRejected { status_code, body, .. }) => {
+                                assert_eq!(status_code, 502, "{case}");
+                                let body: Value = serde_json::from_str(&body).expect("rejection body is JSON");
+                                assert_eq!(body["error"]["type"], "guardrail_unavailable", "{case}");
+                                assert_eq!(body["error"]["code"], "prompt_guard_pattern_unavailable", "{case}");
+                            }
+                            other => panic!("{case}: expected the unusable rule to refuse the call, got {other:?}"),
+                        }
+                        assert_eq!(base.requests(), 0, "{case}: the upstream was not called");
+                    }
+                }
+            }
         }
 
         #[tokio::test]

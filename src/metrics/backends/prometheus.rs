@@ -198,6 +198,19 @@ lazy_static! {
         counter
     };
 
+    /// Prompt Guard built-in patterns that cannot be used, found when `prompt-guard.json`
+    /// loads (labeled by pattern, reason). A non-zero value means rules naming them refuse requests.
+    pub static ref PROMPT_GUARD_PATTERN_ERRORS: IntCounterVec = {
+        let opts = Opts::new(
+            names::PROMPT_GUARD_PATTERN_ERRORS_TOTAL,
+            "Prompt Guard built-in patterns that cannot be used \
+             (reason = compile_failed|definitions_missing; pattern is empty when the file did not load)",
+        );
+        let counter = IntCounterVec::new(opts, &["pattern", "reason"]).unwrap();
+        REGISTRY.register(Box::new(counter.clone())).unwrap();
+        counter
+    };
+
     /// Number of identities seen
     pub static ref UNIQUE_IDENTITIES: IntGauge = {
         let opts = Opts::new(names::UNIQUE_IDENTITIES, "Number of unique agent identities observed");
@@ -715,6 +728,16 @@ pub fn track_storage_load_error(
 ) {
     STORAGE_LOAD_ERRORS
         .with_label_values(&[entity, reason])
+        .inc();
+}
+
+/// Track a Prompt Guard built-in pattern that cannot be used.
+pub fn track_prompt_guard_pattern_error(
+    pattern: &str,
+    reason: &str,
+) {
+    PROMPT_GUARD_PATTERN_ERRORS
+        .with_label_values(&[pattern, reason])
         .inc();
 }
 

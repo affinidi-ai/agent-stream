@@ -1,4 +1,5 @@
 use super::support::*;
+use crate::bdd_support::config::prompt_guard_definitions_with_unusable;
 use crate::world::SurfaceWorld;
 use cucumber::{given, then, when};
 use serde_json::json;
@@ -9,7 +10,8 @@ async fn llm_surface_uses_prompt_guard_to_reject_prompts_matching(
     surface_name: String,
     pattern: String,
 ) {
-    configure_prompt_guard(world, &surface_name, "request", "reject", pattern, "disallowed prompt").await;
+    let rule = json!({ "pattern": pattern, "label": "disallowed prompt" });
+    configure_prompt_guard(world, &surface_name, "request", "reject", rule).await;
 }
 
 #[given(expr = "LLM Surface {string} uses Prompt Guard to mask prompts matching {string} as {string}")]
@@ -19,7 +21,8 @@ async fn llm_surface_uses_prompt_guard_to_mask_prompts_matching(
     pattern: String,
     label: String,
 ) {
-    configure_prompt_guard(world, &surface_name, "request", "mask", pattern, &label).await;
+    let rule = json!({ "pattern": pattern, "label": label });
+    configure_prompt_guard(world, &surface_name, "request", "mask", rule).await;
 }
 
 #[given(expr = "LLM Surface {string} uses Prompt Guard to reject responses matching {string}")]
@@ -28,7 +31,8 @@ async fn llm_surface_uses_prompt_guard_to_reject_responses_matching(
     surface_name: String,
     pattern: String,
 ) {
-    configure_prompt_guard(world, &surface_name, "response", "reject", pattern, "disallowed response").await;
+    let rule = json!({ "pattern": pattern, "label": "disallowed response" });
+    configure_prompt_guard(world, &surface_name, "response", "reject", rule).await;
 }
 
 #[given(expr = "LLM Surface {string} uses Prompt Guard to mask responses matching {string} as {string}")]
@@ -38,7 +42,17 @@ async fn llm_surface_uses_prompt_guard_to_mask_responses_matching(
     pattern: String,
     label: String,
 ) {
-    configure_prompt_guard(world, &surface_name, "response", "mask", pattern, &label).await;
+    let rule = json!({ "pattern": pattern, "label": label });
+    configure_prompt_guard(world, &surface_name, "response", "mask", rule).await;
+}
+
+#[given(expr = "LLM Surface {string} uses Prompt Guard to reject prompts matching built-in pattern {string}")]
+async fn llm_surface_uses_prompt_guard_to_reject_builtin_pattern(
+    world: &mut SurfaceWorld,
+    surface_name: String,
+    builtin: String,
+) {
+    configure_prompt_guard(world, &surface_name, "request", "reject", json!({ "builtin": builtin })).await;
 }
 
 async fn configure_prompt_guard(
@@ -46,31 +60,102 @@ async fn configure_prompt_guard(
     surface_name: &str,
     seam: &str,
     action: &str,
-    pattern: String,
-    label: &str,
+    rule: serde_json::Value,
 ) {
     world.ensure_operator().await;
-    let guard = json!({
-        "regex": {
-            "action": action,
-            "rules": [
-                { "pattern": pattern, "label": label }
-            ]
-        }
-    });
     update_surface(
         world,
         surface_name,
-        |pipe| {
-            pipe["prompt_guard"] = json!({
-                "enabled": true,
-                "request": if seam == "request" { vec![guard.clone()] } else { Vec::new() },
-                "response": if seam == "response" { vec![guard] } else { Vec::new() }
-            });
-        },
+        |pipe| pipe["prompt_guard"] = prompt_guard_config(seam, action, rule),
         "Prompt Guard",
     )
     .await;
+}
+
+fn prompt_guard_config(
+    seam: &str,
+    action: &str,
+    rule: serde_json::Value,
+) -> serde_json::Value {
+    let guard = json!({ "regex": { "action": action, "rules": [rule] } });
+    json!({
+        "enabled": true,
+        "request": if seam == "request" { vec![guard.clone()] } else { Vec::new() },
+        "response": if seam == "response" { vec![guard] } else { Vec::new() }
+    })
+}
+
+#[given(expr = "the appliance has restarted with Prompt Guard built-in pattern {string} unusable")]
+async fn appliance_has_restarted_with_unusable_builtin(
+    world: &mut SurfaceWorld,
+    builtin: String,
+) {
+    let definitions = prompt_guard_definitions_with_unusable(&builtin);
+    world
+        .restart_appliance(Some(&definitions))
+        .await;
+}
+
+#[when(
+    expr = "the operator saves LLM Surface {string} with Prompt Guard rejecting prompts matching built-in pattern {string}"
+)]
+async fn operator_saves_surface_with_builtin_pattern(
+    world: &mut SurfaceWorld,
+    surface_name: String,
+    builtin: String,
+) {
+    let response = submit_surface_update(world, &surface_name, |pipe| {
+        pipe["prompt_guard"] = prompt_guard_config("request", "reject", json!({ "builtin": builtin }));
+    })
+    .await;
+    world.admin_response = Some(response);
+}
+
+#[then(expr = "the Surface save is refused naming built-in pattern {string}")]
+fn surface_save_is_refused_naming_builtin_pattern(
+    world: &mut SurfaceWorld,
+    builtin: String,
+) {
+    let response = world
+        .admin_response
+        .as_ref()
+        .expect("Surface save response should be recorded");
+    assert_eq!(
+        response.status, 400,
+        "expected the Surface save to be refused, got {}: {}",
+        response.status, response.text
+    );
+    let expected = format!("built-in pattern '{builtin}' is not defined");
+    assert!(
+        response
+            .text
+            .contains(&expected),
+        "expected the refusal to say {expected:?}, got: {}",
+        response.text
+    );
+}
+
+#[then(expr = "the request is refused because a Prompt Guard rule is unavailable")]
+fn request_is_refused_because_prompt_guard_rule_is_unavailable(world: &mut SurfaceWorld) {
+    let response = world
+        .caller_response
+        .as_ref()
+        .expect("caller response should be recorded");
+    assert_eq!(
+        response.status, 502,
+        "expected the unavailable Prompt Guard rule to refuse the request, got {}: {}",
+        response.status, response.text
+    );
+    assert_eq!(
+        response.body["error"]["type"], "guardrail_unavailable",
+        "expected the guardrail unavailable error type, got {}",
+        response.text
+    );
+    assert_eq!(
+        response.body["error"]["code"], "prompt_guard_pattern_unavailable",
+        "expected the unavailable Prompt Guard rule error code, got {}",
+        response.text
+    );
 }
 
 #[then(expr = "the request is rejected by the Prompt Guard")]

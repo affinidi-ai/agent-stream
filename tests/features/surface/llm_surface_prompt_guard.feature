@@ -19,6 +19,31 @@ Feature: LLM Surface Prompt Guard
     Then the caller receives a successful chat completion from provider "bravo"
     And provider "bravo" received the chat completion request
 
+  Scenario: Prompt Guard rejects a card number grouped with spaces before provider invocation
+    Given the operator can use the Admin API
+    And provider "bravo" can return chat completions
+    And the operator has published LLM Surface "guarded-chat" for route "/guarded-chat"
+    And LLM Surface "guarded-chat" uses Prompt Guard to reject prompts matching built-in pattern "credit_card"
+    When the caller sends chat prompt "My credit card number is 4545 4545 4545 4545" to LLM Surface "guarded-chat"
+    Then the request is rejected by the Prompt Guard
+    And provider "bravo" received no chat completion requests
+
+  Scenario: Saving a Surface whose Prompt Guard names an unknown built-in pattern is refused
+    Given the operator can use the Admin API
+    And the operator has published LLM Surface "guarded-chat" for route "/guarded-chat"
+    When the operator saves LLM Surface "guarded-chat" with Prompt Guard rejecting prompts matching built-in pattern "not_a_pattern"
+    Then the Surface save is refused naming built-in pattern "not_a_pattern"
+
+  Scenario: Prompt Guard refuses a request before provider invocation when its built-in pattern cannot be used
+    Given the operator can use the Admin API
+    And provider "bravo" can return chat completions
+    And the operator has published LLM Surface "guarded-chat" for route "/guarded-chat"
+    And LLM Surface "guarded-chat" uses Prompt Guard to reject prompts matching built-in pattern "ssn"
+    And the appliance has restarted with Prompt Guard built-in pattern "ssn" unusable
+    When the caller sends chat prompt "Summarize the release notes" to LLM Surface "guarded-chat"
+    Then the request is refused because a Prompt Guard rule is unavailable
+    And provider "bravo" received no chat completion requests
+
   Scenario: Prompt Guard masks a caller prompt before provider invocation
     Given provider "bravo" can return chat completions
     And the operator can use the Admin API

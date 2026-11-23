@@ -32,6 +32,9 @@ classified into a [rejection category](#rejection-categories).
 
 Fail closed is the default; an Expert Witness with `fail_open: true` lets a request
 through when its provider is unavailable (see [Fail-open and fail-closed](#fail-open-and-fail-closed)).
+A Prompt Guard pattern rule that cannot be evaluated always refuses the request
+before any upstream call (see
+[PROMPT_GUARD.md](PROMPT_GUARD.md#rules-that-cannot-be-evaluated)).
 
 ## Pipeline order
 
@@ -250,6 +253,13 @@ duration.
 
 A witness with a stored key whose call the caller's budget refuses refuses the
 request, whatever `fail_open` says. A keyless witness is never refused for budget.
+
+Prompt Guard pattern rules have no fail-open option. A rule that names a built-in
+pattern that is not loaded or did not compile, or a custom pattern that does not
+compile, refuses the request with `502` and
+`{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`
+before any upstream call; see
+[PROMPT_GUARD.md](PROMPT_GUARD.md#rules-that-cannot-be-evaluated).
 
 ### Overriding the built-in profile
 

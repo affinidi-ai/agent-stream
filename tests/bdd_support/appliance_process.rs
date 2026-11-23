@@ -5,7 +5,8 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 
 use crate::bdd_support::config::{
-    EncryptionSettings, ScenarioConfig, provider_endpoint_allowlist, write_scenario_config,
+    EncryptionSettings, ScenarioConfig, provider_endpoint_allowlist, write_prompt_guard_definitions,
+    write_scenario_config,
 };
 use crate::bdd_support::ports::{ReservedPort, reserve_free_port};
 
@@ -31,6 +32,8 @@ pub struct LaunchOptions<'a> {
     pub encryption: EncryptionSettings,
     /// Start in Standby mode instead of Active.
     pub standby: bool,
+    /// `prompt-guard.json` content in place of the shipped definitions.
+    pub prompt_guard_definitions: Option<&'a str>,
 }
 
 /// How an appliance launch ended: serving requests, or exited before it was ready.
@@ -78,6 +81,9 @@ impl ApplianceProcess {
             options.encryption,
             options.standby,
         );
+        if let Some(definitions) = options.prompt_guard_definitions {
+            write_prompt_guard_definitions(&config.config_dir, definitions);
+        }
         let base_url = format!("http://127.0.0.1:{port}");
         let allowlist = provider_endpoint_allowlist(options.provider_base_urls);
         let log_path = root.join("agent-stream.log");

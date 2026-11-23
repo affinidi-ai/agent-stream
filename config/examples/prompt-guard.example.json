@@ -11,15 +11,15 @@
       "key": "ssn",
       "label": "US Social Security Numbers",
       "icon": "fa-id-card",
-      "description": "Matches US SSNs in NNN-NN-NNNN format with validation for invalid ranges",
-      "regex": "\\b(?!000|666|9\\d{2})([0-8]\\d{2}|7([0-6]\\d|7[012]))([-])\\d{2}\\3\\d{4}\\b"
+      "description": "Matches US SSNs written NNN-NN-NNNN, NNN NN NNNN or with mixed separators, excluding invalid area, group and serial numbers",
+      "regex": "\\b(?:00[1-9]|0[1-9]\\d|[1-5]\\d{2}|6[0-5]\\d|66[0-57-9]|6[7-9]\\d|[78]\\d{2})[- ](?:0[1-9]|[1-9]\\d)[- ](?:000[1-9]|00[1-9]\\d|0[1-9]\\d{2}|[1-9]\\d{3})\\b"
     },
     {
       "key": "ssn_simple",
       "label": "US SSN (Simple Format)",
       "icon": "fa-id-card",
-      "description": "Matches any NNN-NN-NNNN format without range validation",
-      "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+      "description": "Matches any NNN-NN-NNNN, NNN NN NNNN or mixed-separator form without range validation",
+      "regex": "\\b\\d{3}[- ]\\d{2}[- ]\\d{4}\\b"
     },
     {
       "key": "phone_number",
@@ -32,8 +32,8 @@
       "key": "credit_card",
       "label": "Credit Card Numbers",
       "icon": "fa-credit-card",
-      "description": "Matches Visa, MasterCard, Amex, Diners Club, Discover, and JCB card numbers",
-      "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\\d{3})\\d{11})\\b"
+      "description": "Matches Visa, MasterCard, Amex, Diners Club, Discover, and JCB card numbers, and any 14 to 19 digit number written together or with single spaces or dashes between digits",
+      "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\\d{3})\\d{11}|\\d(?:[ -]?\\d){13,18})\\b"
     },
     {
       "key": "date_of_birth",

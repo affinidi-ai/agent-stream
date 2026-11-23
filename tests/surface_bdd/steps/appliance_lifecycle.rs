@@ -11,17 +11,7 @@ use crate::world::SurfaceWorld;
 async fn appliance_has_restarted(world: &mut SurfaceWorld) {
     wait_for_recorded_usage(world).await;
     world
-        .infra
-        .take()
-        .expect("the appliance should be running")
-        ._appliance
-        .stop()
-        .await;
-    let restarted = world
-        .start_appliance(world.temp_dir.path(), false)
-        .await;
-    world
-        .serve_from(restarted)
+        .restart_appliance(None)
         .await;
 }
 

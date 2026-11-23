@@ -137,6 +137,10 @@ impl LLMHandler {
                 jury.validate()
                     .map_err(|e| format!("variant '{}': {}", variant.alias, e))?;
             }
+            if let Some(prompt_guard) = &variant.overrides.prompt_guard {
+                crate::pipes::prompt_guard::validate_regex_rules(prompt_guard)
+                    .map_err(|e| format!("variant '{}': {}", variant.alias, e))?;
+            }
         }
 
         // Validate Decider routing configuration: candidate ids must be unique
@@ -174,8 +178,10 @@ impl LLMHandler {
             external.validate()?;
         }
 
-        // Validate every model-backed PII detector endpoint (SSRF + non-empty URL).
+        // Validate every regex rule can be evaluated, then every model-backed
+        // PII detector endpoint (SSRF + non-empty URL).
         if let Some(prompt_guard) = &pipe_config.prompt_guard {
+            crate::pipes::prompt_guard::validate_regex_rules(prompt_guard)?;
             for llm_pii in &prompt_guard.llm_pii {
                 if llm_pii.enabled {
                     llm_pii.validate()?;
@@ -637,6 +643,53 @@ mod tests {
             token_scheme: "Bearer".to_string(),
         }));
         assert!(LLMHandler::validate_config(&pipe).is_ok());
+    }
+
+    #[test]
+    fn validate_config_refuses_a_prompt_guard_rule_that_cannot_be_evaluated() {
+        let with_rule = |rule: serde_json::Value| {
+            let mut pipe = llm_pipe("gpt-4");
+            pipe.prompt_guard = Some(
+                serde_json::from_value(json!({
+                    "enabled": true,
+                    "request": [{ "regex": { "action": "reject", "rules": [rule] } }]
+                }))
+                .expect("prompt guard config"),
+            );
+            pipe
+        };
+        let err =
+            LLMHandler::validate_config(&with_rule(json!({ "pattern": "(?!x)y", "label": "lookahead" }))).unwrap_err();
+        assert_eq!(err, "Prompt Guard custom pattern 'lookahead' does not compile");
+        let err = LLMHandler::validate_config(&with_rule(json!({ "builtin": "not_a_pattern" }))).unwrap_err();
+        assert!(err.contains("built-in pattern 'not_a_pattern'"), "unexpected message: {err}");
+        assert!(LLMHandler::validate_config(&with_rule(json!({ "pattern": r"ACC-\d{6}" }))).is_ok());
+    }
+
+    #[test]
+    fn validate_config_refuses_a_variant_prompt_guard_rule_that_cannot_be_evaluated() {
+        let with_variant_rule = |rule: serde_json::Value| {
+            let mut pipe = llm_pipe("gpt-4");
+            pipe.variants = vec![
+                serde_json::from_value(json!({
+                    "id": "v-1",
+                    "alias": "guarded",
+                    "name": "Guarded",
+                    "overrides": {
+                        "prompt_guard": {
+                            "enabled": true,
+                            "response": [{ "regex": { "action": "reject", "rules": [rule] } }]
+                        }
+                    }
+                }))
+                .expect("variant config"),
+            ];
+            pipe
+        };
+        let err = LLMHandler::validate_config(&with_variant_rule(json!({ "pattern": "(?!x)y", "label": "lookahead" })))
+            .unwrap_err();
+        assert_eq!(err, "variant 'guarded': Prompt Guard custom pattern 'lookahead' does not compile");
+        assert!(LLMHandler::validate_config(&with_variant_rule(json!({ "pattern": r"ACC-\d{6}" }))).is_ok());
     }
 
     fn accepting_caller_keys(
