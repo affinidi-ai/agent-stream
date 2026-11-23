@@ -255,15 +255,6 @@ fn determine_role(
         .map(|saml_role| role_for_value(saml_role, config))
         .max_by_key(UserRole::rank)
         .unwrap_or(UserRole::User);
-    let unmapped = saml_roles
-        .iter()
-        .filter(|saml_role| {
-            !config
-                .role_mapping
-                .contains_key(saml_role.as_str())
-        })
-        .count();
-    debug!("determine_role: {} of {} SAML role values have no role_mapping entry", unmapped, saml_roles.len());
 
     for (saml_role, role) in legacy_role_hints(saml_roles, config, &resolved) {
         warn!(

@@ -471,14 +471,6 @@ impl SamlService {
         check_assertion_conditions(conditions, Utc::now(), &self.config.sp_entity_id)
     }
 
-    /// Extract user attributes from assertion
-    pub fn extract_attributes(
-        &self,
-        assertion: &Assertion,
-    ) -> SamlAttributes {
-        assertion_attributes(assertion)
-    }
-
     /// Get configuration
     pub fn config(&self) -> &SamlConfig {
         &self.config
