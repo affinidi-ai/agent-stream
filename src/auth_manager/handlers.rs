@@ -1,7 +1,7 @@
 use axum::extract::Multipart;
 use axum::{Extension, Json, extract::Path, http::StatusCode};
 
-use super::types::{UpdateProfileRequest, UpdateUserRequest, User};
+use super::types::{DeleteUserResponse, UpdateProfileRequest, UpdateUserRequest, User};
 use crate::auth::storage::{PasskeyStorage, UserData};
 use crate::auth::types::{UserRole, UserStatus};
 use crate::auth_manager::pat::PatContext;
@@ -472,7 +472,7 @@ pub async fn delete_user(
     Extension(pat_authenticator): Extension<Option<std::sync::Arc<dyn crate::auth_manager::pat::PatAuthenticator>>>,
     pat: Option<Extension<PatContext>>,
     Path(user_id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<DeleteUserResponse>, (StatusCode, String)> {
     // Load caller for authorization decisions
     let caller = storage
         .load_user_by_id(&caller_user_id)
@@ -516,7 +516,7 @@ pub async fn delete_user(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke access tokens: {}", e)))?;
     }
 
-    storage
+    let outcome = storage
         .delete_user(&user_data.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete user: {}", e)))?;
@@ -549,7 +549,7 @@ pub async fn delete_user(
         tracing::info!("Revoked {} active session(s) for deleted user_id={}", revoked, user_id);
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(DeleteUserResponse { outcome }))
 }
 
 /// Get current user profile

@@ -300,11 +300,19 @@ To register Agent Stream at the provider:
 
 ## Deleting an OIDC or SAML user
 
-`DELETE /v1/users/{user_id}` removes a user who signs in with a passkey. A user who signs in
-with an OIDC or SAML account is not removed: with no record, the next sign-in would create a
-new approved user with the mapped role. The record is kept `Disabled` and marked deleted, so
-that sign-in is refused like any disabled user's (`403`, no reason shown; `user_disabled` in
-the OIDC log).
+A user who signs in with an OIDC or SAML account is not removed by `DELETE /v1/users/{user_id}`:
+with no record, the next sign-in would create a new approved user with the mapped role. The
+record is kept `Disabled` and marked deleted, so that sign-in is refused like any disabled
+user's (`403`, no reason shown; `user_disabled` in the OIDC log).
+
+The endpoint answers `200` with `{"outcome": "removed"}` for a user who signs in with a
+passkey, and `{"outcome": "disabled"}` for a kept record. Deleting a kept record again answers
+`disabled` and does not fire `user.deleted` again. The user API sets `has_oidc_account` to
+`true` for a user with an OIDC account, before and after delete. For such a user the Users and
+Edit User pages show a notice during the delete confirm step, as visible text so it also
+appears on touch devices, and the Users page success message says the record was kept. No
+OIDC wording is shown for other users, and SAML users get the kept-record success message
+without a confirm notice.
 
 - **Cleared:** first and last name, email, department, job title, avatar link and passkeys.
   The username becomes the user id and the role goes back to `user`.

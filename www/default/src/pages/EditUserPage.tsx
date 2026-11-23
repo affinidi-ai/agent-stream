@@ -6,6 +6,7 @@ import { DeleteButton } from '../components/shared/DeleteButton';
 import {
   DELETED_USER_NOTICE,
   DELETE_USER_TITLE,
+  deleteConfirmNotice,
   isDeletedKeptUser,
   keptAccountLabel,
 } from '../utils/userDelete';
@@ -26,6 +27,7 @@ interface User {
   avatar_path?: string;
   oidc?: { issuer: string; subject: string };
   saml_id?: string;
+  has_oidc_account?: boolean;
 }
 
 interface UserForm {
@@ -377,6 +379,7 @@ const EditUserPage: React.FC = () => {
                   disabled={saving}
                   variant="danger"
                   title={DELETE_USER_TITLE}
+                  confirmNotice={user ? deleteConfirmNotice(user) : undefined}
                 >
                   Delete User
                 </DeleteButton>

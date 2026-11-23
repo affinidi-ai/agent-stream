@@ -3645,7 +3645,7 @@ mod token_scope_route_tests {
             .unwrap()
             .status();
 
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(tokens.revoked_for(), vec!["member-1".to_string()]);
         assert!(
             fixture

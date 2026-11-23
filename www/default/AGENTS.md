@@ -166,7 +166,7 @@ buttons, empty states, list/table, page shell) and a new-page recipe, see
 15. The wording that says what deleting a user does (the delete button title, the success
     toast, the "Deleted:" and "Provider account:" headings and the label of a kept user's
     provider account, and the notice on the Edit User page) comes from `utils/userDelete.ts`, never inline, so every
-    place that deletes a user says the same thing. The Edit User page shows the provider
+    place that deletes a user says the same thing. The OIDC notice during the delete confirm step is the `confirmNotice` of `DeleteButton` (test id `delete-confirm-notice`), shown only for a user with `has_oidc_account`; the success toast follows the `outcome` the delete returns. The Edit User page shows the provider
     account and the deleted notice for a disabled user bound to one, with test ids
     `edit-user-kept-account` and `edit-user-deleted-notice`.
 

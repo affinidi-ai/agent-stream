@@ -760,7 +760,7 @@ impl Flow {
         caller: &UserData,
         user_id: &str,
         authenticator: Option<Arc<dyn PatAuthenticator>>,
-    ) -> StatusCode {
+    ) -> (StatusCode, serde_json::Value) {
         let app = Router::new()
             .route("/v1/users/{user_id}", axum::routing::delete(crate::auth_manager::handlers::delete_user))
             .layer(axum::Extension(authenticator))
@@ -773,16 +773,21 @@ impl Flow {
             .layer(axum::Extension(Arc::new(RbacConfig::default())))
             .layer(axum::Extension(None::<Arc<crate::integrations::FileSystemNotificationStore>>))
             .layer(axum::Extension(caller.user_id.clone()));
-        app.oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/v1/users/{user_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .status()
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/users/{user_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
     }
 
     async fn upload_avatar_through_route(
@@ -846,6 +851,67 @@ impl Flow {
 }
 
 #[tokio::test]
+async fn deleting_an_oidc_user_again_reports_the_kept_outcome_without_error() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+    flow.member_sign_in().await;
+    let user = flow.user().await.unwrap();
+
+    flow.delete_through_route(&admin, &user.user_id, None)
+        .await;
+    let (status, body) = flow
+        .delete_through_route(&admin, &user.user_id, None)
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "disabled");
+}
+
+#[tokio::test]
+async fn deleting_a_passkey_user_reports_removed() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+    let mut plain = admin.clone();
+    plain.user_id = "plain-1".to_string();
+    plain.username = "plain".to_string();
+    plain.role = UserRole::User;
+    plain.is_primary = false;
+    flow.oidc
+        .storage
+        .save_user(&plain)
+        .await
+        .unwrap();
+
+    let (status, body) = flow
+        .delete_through_route(&admin, "plain-1", None)
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "removed");
+    assert!(
+        flow.oidc
+            .storage
+            .load_user_by_id("plain-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_missing_user_answers_not_found_without_an_outcome() {
+    let flow = Flow::new().await;
+    let admin = flow.administrator().await;
+
+    let (status, body) = flow
+        .delete_through_route(&admin, "ghost", None)
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.get("outcome").is_none());
+}
+
+#[tokio::test]
 async fn a_deleted_user_is_refused_at_the_next_sign_in_and_not_created_again() {
     let flow = Flow::new().await;
     let admin = flow.administrator().await;
@@ -855,12 +921,13 @@ async fn a_deleted_user_is_refused_at_the_next_sign_in_and_not_created_again() {
         .other_session(&user)
         .await;
 
-    let deleted = flow
+    let (deleted, body) = flow
         .delete_through_route(&admin, &user.user_id, None)
         .await;
     let response = flow.member_sign_in().await;
 
-    assert_eq!(deleted, StatusCode::NO_CONTENT);
+    assert_eq!(deleted, StatusCode::OK);
+    assert_eq!(body["outcome"], "disabled");
     assert!(
         !flow
             .session_is_live(&elsewhere)
@@ -950,11 +1017,11 @@ async fn deleting_a_user_revokes_the_access_tokens_bound_to_them_and_no_others()
         secrets.push(secret);
     }
 
-    let deleted = flow
+    let (deleted, _) = flow
         .delete_through_route(&admin, &user.user_id, Some(tokens.clone()))
         .await;
 
-    assert_eq!(deleted, StatusCode::NO_CONTENT);
+    assert_eq!(deleted, StatusCode::OK);
     assert!(
         tokens
             .authenticate(&secrets[0])
