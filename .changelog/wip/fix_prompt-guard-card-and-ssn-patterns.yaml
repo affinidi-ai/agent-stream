@@ -15,9 +15,11 @@ changes:
         or did not compile, or a custom pattern that did not compile, was skipped and the
         text passed through. credit_card now also matches any 14 to 19 digit number written
         together or with single spaces or dashes between digits, with no checksum, so mask
-        guards also redact long IDs, timestamps written as digits and adjacent dates. A mask
-        guard applies credit_card after its other rules, so an SSN or phone number written
-        right after a card is masked rather than partly absorbed into the card match. ssn and ssn_simple accept a space or a dash
+        guards also redact long IDs, timestamps written as digits, adjacent dates, numbered
+        lists and amounts grouped with spaces. A mask guard that includes credit_card applies
+        ssn, ssn_simple and phone_number first, then credit_card, then its other rules, so an
+        SSN or phone number written right after a card is masked whole and no other rule
+        such as street_address takes part of a card. ssn and ssn_simple accept a space or a dash
         between groups. A Surface whose Prompt Guard has a rule that cannot be evaluated
         now refuses every request with 502 guardrail_unavailable and code
         prompt_guard_pattern_unavailable before any upstream call, and saving such a Surface

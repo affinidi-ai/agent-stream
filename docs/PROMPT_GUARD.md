@@ -130,12 +130,15 @@ Each entry in `request` or `response` is `{ "regex": RegexRules, "rejection": Re
 | `rules` | required | Built-in or custom patterns, applied in order. |
 
 A rule is either `{"builtin": "<key>"}` or `{"pattern": "<regex>", "label": "<name>"}`.
-Rules run in sequence, each on the output of the one before. In a `mask` guard,
-`credit_card` runs after the guard's other rules wherever it is listed: its pattern can
-run on into a number that follows a card after a single space or dash
-(`4545 4545 4545 4545 123-45-6789`), so the other rules mask that number first. This
-holds within one guard; when `credit_card` and `ssn` are in separate guards, list the
-`ssn` guard first. With `reject`,
+Rules run in sequence, each on the output of the one before. A `mask` guard that
+includes `credit_card` runs its rules in three groups, each in listed order: first
+`ssn`, `ssn_simple` and `phone_number`, then `credit_card`, then the rest. The card
+pattern can run on into a number that follows a card after a single space or dash
+(`4545 4545 4545 4545 123-45-6789`), so those rules mask that number first; and no
+other rule, such as `street_address`, can take part of a card before `credit_card`
+masks it. This holds within one guard; across separate guards, list the `ssn` or
+`phone_number` guard before the `credit_card` guard, and the `credit_card` guard before
+any other. With `reject`,
 processing stops at the first match, which returns the guard's `rejection` or the
 default 403 body
 `{"error":{"message":"Request rejected: content violates prompt guard policy","type":"prompt_guard_violation","code":"content_policy_violation"}}`.
@@ -165,7 +168,7 @@ deployed `prompt-guard.json`; replace it from the shipped file to pick up patter
 | `ssn` | US Social Security Numbers with a dash or space between groups (`NNN-NN-NNNN`, `NNN NN NNNN`), excluding invalid area, group and serial numbers |
 | `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix |
 | `phone_number` | US, international (`+` country code), and Australian mobile numbers |
-| `credit_card` | Visa, Mastercard, Amex, Diners Club, Discover, and JCB numbers, and any 14 to 19 digit number written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`). There is no checksum, so long IDs, timestamps written as digits, grouped references and adjacent dates also match. |
+| `credit_card` | Visa, Mastercard, Amex, Diners Club, Discover, and JCB numbers, and any 14 to 19 digit number written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`). There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
 | `date_of_birth` | Dates preceded by birth keywords (birth, dob, born) |
 | `ip_address` | IPv4 addresses with octet validation |
 | `passport` | US passport numbers |
@@ -178,14 +181,18 @@ defined, whose regex did not compile, or that is unavailable because
 `prompt-guard.json` did not load, or when it is a custom `pattern` that does not
 compile. Prompt Guard fails closed on such a rule:
 
-- Saving a Surface whose enabled Prompt Guard has one is refused with `400`, and the
-  error names the rule.
+- Saving a Surface, or one of its Variants, whose enabled Prompt Guard has one is
+  refused with `400`, and the error names the rule.
 - A Surface already stored with one, for example after `prompt-guard.json` changed,
   refuses every request before any upstream call, whichever side the rule is on, with
   `502` and
   `{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`.
   The guard's `rejection` is not used, and the `WARN` log line names the rule and why.
-  Surfaces without such a rule are unaffected.
+  Rejection telemetry records it with source `prompt_guard_unavailable` and reason
+  token `prompt_guard_pattern_unavailable`, not as a content match. Surfaces without
+  such a rule are unaffected. The exception is a semantic response
+  cache: its embedder receives the request text before Prompt Guard runs, on every
+  request, so it receives it here too.
 - At startup, each built-in pattern that does not compile, or a file that did not load,
   is logged at `ERROR` and counted in `agent_stream_prompt_guard_pattern_errors_total`
   ([OBSERVABILITY.md](OBSERVABILITY.md)).

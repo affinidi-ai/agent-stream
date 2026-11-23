@@ -68,12 +68,7 @@ pub fn init_definitions(path: &str) -> Result<(), String> {
 
     // Pre-compile all regex patterns at startup. A pattern that does not compile
     // is left out and reported by `report_definition_problems` once logging is up.
-    let mut compiled: HashMap<String, Regex> = HashMap::new();
-    for pattern in &defs.defined_patterns {
-        if let Ok(re) = Regex::new(&pattern.regex) {
-            compiled.insert(pattern.key.clone(), re);
-        }
-    }
+    let (compiled, problems) = compile_patterns(&defs);
 
     info!("Loaded {} prompt guard pattern definitions ({} valid regexes)", defs.defined_patterns.len(), compiled.len());
 
@@ -81,6 +76,9 @@ pub fn init_definitions(path: &str) -> Result<(), String> {
     COMPILED_REGEXES
         .set(compiled)
         .map_err(|_| "Prompt guard compiled regexes already initialized".to_string())?;
+    COMPILE_PROBLEMS
+        .set(problems)
+        .map_err(|_| "Prompt guard compile problems already initialized".to_string())?;
 
     DEFINITIONS
         .set(defs)
@@ -91,6 +89,29 @@ pub fn init_definitions(path: &str) -> Result<(), String> {
 
 /// Pre-compiled regexes for built-in patterns, keyed by pattern key.
 static COMPILED_REGEXES: OnceLock<HashMap<String, Regex>> = OnceLock::new();
+
+/// The built-in patterns that did not compile at load, with their errors.
+static COMPILE_PROBLEMS: OnceLock<Vec<DefinitionProblem>> = OnceLock::new();
+
+/// Compile every defined pattern: the regexes that compile, keyed by pattern key,
+/// and a problem for each one that does not.
+fn compile_patterns(defs: &PromptGuardDefinitions) -> (HashMap<String, Regex>, Vec<DefinitionProblem>) {
+    let mut compiled = HashMap::new();
+    let mut problems = Vec::new();
+    for pattern in &defs.defined_patterns {
+        match Regex::new(&pattern.regex) {
+            Ok(re) => {
+                compiled.insert(pattern.key.clone(), re);
+            }
+            Err(e) => problems.push(DefinitionProblem {
+                pattern: pattern.key.clone(),
+                issue: PatternIssue::CompileFailed,
+                detail: e.to_string(),
+            }),
+        }
+    }
+    (compiled, problems)
+}
 
 /// Get the loaded definitions. Returns None if not yet initialized.
 pub fn get_definitions() -> Option<&'static PromptGuardDefinitions> {
@@ -180,31 +201,22 @@ struct DefinitionProblem {
     detail: String,
 }
 
+/// The problems to report: the compile problems kept at load, or one
+/// `DefinitionsMissing` problem when `prompt-guard.json` did not load.
 fn definition_problems_in(
-    defs: Option<&PromptGuardDefinitions>,
+    compile_problems: Option<&[DefinitionProblem]>,
     load_error: Option<&str>,
 ) -> Vec<DefinitionProblem> {
-    let Some(defs) = defs else {
-        return vec![DefinitionProblem {
+    match compile_problems {
+        Some(problems) => problems.to_vec(),
+        None => vec![DefinitionProblem {
             pattern: String::new(),
             issue: PatternIssue::DefinitionsMissing,
             detail: load_error
                 .unwrap_or("not loaded")
                 .to_string(),
-        }];
-    };
-    defs.defined_patterns
-        .iter()
-        .filter_map(|p| {
-            Regex::new(&p.regex)
-                .err()
-                .map(|e| DefinitionProblem {
-                    pattern: p.key.clone(),
-                    issue: PatternIssue::CompileFailed,
-                    detail: e.to_string(),
-                })
-        })
-        .collect()
+        }],
+    }
 }
 
 /// Log each built-in pattern problem found at load at `ERROR` and count it in
@@ -212,7 +224,12 @@ fn definition_problems_in(
 /// logging starts, so this runs once logging is up. `load_error` is why
 /// `prompt-guard.json` did not load, when it did not.
 pub fn report_definition_problems(load_error: Option<&str>) {
-    for problem in definition_problems_in(DEFINITIONS.get(), load_error) {
+    for problem in definition_problems_in(
+        COMPILE_PROBLEMS
+            .get()
+            .map(Vec::as_slice),
+        load_error,
+    ) {
         if problem.issue == PatternIssue::DefinitionsMissing {
             error!(
                 "Prompt guard definitions not loaded: {} — requests to Surfaces whose rules name a built-in pattern are refused",
@@ -378,7 +395,7 @@ mod tests {
 
     #[test]
     fn every_shipped_pattern_compiles() {
-        assert_eq!(definition_problems_in(Some(&shipped_definitions()), None), Vec::new());
+        assert_eq!(compile_patterns(&shipped_definitions()).1, Vec::new());
     }
 
     #[test]
@@ -446,21 +463,10 @@ mod tests {
         }
     }
 
-    fn compiled(defs: &PromptGuardDefinitions) -> HashMap<String, Regex> {
-        defs.defined_patterns
-            .iter()
-            .filter_map(|p| {
-                Regex::new(&p.regex)
-                    .ok()
-                    .map(|re| (p.key.clone(), re))
-            })
-            .collect()
-    }
-
     #[test]
     fn builtin_issue_names_why_a_pattern_cannot_be_used() {
         let defs = definitions_with(&[("good", r"\d+"), ("broken", r"(?!x)y")]);
-        let map = compiled(&defs);
+        let (map, _) = compile_patterns(&defs);
         assert_eq!(builtin_issue_in(Some(&defs), Some(&map), "good"), None);
         assert_eq!(builtin_issue_in(Some(&defs), Some(&map), "broken"), Some(PatternIssue::CompileFailed));
         assert_eq!(builtin_issue_in(Some(&defs), Some(&map), "absent"), Some(PatternIssue::Unknown));
@@ -470,7 +476,9 @@ mod tests {
     #[test]
     fn definition_problems_report_each_pattern_that_does_not_compile() {
         let defs = definitions_with(&[("good", r"\d+"), ("broken", r"(?!x)y")]);
-        let problems = definition_problems_in(Some(&defs), None);
+        let (compiled, kept) = compile_patterns(&defs);
+        assert_eq!(compiled.len(), 1);
+        let problems = definition_problems_in(Some(&kept), None);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].pattern, "broken");
         assert_eq!(problems[0].issue, PatternIssue::CompileFailed);

@@ -62,27 +62,23 @@ impl From<&RejectionConfig> for GuardRejection {
     }
 }
 
-/// Cached compiled regex patterns, keyed by pattern string
-static COMPILED_REGEX_CACHE: LazyLock<std::sync::Mutex<HashMap<String, Regex>>> =
+/// Cached custom regex patterns, keyed by pattern string; `None` for a pattern
+/// that did not compile, so it is compiled and logged once rather than per request.
+static COMPILED_REGEX_CACHE: LazyLock<std::sync::Mutex<HashMap<String, Option<Regex>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn get_or_compile_regex(pattern: &str) -> Option<Regex> {
     let mut cache = COMPILED_REGEX_CACHE
         .lock()
         .ok()?;
-    if let Some(regex) = cache.get(pattern) {
-        return Some(regex.clone());
+    if let Some(cached) = cache.get(pattern) {
+        return cached.clone();
     }
-    match Regex::new(pattern) {
-        Ok(regex) => {
-            cache.insert(pattern.to_string(), regex.clone());
-            Some(regex)
-        }
-        Err(e) => {
-            warn!("Invalid prompt guard regex pattern '{}': {}", pattern, e);
-            None
-        }
-    }
+    let compiled = Regex::new(pattern)
+        .inspect_err(|e| warn!("Invalid prompt guard regex pattern '{}': {}", pattern, e))
+        .ok();
+    cache.insert(pattern.to_string(), compiled.clone());
+    compiled
 }
 
 /// Allocates stable NER IDs for detected values within a single guard pass.
@@ -663,9 +659,14 @@ pub fn unusable_rule_rejection(config: &PromptGuardConfig) -> Option<GuardReject
         body: RULE_UNAVAILABLE_BODY.to_string(),
         content_type: "application/json".to_string(),
         reason: Some(format!("prompt guard rule unavailable: {issue}")),
-        categories: Vec::new(),
+        categories: vec![RULE_UNAVAILABLE_CATEGORY.to_string()],
     })
 }
+
+/// Rejection category token for a rule that cannot be evaluated. Rejection
+/// telemetry classifies this token rather than the reason, which names the rule
+/// (`ssn`, `credit_card`) and would otherwise read as flagged content.
+pub const RULE_UNAVAILABLE_CATEGORY: &str = "prompt_guard_pattern_unavailable";
 
 /// Apply regex guard rules to request messages.
 ///
@@ -824,21 +825,50 @@ enum RegexResult {
     Mask(String),
 }
 
-/// Whether a mask guard applies `rule` after its other rules. The `credit_card`
-/// pattern can run on into a number that follows a card after a single space or
-/// dash (`4545 4545 4545 4545 123-45-6789`), so the other rules mask that number first.
-fn masks_last(
-    rules: &RegexRules,
+/// Built-ins whose numbers the `credit_card` pattern can run on into when one
+/// follows a card after a single space or dash (`4545 4545 4545 4545 123-45-6789`).
+const CARD_ADJACENT_BUILTINS: [&str; 3] = ["ssn", "ssn_simple", "phone_number"];
+
+fn is_builtin(
     rule: &RegexRule,
+    key: &str,
 ) -> bool {
-    rules.action == GuardAction::Mask && matches!(rule, RegexRule::Builtin { builtin } if builtin == "credit_card")
+    matches!(rule, RegexRule::Builtin { builtin } if builtin == key)
+}
+
+/// The order a guard applies its rules in. A mask guard with `credit_card`
+/// applies the built-ins a card can run on into first, so they mask that number
+/// whole, then `credit_card`, so no other rule (such as `street_address`) takes
+/// part of a card first, then its other rules; each group keeps its listed
+/// order. Any other guard applies its rules as listed.
+fn application_order(rules: &RegexRules) -> Vec<&RegexRule> {
+    let mut ordered: Vec<&RegexRule> = rules.rules.iter().collect();
+    if rules.action == GuardAction::Mask
+        && ordered
+            .iter()
+            .any(|rule| is_builtin(rule, "credit_card"))
+    {
+        ordered.sort_by_key(|rule| {
+            if CARD_ADJACENT_BUILTINS
+                .iter()
+                .any(|key| is_builtin(rule, key))
+            {
+                0
+            } else if is_builtin(rule, "credit_card") {
+                1
+            } else {
+                2
+            }
+        });
+    }
+    ordered
 }
 
 /// Apply all regex rules to a text string.
 ///
-/// Rules are processed sequentially — each rule operates on the output of the previous one
-/// (for mask action), with `credit_card` moved after the others (see [`masks_last`]).
-/// For reject action, processing stops at the first match.
+/// Rules are processed sequentially in [`application_order`] — each rule operates on
+/// the output of the previous one (for mask action). For reject action, processing
+/// stops at the first match.
 fn apply_regex_rules_to_text(
     text: &str,
     rules: &RegexRules,
@@ -847,17 +877,7 @@ fn apply_regex_rules_to_text(
     let mut current = text.to_string();
     let mut any_modified = false;
 
-    let ordered = rules
-        .rules
-        .iter()
-        .filter(|rule| !masks_last(rules, rule))
-        .chain(
-            rules
-                .rules
-                .iter()
-                .filter(|rule| masks_last(rules, rule)),
-        );
-    for rule in ordered {
+    for rule in application_order(rules) {
         match rule {
             RegexRule::Builtin { builtin } => {
                 let ranges: Vec<(std::ops::Range<usize>, String)> =
@@ -974,6 +994,7 @@ mod tests {
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "\\b(?:(?:\\+1|1)[-. ]?)?(?:\\([2-9]\\d{2}\\)|[2-9]\\d{2})[-. ]?\\d{3}[-. ]?\\d{4}\\b"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
+            {"key": "street_address", "label": "Street Address", "icon": "fa-map-marker-alt", "description": "Address", "regex": "\\d{1,5}\\s\\w.\\s(\\b\\w*\\b\\s){1,2}\\w*.?"},
             {"key": "broken", "label": "Broken", "icon": "fa-ban", "description": "Does not compile", "regex": "(?!x)y"}
         ]
     }"#;
@@ -1867,6 +1888,21 @@ mod tests {
     }
 
     #[test]
+    fn a_mask_guard_masks_a_whole_card_before_street_address_can_take_its_last_group() {
+        init_test_definitions();
+        for rules in [["credit_card", "street_address"], ["street_address", "credit_card"]] {
+            for card in ["4545 4545 4545 4545", "4545454545454545"] {
+                let mut body = make_request(&format!("{card} is my card"));
+                assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+                assert_eq!(
+                    body["messages"][0]["content"], "<CREDIT_CARD> is my card",
+                    "card {card:?}, rules in order {rules:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_reject_guard_keeps_its_rule_order() {
         init_test_definitions();
         let guards = vec![RequestGuard {
@@ -1916,6 +1952,7 @@ mod tests {
         let body: Value = serde_json::from_str(&rejection.body).expect("rejection body is JSON");
         assert_eq!(body["error"]["type"], "guardrail_unavailable");
         assert_eq!(body["error"]["code"], "prompt_guard_pattern_unavailable");
+        assert_eq!(rejection.categories, vec![RULE_UNAVAILABLE_CATEGORY.to_string()]);
         let reason = rejection
             .reason
             .expect("the rejection names the rule");

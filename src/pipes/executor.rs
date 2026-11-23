@@ -6202,7 +6202,9 @@ impl PipeExecutor {
             .as_ref()
             .and_then(crate::pipes::prompt_guard::unusable_rule_rejection)
         {
-            Some(rejection) => Err(PipeError::guard_rejected(rejection, RejectionStage::RegexRequest, "regex")),
+            Some(rejection) => {
+                Err(PipeError::guard_rejected(rejection, RejectionStage::RegexRequest, "prompt_guard_unavailable"))
+            }
             None => Ok(()),
         }
     }
@@ -9727,7 +9729,7 @@ mod tests {
         async fn a_prompt_guard_rule_that_cannot_be_evaluated_refuses_the_call_before_the_upstream() {
             for rule in [json!({ "builtin": "not_a_pattern" }), json!({ "pattern": "(?!x)y", "label": "lookahead" })] {
                 for side in ["request", "response"] {
-                    for streamed in [false, true] {
+                    for path in ["buffered", "streamed", "binary"] {
                         let base = CaptureUpstream::answering("hello back").await;
                         let _allowed = allow(&[&base]);
                         let mut config = surface(&base.url);
@@ -9735,25 +9737,37 @@ mod tests {
                         prompt_guard[side] = json!([{ "regex": { "action": "reject", "rules": [rule.clone()] } }]);
                         config.prompt_guard = Some(serde_json::from_value(prompt_guard).expect("prompt guard config"));
                         let executor = PipeExecutor::new_with_secrets(&config, Some(store()));
-                        let result = if streamed {
-                            executor
+                        let result = match path {
+                            "streamed" => executor
                                 .execute_streaming(request(), None, CallerCredentials::default(), None)
                                 .await
-                                .map(|_| ())
-                        } else {
-                            executor
+                                .map(|_| ()),
+                            "binary" => executor
+                                .execute_binary(
+                                    json!({ "model": "tts-1", "input": "hello" }),
+                                    Some("/v1/audio/speech".to_string()),
+                                    CallerCredentials::default(),
+                                )
+                                .await
+                                .map(|_| ()),
+                            _ => executor
                                 .execute(request(), None, None, None, None)
                                 .await
-                                .map(|_| ())
+                                .map(|_| ()),
                         };
 
-                        let case = format!("{rule} on the {side}, streamed: {streamed}");
+                        let case = format!("{rule} on the {side}, {path} path");
                         match result {
-                            Err(PipeError::PromptGuardRejected { status_code, body, .. }) => {
+                            Err(PipeError::PromptGuardRejected {
+                                status_code, body, rejection, ..
+                            }) => {
                                 assert_eq!(status_code, 502, "{case}");
                                 let body: Value = serde_json::from_str(&body).expect("rejection body is JSON");
                                 assert_eq!(body["error"]["type"], "guardrail_unavailable", "{case}");
                                 assert_eq!(body["error"]["code"], "prompt_guard_pattern_unavailable", "{case}");
+                                let meta = rejection.expect("the refusal carries rejection metadata");
+                                assert_eq!(meta.source, "prompt_guard_unavailable", "{case}");
+                                assert_eq!(meta.raw_reasons, vec!["prompt_guard_pattern_unavailable"], "{case}");
                             }
                             other => panic!("{case}: expected the unusable rule to refuse the call, got {other:?}"),
                         }

@@ -33,6 +33,7 @@ Feature: LLM Surface Prompt Guard
     And the operator has published LLM Surface "guarded-chat" for route "/guarded-chat"
     When the operator saves LLM Surface "guarded-chat" with Prompt Guard rejecting prompts matching built-in pattern "not_a_pattern"
     Then the Surface save is refused naming built-in pattern "not_a_pattern"
+    And LLM Surface "guarded-chat" still has no Prompt Guard
 
   Scenario: Prompt Guard refuses a request before provider invocation when its built-in pattern cannot be used
     Given the operator can use the Admin API

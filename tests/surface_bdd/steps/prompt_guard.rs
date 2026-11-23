@@ -135,6 +135,23 @@ fn surface_save_is_refused_naming_builtin_pattern(
     );
 }
 
+#[then(expr = "LLM Surface {string} still has no Prompt Guard")]
+async fn llm_surface_still_has_no_prompt_guard(
+    world: &mut SurfaceWorld,
+    surface_name: String,
+) {
+    let stored = world
+        .admin_client()
+        .get_pipe(&surface_id(&surface_name))
+        .await;
+    assert_eq!(stored.status, 200, "expected the Surface to be readable, got {}: {}", stored.status, stored.text);
+    assert!(
+        stored.body["prompt_guard"].is_null(),
+        "expected the refused save to leave the Surface without a Prompt Guard, got: {}",
+        stored.body["prompt_guard"]
+    );
+}
+
 #[then(expr = "the request is refused because a Prompt Guard rule is unavailable")]
 fn request_is_refused_because_prompt_guard_rule_is_unavailable(world: &mut SurfaceWorld) {
     let response = world
