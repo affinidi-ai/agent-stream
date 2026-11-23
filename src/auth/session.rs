@@ -11,10 +11,17 @@ use crate::storage::filesystem::{
     StorableEntity, StorageBackend, in_memory_storage_with_timeout, loggable_id, rwlock_storage,
 };
 
+/// The longest `session_max_lifetime_minutes` may be set to.
+pub const MAX_SESSION_LIFETIME_MINUTES: u64 = 24 * 60;
+
+/// The default for `session_max_lifetime_minutes`.
+pub const DEFAULT_SESSION_LIFETIME_MINUTES: u64 = 12 * 60;
+
 /// Manager for authenticated sessions with filesystem persistence
 pub struct SessionManager {
     storage: Box<dyn StorageBackend<Session>>,
     timeout_minutes: u64,
+    max_lifetime_minutes: u64,
     terms_gate_update_lock: RwLock<()>,
 }
 
@@ -110,19 +117,24 @@ impl SessionManager {
         Self {
             storage: in_memory_storage_with_timeout(timeout_minutes),
             timeout_minutes,
+            max_lifetime_minutes: DEFAULT_SESSION_LIFETIME_MINUTES,
             terms_gate_update_lock: RwLock::new(()),
         }
     }
 
-    /// Create a new session manager with filesystem persistence
+    /// Create a new session manager with filesystem persistence. A session
+    /// ends `timeout_minutes` after its last use, and never later than
+    /// `max_lifetime_minutes` after it was created.
     pub async fn with_storage(
         timeout_minutes: u64,
+        max_lifetime_minutes: u64,
         storage_path: PathBuf,
     ) -> Result<Self> {
         let storage: Box<dyn StorageBackend<Session>> = rwlock_storage(storage_path.clone(), "session").await?;
         let manager = Self {
             storage,
             timeout_minutes,
+            max_lifetime_minutes,
             terms_gate_update_lock: RwLock::new(()),
         };
         manager
@@ -145,7 +157,7 @@ impl SessionManager {
                 if session.token.is_empty() {
                     session.token = key.clone();
                 }
-                if now >= session.expires_at {
+                if self.has_ended(session, now) {
                     expired_tokens.push(key.clone());
                 }
             }
@@ -173,9 +185,47 @@ impl SessionManager {
         }
     }
 
-    /// Get the session timeout in seconds
+    /// How long a new session lasts before its first refresh, in seconds
     pub fn timeout_seconds(&self) -> u64 {
-        self.timeout_minutes * 60
+        self.timeout_minutes
+            .min(self.max_lifetime_minutes)
+            * 60
+    }
+
+    /// The latest moment `session` may still be used, whatever its activity.
+    fn lifetime_end(
+        &self,
+        session: &Session,
+    ) -> chrono::DateTime<chrono::Utc> {
+        session.created_at + chrono::Duration::minutes(self.max_lifetime_minutes as i64)
+    }
+
+    /// The `Max-Age` for a session cookie re-sent at `now`: the idle timeout,
+    /// cut short by the end of the session's lifetime. It reads only
+    /// `created_at`, so a copy of `session` taken earlier gives the same answer.
+    pub fn cookie_max_age_seconds(
+        &self,
+        session: &Session,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> u64 {
+        let lifetime_left = (self.lifetime_end(session) - now)
+            .num_seconds()
+            .max(0) as u64;
+        self.timeout_seconds()
+            .min(lifetime_left)
+    }
+
+    /// Whether `session` has ended at `now`: idle past its expiry, or past its
+    /// maximum lifetime. Both are checked because a stored `expires_at` may
+    /// predate the lifetime limit.
+    fn has_ended(
+        &self,
+        session: &Session,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        now >= session
+            .expires_at
+            .min(self.lifetime_end(session))
     }
 
     /// Get a reference to the active session cache
@@ -215,7 +265,7 @@ impl SessionManager {
             username: username.clone(),
             user_id: user_id.clone(),
             created_at: now,
-            expires_at: now + chrono::Duration::minutes(self.timeout_minutes as i64),
+            expires_at: now + chrono::Duration::seconds(self.timeout_seconds() as i64),
             terms_gate,
             oidc,
         };
@@ -265,7 +315,8 @@ impl SessionManager {
     }
 
     /// Validate a session token and return (username, user_id)
-    /// This also refreshes the session expiration time (sliding expiration)
+    /// This also refreshes the session expiration time (sliding expiration),
+    /// up to the session's maximum lifetime
     pub async fn validate_session(
         &self,
         token: &str,
@@ -300,12 +351,14 @@ impl SessionManager {
         };
 
         let now = chrono::Utc::now();
-        if now >= session.expires_at {
+        let lifetime_end = self.lifetime_end(&session);
+        if self.has_ended(&session, now) {
             tracing::debug!(
-                "Session {} found for user {} - expired (expired: {})",
+                "Session {} found for user {} - expired (expired: {}, lifetime ends: {})",
                 token_prefix,
                 session.username,
                 session.expires_at,
+                lifetime_end,
             );
             return None;
         }
@@ -318,8 +371,8 @@ impl SessionManager {
             (session.expires_at - now).num_seconds()
         );
 
-        // Refresh expiration time (sliding window)
-        session.expires_at = now + chrono::Duration::minutes(self.timeout_minutes as i64);
+        // Refresh expiration time (sliding window), never past the lifetime end
+        session.expires_at = (now + chrono::Duration::minutes(self.timeout_minutes as i64)).min(lifetime_end);
         let result = session.clone();
 
         tracing::debug!(
@@ -428,7 +481,7 @@ impl SessionManager {
             let sessions = cache.read().await;
             sessions
                 .iter()
-                .filter(|(_, session)| now >= session.expires_at)
+                .filter(|(_, session)| self.has_ended(session, now))
                 .map(|(token, _)| token.clone())
                 .collect()
         };
@@ -528,8 +581,20 @@ impl SessionManager {
                 failing,
             }),
             timeout_minutes: 20,
+            max_lifetime_minutes: DEFAULT_SESSION_LIFETIME_MINUTES,
             terms_gate_update_lock: RwLock::new(()),
         }
+    }
+
+    /// Stores `session` as it is, so a test can set its creation and expiry times.
+    pub(crate) async fn store_for_test(
+        &self,
+        session: &Session,
+    ) {
+        self.storage
+            .save(session)
+            .await
+            .unwrap();
     }
 }
 
@@ -551,13 +616,13 @@ mod tests {
     async fn reload_follows_sessions_another_instance_stored() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dir = temp_dir.path().to_path_buf();
-        let standby = SessionManager::with_storage(20, dir.clone())
+        let standby = SessionManager::with_storage(20, MAX_SESSION_LIFETIME_MINUTES, dir.clone())
             .await
             .unwrap();
         let signed_out = standby
             .create_session("alice".into(), "user-a".into())
             .await;
-        let active = SessionManager::with_storage(20, dir.clone())
+        let active = SessionManager::with_storage(20, MAX_SESSION_LIFETIME_MINUTES, dir.clone())
             .await
             .unwrap();
         let signed_in = active
@@ -768,6 +833,194 @@ mod tests {
                 .await
                 .is_some(),
             "unrelated session must not be affected"
+        );
+    }
+
+    /// A session created `age` ago whose sliding expiry is `expires_in` from now.
+    fn stored_session(
+        token: &str,
+        age: chrono::Duration,
+        expires_in: chrono::Duration,
+    ) -> Session {
+        let now = chrono::Utc::now();
+        Session {
+            token: token.to_string(),
+            username: "alice".to_string(),
+            user_id: "user-a".to_string(),
+            created_at: now - age,
+            expires_at: now + expires_in,
+            terms_gate: TermsSessionGate::AllowedAtLogin,
+            oidc: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_never_authenticates_past_its_maximum_lifetime() {
+        let mgr = SessionManager::new();
+        let lifetime = chrono::Duration::minutes(DEFAULT_SESSION_LIFETIME_MINUTES as i64);
+        let past = stored_session("long-lived", lifetime + chrono::Duration::minutes(1), chrono::Duration::minutes(10));
+        let inside =
+            stored_session("still-inside", lifetime - chrono::Duration::minutes(1), chrono::Duration::minutes(10));
+        for session in [&past, &inside] {
+            mgr.storage
+                .save(session)
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            mgr.validate_session_record("long-lived")
+                .await
+                .is_none()
+        );
+        assert!(
+            mgr.validate_session_record("still-inside")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_never_extends_a_session_past_its_maximum_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let session = stored_session("near-the-end", chrono::Duration::minutes(50), chrono::Duration::minutes(5));
+        mgr.storage
+            .save(&session)
+            .await
+            .unwrap();
+
+        let refreshed = mgr
+            .validate_session_record("near-the-end")
+            .await
+            .expect("a session inside its lifetime stays valid");
+
+        assert_eq!(refreshed.expires_at, session.created_at + chrono::Duration::minutes(60));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_inside_the_lifetime_slides_by_the_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let session = stored_session("fresh", chrono::Duration::minutes(5), chrono::Duration::minutes(5));
+        mgr.storage
+            .save(&session)
+            .await
+            .unwrap();
+        let before = chrono::Utc::now();
+
+        let refreshed = mgr
+            .validate_session_record("fresh")
+            .await
+            .unwrap();
+
+        assert!(refreshed.expires_at >= before + chrono::Duration::minutes(20));
+        assert!(refreshed.expires_at < session.created_at + chrono::Duration::minutes(60));
+    }
+
+    #[tokio::test]
+    async fn cookie_max_age_is_the_timeout_even_after_the_expiry_snapshot_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let snapshot = stored_session("slow-request", chrono::Duration::minutes(5), -chrono::Duration::minutes(1));
+
+        assert_eq!(mgr.cookie_max_age_seconds(&snapshot, chrono::Utc::now()), 1200);
+    }
+
+    #[tokio::test]
+    async fn cookie_max_age_ends_with_the_session_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let near_the_end = stored_session("near-the-end", chrono::Duration::minutes(50), chrono::Duration::minutes(5));
+        let past_the_end = stored_session("past-the-end", chrono::Duration::minutes(61), chrono::Duration::minutes(5));
+        let now = chrono::Utc::now();
+
+        let max_age = mgr.cookie_max_age_seconds(&near_the_end, now);
+        assert!((599..=600).contains(&max_age), "Max-Age {max_age} must end with the lifetime");
+        assert_eq!(mgr.cookie_max_age_seconds(&past_the_end, now), 0);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_never_outlives_a_shorter_maximum_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(30, 10, dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_session("alice".into(), "user-a".into())
+            .await;
+        let session = mgr
+            .storage
+            .get(&token)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(mgr.timeout_seconds(), 600);
+        assert_eq!(session.expires_at - session.created_at, chrono::Duration::minutes(10));
+    }
+
+    #[tokio::test]
+    async fn cleanup_and_reload_remove_sessions_past_their_maximum_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_storage(20, 60, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let past = stored_session("past", chrono::Duration::minutes(61), chrono::Duration::minutes(10));
+        let current = stored_session("current", chrono::Duration::minutes(5), chrono::Duration::minutes(10));
+        for session in [&past, &current] {
+            mgr.storage
+                .save(session)
+                .await
+                .unwrap();
+        }
+
+        mgr.cleanup_expired().await;
+
+        let sessions = mgr.sessions().read().await;
+        assert!(!sessions.contains_key("past"));
+        assert!(sessions.contains_key("current"));
+        drop(sessions);
+
+        let shared = rwlock_storage::<Session>(dir.path().to_path_buf(), "session")
+            .await
+            .unwrap();
+        shared
+            .save(&past)
+            .await
+            .unwrap();
+        mgr.reload_from_storage()
+            .await
+            .unwrap();
+        assert!(
+            !mgr.sessions()
+                .read()
+                .await
+                .contains_key("past")
+        );
+        let on_disk = rwlock_storage::<Session>(dir.path().to_path_buf(), "session")
+            .await
+            .unwrap();
+        assert!(
+            !on_disk
+                .exists("past")
+                .await
+                .unwrap()
+        );
+        assert!(
+            on_disk
+                .exists("current")
+                .await
+                .unwrap()
         );
     }
 

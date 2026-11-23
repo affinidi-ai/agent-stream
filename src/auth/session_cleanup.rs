@@ -55,9 +55,13 @@ mod tests {
             .block_on(async {
                 let dir = tempfile::tempdir().unwrap();
                 let manager = Arc::new(
-                    crate::auth::SessionManager::with_storage(0, dir.path().to_path_buf())
-                        .await
-                        .unwrap(),
+                    crate::auth::SessionManager::with_storage(
+                        0,
+                        crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
+                        dir.path().to_path_buf(),
+                    )
+                    .await
+                    .unwrap(),
                 );
                 manager
                     .create_session("alice".into(), "user-a".into())

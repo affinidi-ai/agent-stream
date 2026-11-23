@@ -195,7 +195,7 @@ The bootstrap file, read once at startup. Fields and defaults are in
 
 | Section | Controls |
 | --- | --- |
-| top level | `channel_config_source`, `dynamodb_table`, `aws_region`, `aws_profile`, `secrets_backend`, `auth_mode`, `session_timeout_minutes`, `websocket_require_auth`, `websocket_broadcast_buffer`, `metrics_cache_ttl_seconds`, `backup_encryption_key`, `legacy_backup_encryption_keys`, `server_mode`, `cache_refresh_interval_secs` |
+| top level | `channel_config_source`, `dynamodb_table`, `aws_region`, `aws_profile`, `secrets_backend`, `auth_mode`, `session_timeout_minutes`, `session_max_lifetime_minutes`, `websocket_require_auth`, `websocket_broadcast_buffer`, `metrics_cache_ttl_seconds`, `backup_encryption_key`, `legacy_backup_encryption_keys`, `server_mode`, `cache_refresh_interval_secs` |
 | `[config_files]` | Where the other configuration files are |
 | `[storage_paths]` | Where each record kind is persisted, plus the `default_members` and `default_teams` seed directories |
 | `[encryption]` | Encryption at rest. See [`ENCRYPTION_AT_REST.md`](ENCRYPTION_AT_REST.md). |
@@ -217,7 +217,8 @@ The bootstrap file, read once at startup. Fields and defaults are in
 | `channel_config_source` | `"local"` | `local` loads internal surface records from `storage_paths.agent_surfaces`. `dynamodb` loads them from `dynamodb_table` (using `aws_region` and `aws_profile`), falling back to the last snapshot in `storage_paths.config_cache` when DynamoDB is unreachable. Surfaces, Members and Teams always come from `_storage/`. |
 | `secrets_backend` | `"filesystem"` | `filesystem` keeps secrets under `storage_paths.secrets`. It is the only supported value; any other value stops startup with an error. |
 | `auth_mode` | `"passkey"` | `passkey` uses WebAuthn with `agent-stream.json` `webauthn`. `saml` requires `saml.json`; startup fails if it cannot be read. `oidc` requires `oidc.json`; startup fails if it cannot be read or a setting is refused. |
-| `session_timeout_minutes` | `20` | Dashboard session lifetime, for passkey, SAML and OIDC sign-in alike. |
+| `session_timeout_minutes` | `20` | Dashboard session lifetime from last use, for passkey, SAML and OIDC sign-in alike. A session never outlasts `session_max_lifetime_minutes`, so a larger value has no further effect. |
+| `session_max_lifetime_minutes` | `720` | Longest a dashboard session lasts after sign-in, however active it stays. Must be 1 to 1440; any other value stops startup with an error. See [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md). |
 | `server_mode` | `"active"` | `active` or `standby`. See [Server mode](CONFIGURATION_RELOAD.md#server-mode). |
 | `cache_refresh_interval_secs` | `0` | Above 0, cached stores reconcile with disk on this interval and Surface changes written by another node are mounted. See [`CONFIGURATION_RELOAD.md`](CONFIGURATION_RELOAD.md). |
 | `[a2a] max_inflight_dispatches` | `256` | Fabric requests one connection-point listener dispatches concurrently. Must be greater than 0. |

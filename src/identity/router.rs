@@ -4448,6 +4448,7 @@ mod auth_throttle_route_tests {
                 path("users"),
                 path("avatars"),
                 30,
+                crate::auth::session::MAX_SESSION_LIFETIME_MINUTES,
                 path("sessions"),
                 Arc::new(crate::metrics::MetricsStore::new(16)),
                 Arc::new(crate::terms::TermsManager::disabled()),
