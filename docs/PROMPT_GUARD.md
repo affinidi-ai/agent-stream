@@ -69,7 +69,9 @@ pattern guards force the buffered path; see
 Detection and masking cover each message's `content` (a string, or the `text` parts
 of a content array) and assistant `tool_calls[].function.arguments`. A mask guard
 rewrites tool-call arguments too, so a numeric ID of 14 or more digits in them is
-masked as a card.
+masked as a card. When the arguments are JSON, a token that replaces a bare value
+such as a number is quoted (`{"order_id": "<CREDIT_CARD>"}`), so they still parse.
+Realtime voice sessions (`/v1/realtime`) run no Prompt Guard.
 
 ## Configuration
 
@@ -143,7 +145,20 @@ international phone number of 14 or more digits on its own (`+49 1512 3456 7890`
 labelled `<CREDIT_CARD>`, not `<PHONE_NUMBER>`, and a house number written right after
 a card (`4545 4545 4545 4545 12 Main Street`) joins the card match, so `street_address`
 no longer matches the rest of the address. This holds within one guard; across
-separate guards, list the `credit_card` guard first.
+separate guards, list the `credit_card` guard first. Guards run in sequence on the
+rewritten text, so the order across guards matters:
+
+- A mask guard with `credit_card` absorbs an SSN or phone number written right next to
+  a card before later guards run, so a later reject guard on `ssn` does not see it and
+  the request is masked rather than rejected.
+- A `phone_number` or `street_address` guard listed before the `credit_card` guard
+  takes part of a card and leaves the rest too short to match:
+  `+1 415 555 0100 4545 4545 4545 4545` becomes `<PHONE_NUMBER>5 4545 4545 4545`.
+
+A reject guard with `credit_card` refuses every input the card pattern matches,
+including dates written next to each other (`Can we meet 2026-11-24 2026-11-25`),
+order IDs (`Order ORD-20261124-000123`) and a phone number followed by more digits
+(`212 555 1234 2026`). Put `credit_card` in a mask guard where such text is expected.
 With `reject`,
 processing stops at the first match, which returns the guard's `rejection` or the
 default 403 body
@@ -174,7 +189,13 @@ deployed `prompt-guard.json`; replace it from the shipped file to pick up patter
 | `ssn` | US Social Security Numbers with a dash or space between groups (`NNN-NN-NNNN`, `NNN NN NNNN`), excluding invalid area, group and serial numbers |
 | `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix |
 | `phone_number` | US, international (`+` country code), and Australian mobile numbers |
-| `credit_card` | Any run of 14 or more digits written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`), matched whole, and 13-digit Visa numbers. There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
+| `credit_card` | Any run of 14 or more digits written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`), matched whole, and 13-digit Visa numbers written together. There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
+
+`credit_card`, `ssn` and `ssn_simple` match a number written straight after CJK or
+other non-ASCII text (`卡号4545454545454545`, `社保号123-45-6789`), but not one written
+straight after an ASCII letter, digit or `_` (`cc4545454545454545`). `credit_card` does
+not catch digits separated by a no-break space, a tab, two spaces, dots or an en dash,
+or a 13-digit Visa written with spaces (`4222 2222 2222 2`).
 | `date_of_birth` | Dates preceded by birth keywords (birth, dob, born) |
 | `ip_address` | IPv4 addresses with octet validation |
 | `passport` | US passport numbers |
@@ -195,13 +216,16 @@ compile. Prompt Guard fails closed on such a rule:
 - A Surface already stored with one, for example after `prompt-guard.json` changed,
   refuses every request before any upstream call, whichever side the rule is on, with
   `502`. That covers chat, streamed, text-to-speech, file upload and transcription
-  requests and GET passthrough reads. The body is
+  requests and GET passthrough reads; realtime voice sessions run no Prompt Guard and
+  are not refused. The refusal is not retried under a `retry_policy`. The body is
   `{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`.
   The guard's `rejection` is not used, and the `WARN` log line names the rule and why.
   Rejection telemetry records it under the stage of the rule's side (`regex_request` or
   `regex_response`), with source `prompt_guard_unavailable` and reason token
   `prompt_guard_pattern_unavailable`, which the shipped taxonomy classifies as
-  `prompt_guard_unavailable` rather than as a content match. Surfaces without
+  `prompt_guard_unavailable` rather than as a content match. A deployed
+  `rejection_categories.json` replaces the shipped taxonomy whole, so copy that
+  category and its mapping from the example into it. Surfaces without
   such a rule are unaffected. The response cache runs before Prompt Guard on every
   request, so two exceptions apply: a semantic cache's embedder receives the request
   text, and a cache hit is still served.

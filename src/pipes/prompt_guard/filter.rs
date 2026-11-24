@@ -777,7 +777,7 @@ fn apply_regex_guard_to_messages(
                     .get_mut("function")
                     .and_then(|f| f.get_mut("arguments"))
                 {
-                    match apply_regex_rules_to_text(args, rules, allocator) {
+                    match apply_regex_rules_to_tool_arguments(args, rules, allocator) {
                         RegexResult::Reject(reason) => {
                             let mut r = rejection.clone();
                             r.reason = Some(reason);
@@ -900,6 +900,53 @@ fn application_order(rules: &RegexRules) -> Vec<(usize, &RegexRule)> {
     ordered
 }
 
+/// Whether byte `offset` of `text`, read as JSON, falls inside a string.
+fn inside_json_string(
+    text: &str,
+    offset: usize,
+) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in text.as_bytes()[..offset]
+        .iter()
+        .copied()
+    {
+        if escaped {
+            escaped = false;
+        } else if in_string && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            in_string = !in_string;
+        }
+    }
+    in_string
+}
+
+/// Replace each matched range with its token, last first so earlier offsets
+/// stay valid. In JSON tool-call arguments, a token replacing a value outside
+/// a string, such as a bare number, is quoted so the arguments still parse.
+fn splice_tokens(
+    text: &mut String,
+    replacements: Vec<(std::ops::Range<usize>, String)>,
+    json_arguments: bool,
+) {
+    let quoted: Vec<bool> = replacements
+        .iter()
+        .map(|(range, _)| json_arguments && !inside_json_string(text, range.start))
+        .collect();
+    for ((range, token), quote) in replacements
+        .into_iter()
+        .zip(quoted)
+        .rev()
+    {
+        if quote {
+            text.replace_range(range, &format!("\"{token}\""));
+        } else {
+            text.replace_range(range, &token);
+        }
+    }
+}
+
 /// Apply all regex rules to a text string.
 ///
 /// Rules are processed sequentially in [`application_order`] — each rule operates on
@@ -909,6 +956,26 @@ fn apply_regex_rules_to_text(
     text: &str,
     rules: &RegexRules,
     allocator: &mut PseudonymAllocator,
+) -> RegexResult {
+    apply_regex_rules(text, rules, allocator, false)
+}
+
+/// [`apply_regex_rules_to_text`] on a tool call's `arguments`; when they are
+/// JSON, a masked value outside a string is replaced by a quoted token.
+fn apply_regex_rules_to_tool_arguments(
+    arguments: &str,
+    rules: &RegexRules,
+    allocator: &mut PseudonymAllocator,
+) -> RegexResult {
+    let json_arguments = serde_json::from_str::<Value>(arguments).is_ok();
+    apply_regex_rules(arguments, rules, allocator, json_arguments)
+}
+
+fn apply_regex_rules(
+    text: &str,
+    rules: &RegexRules,
+    allocator: &mut PseudonymAllocator,
+    json_arguments: bool,
 ) -> RegexResult {
     let mut current = text.to_string();
     let mut any_modified = false;
@@ -951,9 +1018,7 @@ fn apply_regex_rules_to_text(
                                     (range, token)
                                 })
                                 .collect();
-                            for (range, token) in replacements.into_iter().rev() {
-                                current.replace_range(range, &token);
-                            }
+                            splice_tokens(&mut current, replacements, json_arguments);
                             any_modified = true;
                         }
                     }
@@ -969,11 +1034,9 @@ fn apply_regex_rules_to_text(
                     if !ranges.is_empty() {
                         match rules.action {
                             GuardAction::Reject => {
-                                let rule_name = label
-                                    .as_deref()
-                                    .unwrap_or(pattern);
-                                info!("Prompt guard: custom pattern '{}' matched — rejecting", rule_name);
-                                return RegexResult::Reject(format!("Matched pattern '{rule_name}'"));
+                                let name = rule_name(rule, position);
+                                info!("Prompt guard: {name} matched — rejecting");
+                                return RegexResult::Reject(format!("Matched {name}"));
                             }
                             GuardAction::Mask => {
                                 let redact_token = label
@@ -995,9 +1058,7 @@ fn apply_regex_rules_to_text(
                                         (range, token)
                                     })
                                     .collect();
-                                for (range, token) in replacements.into_iter().rev() {
-                                    current.replace_range(range, &token);
-                                }
+                                splice_tokens(&mut current, replacements, json_arguments);
                                 any_modified = true;
                             }
                         }
@@ -1027,7 +1088,7 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\b(?:\\d(?:[ -]?\\d){13,}|4\\d{12})\\b"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:\\d(?:[ -]?\\d){13,}|4\\d{12})(?-u:\\b)"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
@@ -1153,7 +1214,7 @@ mod tests {
             GuardOutcome::Rejected(r) => {
                 assert_eq!(r.status_code, 400);
                 assert_eq!(r.body, "Credentials detected");
-                assert_eq!(r.reason.as_deref(), Some("Matched pattern 'credentials'"));
+                assert_eq!(r.reason.as_deref(), Some("Matched custom pattern 'credentials'"));
             }
             _ => panic!("Expected rejection"),
         }
@@ -1807,6 +1868,58 @@ mod tests {
     }
 
     #[test]
+    fn masking_a_number_in_tool_call_arguments_keeps_them_valid_json() {
+        init_test_definitions();
+        for mask_mode in [MaskMode::Redact, MaskMode::Pseudonymize] {
+            let mut guards = mask_guard(&["credit_card"]);
+            guards[0].regex.mask_mode = mask_mode;
+            let arguments =
+                r#"{"order_id": 12345678901234567, "note": "card 4545 4545 4545 4545", "ids": [45454545454545454]}"#;
+            let mut body = json!({
+                "messages": [
+                    { "role": "assistant", "content": Value::Null, "tool_calls": [
+                        { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                    ] }
+                ]
+            });
+
+            assert!(matches!(apply_request_guards(&mut body, &guards), GuardOutcome::Masked));
+
+            let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .expect("arguments stay a string");
+            let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+            for (field, value) in [("order_id", &parsed["order_id"]), ("ids", &parsed["ids"][0])] {
+                let token = value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{field} is masked as a string: {masked}"));
+                assert!(token.contains("CREDIT_CARD"), "{field}: {masked}");
+            }
+            let note = parsed["note"]
+                .as_str()
+                .expect("note stays a string");
+            assert!(note.starts_with("card ") && note.contains("CREDIT_CARD"), "{masked}");
+            assert!(!masked.contains("4545 4545"), "{masked}");
+        }
+    }
+
+    #[test]
+    fn masking_tool_call_arguments_that_are_not_json_leaves_tokens_unquoted() {
+        init_test_definitions();
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": "card 4545454545454545" } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &mask_guard(&["credit_card"])), GuardOutcome::Masked));
+
+        assert_eq!(body["messages"][0]["tool_calls"][0]["function"]["arguments"], "card <CREDIT_CARD>");
+    }
+
+    #[test]
     fn rehydrate_response_restores_tool_call_arguments() {
         let mut map = RehydrationMap::new();
         map.insert("[PERSON_NER_001]".to_string(), "Jane Doe".to_string());
@@ -1898,6 +2011,41 @@ mod tests {
         assert!(!logs.contains("hunter2"), "a log holds the matched value: {logs}");
     }
 
+    #[tokio::test]
+    async fn rejecting_an_unlabelled_custom_pattern_names_it_by_position_not_by_its_regex() {
+        let regex = r"secret-[0-9]{4}";
+        let guards = vec![RequestGuard {
+            regex: RegexRules {
+                action: GuardAction::Reject,
+                mask_mode: MaskMode::Redact,
+                restore_in_response: false,
+                link_pronouns: false,
+                rules: vec![
+                    RegexRule::Pattern {
+                        pattern: "never-matches-here".to_string(),
+                        label: None,
+                    },
+                    RegexRule::Pattern {
+                        pattern: regex.to_string(),
+                        label: None,
+                    },
+                ],
+            },
+            rejection: None,
+        }];
+        let mut body = make_request("Use secret-1234 now");
+
+        let (logs, result) =
+            crate::observability::log_capture::capture_logs(async { apply_request_guards(&mut body, &guards) }).await;
+
+        match result {
+            GuardOutcome::Rejected(r) => assert_eq!(r.reason.as_deref(), Some("Matched custom pattern #2")),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        assert!(logs.contains("custom pattern #2 matched"), "{logs}");
+        assert!(!logs.contains(regex), "a log holds the regex: {logs}");
+    }
+
     fn mask_guard(builtins: &[&str]) -> Vec<RequestGuard> {
         vec![RequestGuard {
             regex: RegexRules {
@@ -1976,25 +2124,29 @@ mod tests {
     #[test]
     fn a_reject_guard_keeps_its_rule_order() {
         init_test_definitions();
-        let guards = vec![RequestGuard {
-            regex: RegexRules {
-                action: GuardAction::Reject,
-                mask_mode: MaskMode::Redact,
-                restore_in_response: false,
-                link_pronouns: false,
-                rules: vec![
-                    RegexRule::Builtin {
-                        builtin: "credit_card".to_string(),
-                    },
-                    RegexRule::Builtin { builtin: "ssn".to_string() },
-                ],
-            },
-            rejection: None,
-        }];
-        let mut body = make_request("4545 4545 4545 4545 and 123-45-6789");
-        match apply_request_guards(&mut body, &guards) {
-            GuardOutcome::Rejected(rejection) => assert_eq!(rejection.reason.as_deref(), Some("Credit Card detected")),
-            other => panic!("expected a rejection, got {other:?}"),
+        for (rules, expected) in
+            [(["ssn", "credit_card"], "US SSN detected"), (["credit_card", "ssn"], "Credit Card detected")]
+        {
+            let guards = vec![RequestGuard {
+                regex: RegexRules {
+                    action: GuardAction::Reject,
+                    mask_mode: MaskMode::Redact,
+                    restore_in_response: false,
+                    link_pronouns: false,
+                    rules: rules
+                        .iter()
+                        .map(|b| RegexRule::Builtin { builtin: b.to_string() })
+                        .collect(),
+                },
+                rejection: None,
+            }];
+            let mut body = make_request("4545 4545 4545 4545 and 123-45-6789");
+            match apply_request_guards(&mut body, &guards) {
+                GuardOutcome::Rejected(rejection) => {
+                    assert_eq!(rejection.reason.as_deref(), Some(expected), "rules in order {rules:?}")
+                }
+                other => panic!("expected a rejection, got {other:?}"),
+            }
         }
     }
 

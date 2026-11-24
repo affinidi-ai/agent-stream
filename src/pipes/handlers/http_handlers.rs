@@ -826,6 +826,18 @@ fn record_front_door_block(
 ) {
     let error = error_body.to_string();
     trigger_block_event(state, pipe, stage, code, &error);
+    capture_block_record(resolved_pipe, request, stage, &error, Vec::new());
+}
+
+/// Write the signed governance `Block` record of a request refused at `stage`,
+/// when the surface records governance.
+fn capture_block_record(
+    resolved_pipe: &PipeConfig,
+    request: &Value,
+    stage: &str,
+    error: &str,
+    categories: Vec<String>,
+) {
     if let Some(gov) = resolved_pipe
         .governance_recording
         .as_ref()
@@ -840,10 +852,10 @@ fn record_front_door_block(
             None,
             crate::governance::InteractionOutcome::Blocked {
                 stage: stage.to_string(),
-                reason: Some(error.clone()),
+                reason: Some(error.to_string()),
                 input: None,
                 output: None,
-                categories: Vec::new(),
+                categories,
             },
             gov.export.clone(),
         );
@@ -876,9 +888,10 @@ fn prompt_guard_unavailable_refusal(
     let error_body: Value = serde_json::from_str(body).ok()?;
     let stage = meta.stage.label();
     let code = crate::pipes::prompt_guard::RULE_UNAVAILABLE_CATEGORY;
-    record_front_door_block(state, pipe, resolved_pipe, &Value::Null, stage, code, &error_body);
+    let categories = rejection_categories(Some(meta));
+    trigger_block_event(state, pipe, stage, code, body);
+    capture_block_record(resolved_pipe, &Value::Null, stage, body, categories.clone());
     if pipe.enable_metrics {
-        let categories = rejection_categories(Some(meta));
         let member_id = team_ctx.map(|ctx| ctx.member_id.clone());
         let team_ids = team_ctx
             .map(|ctx| {
@@ -5523,7 +5536,7 @@ async fn proxy_api_get(
     // Access control (member enabled, surface→team allow-list) applies to GET
     // polling too; there is no request body, so model checks are inert. A
     // spent budget refuses the poll only when it runs on a platform key.
-    let call_budget = match crate::teams::team_pre_check(
+    let (call_budget, team_ctx) = match crate::teams::team_pre_check(
         resolved
             .team_attribution
             .as_ref(),
@@ -5542,8 +5555,8 @@ async fn proxy_api_get(
             record_front_door_block(state, &resolved, &resolved, &Value::Null, "team_gate", code, &body);
             return (status, Json(body)).into_response();
         }
-        crate::teams::TeamGateDecision::Allow(ctx) => ctx.call_budget,
-        crate::teams::TeamGateDecision::Skip => None,
+        crate::teams::TeamGateDecision::Allow(mut ctx) => (ctx.call_budget.take(), Some(ctx)),
+        crate::teams::TeamGateDecision::Skip => (None, None),
     };
 
     let caller = caller_credentials(
@@ -5585,7 +5598,8 @@ async fn proxy_api_get(
                 );
                 return refused.response;
             }
-            if let Some(refusal) = prompt_guard_unavailable_refusal(state, &resolved, &resolved, None, &e) {
+            if let Some(refusal) = prompt_guard_unavailable_refusal(state, &resolved, &resolved, team_ctx.as_ref(), &e)
+            {
                 return refusal;
             }
             let (status, code) = match &e {
@@ -5691,7 +5705,7 @@ async fn proxy_file_upload(
 
     // ── Team access gate ──
     // A spent budget refuses the upload only when it runs on a platform key.
-    let call_budget = match crate::teams::team_pre_check(
+    let (call_budget, team_ctx) = match crate::teams::team_pre_check(
         resolved
             .team_attribution
             .as_ref(),
@@ -5710,8 +5724,8 @@ async fn proxy_file_upload(
             record_front_door_block(state, &resolved, &resolved, &Value::Null, "team_gate", code, &body);
             return (status, Json(body)).into_response();
         }
-        crate::teams::TeamGateDecision::Allow(ctx) => ctx.call_budget,
-        crate::teams::TeamGateDecision::Skip => None,
+        crate::teams::TeamGateDecision::Allow(mut ctx) => (ctx.call_budget.take(), Some(ctx)),
+        crate::teams::TeamGateDecision::Skip => (None, None),
     };
 
     let caller = caller_credentials(
@@ -5757,7 +5771,8 @@ async fn proxy_file_upload(
                 );
                 return refused.response;
             }
-            if let Some(refusal) = prompt_guard_unavailable_refusal(state, &resolved, &resolved, None, &e) {
+            if let Some(refusal) = prompt_guard_unavailable_refusal(state, &resolved, &resolved, team_ctx.as_ref(), &e)
+            {
                 return refusal;
             }
             let (status, code) = match &e {

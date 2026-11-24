@@ -15,7 +15,10 @@ changes:
         The shipped rejection taxonomy adds the category prompt_guard_unavailable, mapped
         from source prompt_guard_unavailable and reason prompt_guard_pattern_unavailable,
         so a refusal caused by a rule that cannot be evaluated is not counted as
-        uncategorized content.
+        uncategorized content. A deployed rejection_categories.json replaces the shipped
+        taxonomy whole: copy the category and its mapping from
+        config/examples/rejection_categories.example.json into it, or these refusals stay
+        uncategorized.
   changed:
     - timestamp: '2026-11-24T12:00:00.000Z'
       title: Apply credit_card before a mask guard's other Prompt Guard rules
@@ -25,7 +28,17 @@ changes:
         part of a card first. A phone number, SSN or house number written right next to a
         card is masked with it as one <CREDIT_CARD>, and an international phone number of
         14 or more digits on its own is labelled <CREDIT_CARD>. Reject guards keep their
-        listed order.
+        listed order. Across separate guards the order still matters: a card mask absorbs
+        an adjacent SSN before a later reject guard sees it, and a phone_number guard
+        listed first leaves part of a card unmasked.
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Refuse more ordinary text in reject guards that name credit_card
+      description: >-
+        Because credit_card now matches any run of 14 or more digits joined by single
+        spaces or dashes, a reject guard that names it refuses text such as dates written
+        next to each other (2026-11-24 2026-11-25), order IDs (ORD-20261124-000123) and a
+        phone number followed by more digits (212 555 1234 2026) with its rejection or the
+        default 403. Put credit_card in a mask guard where such text is expected.
     - timestamp: '2026-11-24T12:00:00.000Z'
       title: Refuse saving a Surface whose Prompt Guard rule cannot be evaluated
       description: >-
@@ -33,7 +46,21 @@ changes:
         when its enabled Prompt Guard names a built-in pattern that is not loaded or did
         not compile, or a custom pattern that does not compile. The error names the rule;
         an unlabelled custom pattern is named by its position, never by its regex.
-  fixed: []
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Name a matched unlabelled custom Prompt Guard rule by its position
+      description: >-
+        When an unlabelled custom pattern matches in a reject guard, the INFO log line and
+        the rejection reason now name it as custom pattern #N instead of writing its
+        regex, which may be written to catch secrets. A labelled rule's reason reads
+        Matched custom pattern 'label'.
+  fixed:
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Keep tool-call arguments valid JSON when Prompt Guard masks a number
+      description: >-
+        A request mask guard that replaced a bare JSON number in
+        tool_calls[].function.arguments, such as {"order_id": 12345678901234567},
+        produced invalid JSON. When the arguments are JSON, a token that replaces a value
+        outside a string is now quoted, so they still parse.
   removed: []
   security:
     - timestamp: '2026-11-23T12:00:00.000Z'
@@ -44,12 +71,14 @@ changes:
         model, and the built-in ssn pattern used look-around the regex engine cannot
         compile, so it never ran. credit_card now matches any run of 14 or more digits
         written together or with single spaces or dashes, matched whole and with no
-        checksum, plus 13-digit Visa numbers; long IDs, timestamps written as digits,
-        adjacent dates, numbered lists, space-grouped amounts and numeric IDs in tool-call
-        arguments also match. ssn and ssn_simple accept a space or a dash between groups.
-        An upgrade does not replace a deployed prompt-guard.json: replace it from
-        config/examples/prompt-guard.example.json, or Surfaces whose rules name ssn refuse
-        every request until you do.
+        checksum, plus 13-digit Visa numbers written together; long IDs, timestamps
+        written as digits, adjacent dates, numbered lists, space-grouped amounts and
+        numeric IDs in tool-call arguments also match. ssn and ssn_simple accept a space
+        or a dash between groups. credit_card, ssn and ssn_simple also match a number
+        written straight after CJK or other non-ASCII text, but not straight after an
+        ASCII letter. No-break spaces, tabs, double spaces, dots and en dashes between
+        digits are not caught. These fixes take effect only once the deployed
+        prompt-guard.json is replaced; see the breaking entry.
     - timestamp: '2026-11-23T12:00:00.000Z'
       title: Refuse requests whose Prompt Guard rule cannot be evaluated
       description: >-
@@ -59,6 +88,19 @@ changes:
         Guard has such a rule, on either side, now refuses every request before any
         upstream call, including text-to-speech, file upload and GET passthrough
         requests, with 502 guardrail_unavailable and code
-        prompt_guard_pattern_unavailable. The response cache runs earlier, so a semantic
-        cache embedder still receives the request text and a cache hit is still served.
-  breaking: []
+        prompt_guard_pattern_unavailable, without retrying under a retry_policy. The
+        response cache runs earlier, so a semantic cache embedder still receives the
+        request text and a cache hit is still served. Realtime voice sessions run no
+        Prompt Guard and are not refused.
+  breaking:
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Replace prompt-guard.json and fix uncompilable custom Prompt Guard patterns
+      description: >-
+        An upgrade keeps the deployed prompt-guard.json. Until it is replaced from
+        config/examples/prompt-guard.example.json, Surfaces whose rules name ssn answer
+        every request with 502 prompt_guard_pattern_unavailable and their saves are
+        refused with 400, and the credit_card, ssn_simple and phone_number fixes do not
+        apply, so spaced cards still pass. A Surface stored with a custom pattern that
+        does not compile, which was silently skipped before, now answers every request
+        with 502 prompt_guard_pattern_unavailable and refuses saves with 400: correct or
+        remove the pattern. The WARN log line and the 400 error name the rule.

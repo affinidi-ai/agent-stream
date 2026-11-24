@@ -70,8 +70,6 @@ pub fn init_definitions(path: &str) -> Result<(), String> {
     // is left out and reported by `report_definition_problems` once logging is up.
     let (compiled, problems) = compile_patterns(&defs);
 
-    info!("Loaded {} prompt guard pattern definitions ({} valid regexes)", defs.defined_patterns.len(), compiled.len());
-
     // Store compiled regexes in a separate OnceLock
     COMPILED_REGEXES
         .set(compiled)
@@ -224,6 +222,12 @@ fn definition_problems_in(
 /// logging starts, so this runs once logging is up. `load_error` is why
 /// `prompt-guard.json` did not load, when it did not.
 pub fn report_definition_problems(load_error: Option<&str>) {
+    if let Some(defs) = DEFINITIONS.get() {
+        let valid = COMPILED_REGEXES
+            .get()
+            .map_or(0, HashMap::len);
+        info!("Loaded {} prompt guard pattern definitions ({valid} valid regexes)", defs.defined_patterns.len());
+    }
     for problem in definition_problems_in(
         COMPILE_PROBLEMS
             .get()
@@ -425,8 +429,27 @@ mod tests {
         ] {
             assert!(re.is_match(good), "expected card match: {good}");
         }
-        for bad in ["+55 11 91234 5678", "212-555-1234", "123-45-6789", "123456789"] {
+        for bad in [
+            "+55 11 91234 5678",
+            "212-555-1234",
+            "123-45-6789",
+            "123456789",
+            "cc4545454545454545",
+            "card_4545454545454545",
+        ] {
             assert!(!re.is_match(bad), "unexpected card match: {bad}");
+        }
+        for (text, card) in [
+            ("卡号4545454545454545", "4545454545454545"),
+            ("カード番号4545-4545-4545-4545です", "4545-4545-4545-4545"),
+            ("номер 4545 4545 4545 4545.", "4545 4545 4545 4545"),
+        ] {
+            assert_eq!(
+                re.find(text)
+                    .map(|m| m.as_str()),
+                Some(card),
+                "a card next to non-ASCII text matches: {text}"
+            );
         }
         for (text, run) in [
             ("+65 6123 4567 4545 4545 4545 4545", "65 6123 4567 4545 4545 4545 4545"),
@@ -449,7 +472,14 @@ mod tests {
         for good in ["123-45-6789", "123 45 6789", "899-99-9999", "001-01-0001", "My SSN is 123 45 6789"] {
             assert!(re.is_match(good), "expected SSN match: {good}");
         }
+        assert_eq!(
+            re.find("社保号123-45-6789です")
+                .map(|m| m.as_str()),
+            Some("123-45-6789"),
+            "an SSN next to CJK text matches"
+        );
         for bad in [
+            "ssn123-45-6789",
             "666-12-3456",
             "000-12-3456",
             "912-34-5678",
@@ -466,7 +496,7 @@ mod tests {
     #[test]
     fn shipped_ssn_simple_pattern_matches_a_dash_or_space() {
         let re = shipped_regex("ssn_simple");
-        for good in ["123-45-6789", "123 45 6789", "666-00-0000"] {
+        for good in ["123-45-6789", "123 45 6789", "666-00-0000", "社保号123-45-6789"] {
             assert!(re.is_match(good), "expected simple SSN match: {good}");
         }
         for bad in ["123456789", "212-555-1234", "+55 11 91234 5678"] {

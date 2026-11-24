@@ -1529,6 +1529,7 @@ impl PipeExecutor {
 
             self.admit_platform_stages()
                 .await?;
+            self.refuse_unusable_prompt_guard_rules()?;
 
             // Per-request routing preferences (`models` / `provider`) filter and
             // reorder the surface's own candidate pool (primary + failover / LB
@@ -9747,38 +9748,48 @@ mod tests {
                         let mut prompt_guard = json!({ "enabled": true });
                         prompt_guard[side] = json!([{ "regex": { "action": "reject", "rules": [rule.clone()] } }]);
                         config.prompt_guard = Some(serde_json::from_value(prompt_guard).expect("prompt guard config"));
+                        config.retry_policy = Some(crate::pipes::config::RetryPolicy {
+                            max_retries: 3,
+                            initial_backoff_ms: 60_000,
+                            max_backoff_ms: 60_000,
+                            backoff_multiplier: 1.0,
+                        });
                         let executor = PipeExecutor::new(&config);
-                        let result = match path {
-                            "streamed" => executor
-                                .execute_streaming(request(), None, CallerCredentials::default(), None)
-                                .await
-                                .map(|_| ()),
-                            "binary" => executor
-                                .execute_binary(
-                                    json!({ "model": "tts-1", "input": "hello" }),
-                                    Some("/v1/audio/speech".to_string()),
-                                    CallerCredentials::default(),
-                                )
-                                .await
-                                .map(|_| ()),
-                            "upload" => executor
-                                .execute_upload(
-                                    Some("/v1/files".to_string()),
-                                    "multipart/form-data; boundary=x".to_string(),
-                                    b"--x--\r\n".to_vec(),
-                                    CallerCredentials::default(),
-                                )
-                                .await
-                                .map(|_| ()),
-                            "get" => executor
-                                .execute_get(Some("/v1/files/file-1".to_string()), CallerCredentials::default())
-                                .await
-                                .map(|_| ()),
-                            _ => executor
-                                .execute(request(), None, None, None, None)
-                                .await
-                                .map(|_| ()),
-                        };
+                        let result = tokio::time::timeout(StdDuration::from_secs(5), async {
+                            match path {
+                                "streamed" => executor
+                                    .execute_streaming(request(), None, CallerCredentials::default(), None)
+                                    .await
+                                    .map(|_| ()),
+                                "binary" => executor
+                                    .execute_binary(
+                                        json!({ "model": "tts-1", "input": "hello" }),
+                                        Some("/v1/audio/speech".to_string()),
+                                        CallerCredentials::default(),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                "upload" => executor
+                                    .execute_upload(
+                                        Some("/v1/files".to_string()),
+                                        "multipart/form-data; boundary=x".to_string(),
+                                        b"--x--\r\n".to_vec(),
+                                        CallerCredentials::default(),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                "get" => executor
+                                    .execute_get(Some("/v1/files/file-1".to_string()), CallerCredentials::default())
+                                    .await
+                                    .map(|_| ()),
+                                _ => executor
+                                    .execute(request(), None, None, None, None)
+                                    .await
+                                    .map(|_| ()),
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|_| panic!("{rule} on the {side}, {path} path: refused without retrying"));
 
                         let case = format!("{rule} on the {side}, {path} path");
                         match result {

@@ -33,7 +33,8 @@ classified into a [rejection category](#rejection-categories).
 Fail closed is the default; an Expert Witness with `fail_open: true` lets a request
 through when its provider is unavailable (see [Fail-open and fail-closed](#fail-open-and-fail-closed)).
 A Prompt Guard pattern rule that cannot be evaluated always refuses the request
-before any upstream call other than the response cache (see
+before any upstream call other than the response cache, except a realtime voice
+session, which runs no Prompt Guard (see
 [PROMPT_GUARD.md](PROMPT_GUARD.md#rules-that-cannot-be-evaluated)).
 
 ## Pipeline order
