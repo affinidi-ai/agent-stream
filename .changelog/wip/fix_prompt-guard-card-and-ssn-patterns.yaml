@@ -7,8 +7,9 @@ changes:
         Built-in Prompt Guard patterns that do not compile, and a prompt-guard.json that
         does not load, are now logged at ERROR once logging is up and counted in
         agent_stream_prompt_guard_pattern_errors_total{pattern, reason}, with reason
-        compile_failed or definitions_missing. Before, the warning was written before
-        logging started and never appeared.
+        compile_failed or definitions_missing. The log line names the pattern and why it
+        did not compile, never its regex. Before, the warning was written before logging
+        started and never appeared.
     - timestamp: '2026-11-24T12:00:00.000Z'
       title: Classify unusable Prompt Guard rules as their own rejection category
       description: >-

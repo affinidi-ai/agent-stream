@@ -104,11 +104,25 @@ fn compile_patterns(defs: &PromptGuardDefinitions) -> (HashMap<String, Regex>, V
             Err(e) => problems.push(DefinitionProblem {
                 pattern: pattern.key.clone(),
                 issue: PatternIssue::CompileFailed,
-                detail: e.to_string(),
+                detail: compile_error_reason(&e),
             }),
         }
     }
     (compiled, problems)
+}
+
+/// Why a regex did not compile, without the expression itself, which may hold
+/// literals the pattern was written to catch. A syntax error quotes the
+/// expression and ends with an `error: <reason>` line; only that reason is kept.
+fn compile_error_reason(error: &regex::Error) -> String {
+    let message = error.to_string();
+    let last = message
+        .lines()
+        .last()
+        .unwrap_or_default();
+    last.strip_prefix("error: ")
+        .unwrap_or(last)
+        .to_string()
 }
 
 /// Get the loaded definitions. Returns None if not yet initialized.
@@ -532,7 +546,7 @@ mod tests {
 
     #[test]
     fn definition_problems_report_each_pattern_that_does_not_compile() {
-        let defs = definitions_with(&[("good", r"\d+"), ("broken", r"(?!x)y")]);
+        let defs = definitions_with(&[("good", r"\d+"), ("broken", r"(?!hunter2)y")]);
         let (compiled, kept) = compile_patterns(&defs);
         assert_eq!(compiled.len(), 1);
         let problems = definition_problems_in(Some(&kept), None);
@@ -545,6 +559,13 @@ mod tests {
                 .detail
                 .contains("look-around"),
             "unexpected detail: {}",
+            problems[0].detail
+        );
+        assert!(
+            !problems[0]
+                .detail
+                .contains("hunter2"),
+            "the detail quotes the regex: {}",
             problems[0].detail
         );
     }

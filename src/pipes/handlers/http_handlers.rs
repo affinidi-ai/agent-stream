@@ -825,8 +825,8 @@ fn record_front_door_block(
     error_body: &Value,
 ) {
     let error = error_body.to_string();
-    trigger_block_event(state, pipe, stage, code, &error);
-    capture_block_record(resolved_pipe, request, stage, &error, Vec::new());
+    trigger_block_event(state, pipe, stage, code, &error, &[]);
+    capture_block_record(resolved_pipe, request, None, stage, &error, Vec::new());
 }
 
 /// Write the signed governance `Block` record of a request refused at `stage`,
@@ -834,6 +834,7 @@ fn record_front_door_block(
 fn capture_block_record(
     resolved_pipe: &PipeConfig,
     request: &Value,
+    caller_identity: Option<String>,
     stage: &str,
     error: &str,
     categories: Vec<String>,
@@ -849,7 +850,7 @@ fn capture_block_record(
             resolved_pipe.id.clone(),
             resolved_pipe.name.clone(),
             Some(request.clone()),
-            None,
+            caller_identity,
             crate::governance::InteractionOutcome::Blocked {
                 stage: stage.to_string(),
                 reason: Some(error.to_string()),
@@ -889,10 +890,10 @@ fn prompt_guard_unavailable_refusal(
     let stage = meta.stage.label();
     let code = crate::pipes::prompt_guard::RULE_UNAVAILABLE_CATEGORY;
     let categories = rejection_categories(Some(meta));
-    trigger_block_event(state, pipe, stage, code, body);
-    capture_block_record(resolved_pipe, &Value::Null, stage, body, categories.clone());
+    let member_id = team_ctx.map(|ctx| ctx.member_id.clone());
+    trigger_block_event(state, pipe, stage, code, body, &categories);
+    capture_block_record(resolved_pipe, &Value::Null, member_id.clone(), stage, body, categories.clone());
     if pipe.enable_metrics {
-        let member_id = team_ctx.map(|ctx| ctx.member_id.clone());
         let team_ids = team_ctx
             .map(|ctx| {
                 ctx.teams
@@ -911,22 +912,26 @@ fn prompt_guard_unavailable_refusal(
 }
 
 /// Fire `pipe`'s `pipe.error` integrations for a request refused at `stage`
-/// with the machine `code`, off the request path.
+/// with the machine `code` and rejection `categories`, off the request path.
 fn trigger_block_event(
     state: &PipeHandlerState,
     pipe: &PipeConfig,
     stage: &str,
     code: &str,
     error: &str,
+    categories: &[String],
 ) {
     if let Some(store) = state
         .notification_store
         .clone()
     {
         let integrations = pipe.integrations.clone();
-        let event = crate::integrations::pipe_integration_triggers::PipeErrorEvent::new(pipe, error.to_string())
+        let mut event = crate::integrations::pipe_integration_triggers::PipeErrorEvent::new(pipe, error.to_string())
             .at_stage(stage)
             .with_code(code);
+        if !categories.is_empty() {
+            event = event.with_categories(categories);
+        }
         tokio::spawn(async move {
             crate::integrations::trigger_pipe_error(&store, &integrations, &event).await;
         });
@@ -4263,7 +4268,7 @@ async fn handle_chat_completions_inner(
                     failure_metrics,
                     governance_sink.clone(),
                 );
-                trigger_block_event(&state, &_pipe, refused.stage, refused.code, &refused.body.to_string());
+                trigger_block_event(&state, &_pipe, refused.stage, refused.code, &refused.body.to_string(), &[]);
                 return refused.response;
             }
             let error_details = format!("{:?}", e);
@@ -4898,7 +4903,7 @@ async fn stream_chat_completion(
                     failure_metrics,
                     governance_sink.clone(),
                 );
-                trigger_block_event(state, pipe, refused.stage, refused.code, &refused.body.to_string());
+                trigger_block_event(state, pipe, refused.stage, refused.code, &refused.body.to_string(), &[]);
                 return refused.response;
             }
             error!("[PIPE:{}] Streaming execution failed: {:?}", pipe_id, e);
