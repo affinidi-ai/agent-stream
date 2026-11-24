@@ -535,6 +535,9 @@ fn model_pii_stage_detail(outcome: &ModelPiiOutcome) -> (bool, String) {
 /// jury reason tokens survive to the telemetry boundary instead of being
 /// flattened into the response body. The handler classifies `raw_reasons`
 /// (interpreted in the context of `source`) into canonical categories.
+/// Rejection source of a refusal because a Prompt Guard rule cannot be evaluated.
+pub const PROMPT_GUARD_UNAVAILABLE_SOURCE: &str = "prompt_guard_unavailable";
+
 #[derive(Debug, Clone)]
 pub struct RejectionMeta {
     pub stage: RejectionStage,
@@ -2765,9 +2768,9 @@ impl PipeExecutor {
     /// Forward a raw POST body (e.g. a `multipart/form-data` file upload for
     /// `POST /v1/files`) to the upstream provider verbatim, preserving the
     /// caller's `Content-Type` (including the multipart boundary). Runs the
-    /// request-side gates (circuit breaker, rate limit, provider auth, SSRF);
-    /// the body is opaque, so content guards, parameter rules, and token
-    /// metering do not apply.
+    /// request-side gates (circuit breaker, rate limit, the Prompt Guard
+    /// unusable-rule refusal, provider auth, SSRF); the body is opaque, so
+    /// content guards, parameter rules, and token metering do not apply.
     pub async fn execute_upload(
         &self,
         path_suffix: Option<String>,
@@ -2794,6 +2797,8 @@ impl PipeExecutor {
             self.check_rate_limits(None)
                 .await?;
         }
+
+        self.refuse_unusable_prompt_guard_rules()?;
 
         use crate::pipes::types::llm_provider_ext::LLMProviderExt;
         let provider = match &self.config.pipe_type {
@@ -2964,6 +2969,8 @@ impl PipeExecutor {
             self.check_rate_limits(None)
                 .await?;
         }
+
+        self.refuse_unusable_prompt_guard_rules()?;
 
         use crate::pipes::types::llm_provider_ext::LLMProviderExt;
         let provider = match &self.config.pipe_type {
@@ -6202,8 +6209,12 @@ impl PipeExecutor {
             .as_ref()
             .and_then(crate::pipes::prompt_guard::unusable_rule_rejection)
         {
-            Some(rejection) => {
-                Err(PipeError::guard_rejected(rejection, RejectionStage::RegexRequest, "prompt_guard_unavailable"))
+            Some((side, rejection)) => {
+                let stage = match side {
+                    crate::pipes::prompt_guard::GuardSide::Request => RejectionStage::RegexRequest,
+                    crate::pipes::prompt_guard::GuardSide::Response => RejectionStage::RegexResponse,
+                };
+                Err(PipeError::guard_rejected(rejection, stage, PROMPT_GUARD_UNAVAILABLE_SOURCE))
             }
             None => Ok(()),
         }
@@ -9729,7 +9740,7 @@ mod tests {
         async fn a_prompt_guard_rule_that_cannot_be_evaluated_refuses_the_call_before_the_upstream() {
             for rule in [json!({ "builtin": "not_a_pattern" }), json!({ "pattern": "(?!x)y", "label": "lookahead" })] {
                 for side in ["request", "response"] {
-                    for path in ["buffered", "streamed", "binary"] {
+                    for path in ["buffered", "streamed", "binary", "upload", "get"] {
                         let base = CaptureUpstream::answering("hello back").await;
                         let _allowed = allow(&[&base]);
                         let mut config = surface(&base.url);
@@ -9750,6 +9761,19 @@ mod tests {
                                 )
                                 .await
                                 .map(|_| ()),
+                            "upload" => executor
+                                .execute_upload(
+                                    Some("/v1/files".to_string()),
+                                    "multipart/form-data; boundary=x".to_string(),
+                                    b"--x--\r\n".to_vec(),
+                                    CallerCredentials::default(),
+                                )
+                                .await
+                                .map(|_| ()),
+                            "get" => executor
+                                .execute_get(Some("/v1/files/file-1".to_string()), CallerCredentials::default())
+                                .await
+                                .map(|_| ()),
                             _ => executor
                                 .execute(request(), None, None, None, None)
                                 .await
@@ -9768,6 +9792,7 @@ mod tests {
                                 let meta = rejection.expect("the refusal carries rejection metadata");
                                 assert_eq!(meta.source, "prompt_guard_unavailable", "{case}");
                                 assert_eq!(meta.raw_reasons, vec!["prompt_guard_pattern_unavailable"], "{case}");
+                                assert_eq!(meta.stage.label(), format!("regex_{side}"), "{case}");
                             }
                             other => panic!("{case}: expected the unusable rule to refuse the call, got {other:?}"),
                         }

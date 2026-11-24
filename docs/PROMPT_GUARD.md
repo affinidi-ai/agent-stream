@@ -67,7 +67,9 @@ pattern guards force the buffered path; see
 [GUARDRAILS.md](GUARDRAILS.md#pipeline-order).
 
 Detection and masking cover each message's `content` (a string, or the `text` parts
-of a content array) and assistant `tool_calls[].function.arguments`.
+of a content array) and assistant `tool_calls[].function.arguments`. A mask guard
+rewrites tool-call arguments too, so a numeric ID of 14 or more digits in them is
+masked as a card.
 
 ## Configuration
 
@@ -138,7 +140,9 @@ number or SSN written right next to a card is masked with it as one `<CREDIT_CAR
 `+65 6123 4567 4545 4545 4545 4545` becomes `+<CREDIT_CARD>`, and
 `4545 4545 4545 4545 123-45-6789` becomes `<CREDIT_CARD>`. For the same reason, an
 international phone number of 14 or more digits on its own (`+49 1512 3456 7890`) is
-labelled `<CREDIT_CARD>`, not `<PHONE_NUMBER>`. This holds within one guard; across
+labelled `<CREDIT_CARD>`, not `<PHONE_NUMBER>`, and a house number written right after
+a card (`4545 4545 4545 4545 12 Main Street`) joins the card match, so `street_address`
+no longer matches the rest of the address. This holds within one guard; across
 separate guards, list the `credit_card` guard first.
 With `reject`,
 processing stops at the first match, which returns the guard's `rejection` or the
@@ -183,15 +187,21 @@ defined, whose regex did not compile, or that is unavailable because
 `prompt-guard.json` did not load, or when it is a custom `pattern` that does not
 compile. Prompt Guard fails closed on such a rule:
 
-- Saving a Surface, or one of its Variants, whose enabled Prompt Guard has one is
-  refused with `400`, and the error names the rule.
+- Saving a Surface, or one of its Variants, through the Admin API when its enabled
+  Prompt Guard has one is refused with `400`, and the error names the rule. An
+  unlabelled custom pattern is named by its position in its guard (`custom pattern #2`),
+  never by its regex. Surfaces that arrive another way, such as a Surface template or a
+  hot reload, are not checked when saved; they are refused at request time, below.
 - A Surface already stored with one, for example after `prompt-guard.json` changed,
   refuses every request before any upstream call, whichever side the rule is on, with
-  `502` and
+  `502`. That covers chat, streamed, text-to-speech, file upload and transcription
+  requests and GET passthrough reads. The body is
   `{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`.
   The guard's `rejection` is not used, and the `WARN` log line names the rule and why.
-  Rejection telemetry records it with source `prompt_guard_unavailable` and reason
-  token `prompt_guard_pattern_unavailable`, not as a content match. Surfaces without
+  Rejection telemetry records it under the stage of the rule's side (`regex_request` or
+  `regex_response`), with source `prompt_guard_unavailable` and reason token
+  `prompt_guard_pattern_unavailable`, which the shipped taxonomy classifies as
+  `prompt_guard_unavailable` rather than as a content match. Surfaces without
   such a rule are unaffected. The response cache runs before Prompt Guard on every
   request, so two exceptions apply: a semantic cache's embedder receives the request
   text, and a cache hit is still served.

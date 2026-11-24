@@ -1,6 +1,7 @@
 mod assertions;
 mod governance;
 mod identities;
+mod metrics;
 mod providers;
 mod requests;
 mod surfaces;
@@ -9,6 +10,7 @@ mod users;
 pub(super) use assertions::*;
 pub(super) use governance::*;
 pub(super) use identities::*;
+pub(super) use metrics::*;
 pub(super) use providers::*;
 pub(super) use requests::*;
 pub(super) use surfaces::*;

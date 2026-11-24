@@ -1,32 +1,64 @@
 branch: fix/prompt-guard-card-and-ssn-patterns
 changes:
-  added: []
-  changed: []
+  added:
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Report Prompt Guard patterns that cannot be used at startup
+      description: >-
+        Built-in Prompt Guard patterns that do not compile, and a prompt-guard.json that
+        does not load, are now logged at ERROR once logging is up and counted in
+        agent_stream_prompt_guard_pattern_errors_total{pattern, reason}, with reason
+        compile_failed or definitions_missing. Before, the warning was written before
+        logging started and never appeared.
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Classify unusable Prompt Guard rules as their own rejection category
+      description: >-
+        The shipped rejection taxonomy adds the category prompt_guard_unavailable, mapped
+        from source prompt_guard_unavailable and reason prompt_guard_pattern_unavailable,
+        so a refusal caused by a rule that cannot be evaluated is not counted as
+        uncategorized content.
+  changed:
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Apply credit_card before a mask guard's other Prompt Guard rules
+      description: >-
+        A mask guard now applies the credit_card built-in before its other rules, which
+        keep their listed order, so no phone_number, ssn or street_address rule takes
+        part of a card first. A phone number, SSN or house number written right next to a
+        card is masked with it as one <CREDIT_CARD>, and an international phone number of
+        14 or more digits on its own is labelled <CREDIT_CARD>. Reject guards keep their
+        listed order.
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Refuse saving a Surface whose Prompt Guard rule cannot be evaluated
+      description: >-
+        Saving a Surface or one of its Variants through the Admin API is refused with 400
+        when its enabled Prompt Guard names a built-in pattern that is not loaded or did
+        not compile, or a custom pattern that does not compile. The error names the rule;
+        an unlabelled custom pattern is named by its position, never by its regex.
   fixed: []
   removed: []
   security:
     - timestamp: '2026-11-23T12:00:00.000Z'
-      title: ⭐ Catch spaced card and SSN numbers in Prompt Guard and fail closed
+      title: ⭐ Catch card and SSN numbers written with spaces or dashes in Prompt Guard
       description: >-
         Affects 1.0.2 and earlier; fixed in the next release. The built-in credit_card
-        Prompt Guard pattern matched only digits written together, so 4545 4545 4545 4545
-        reached the model, and the built-in ssn pattern used look-around the regex engine
-        cannot compile, so it never ran. A rule naming a built-in pattern that was missing
-        or did not compile, or a custom pattern that did not compile, was skipped and the
-        text passed through. credit_card now matches any run of 14 or more digits written
-        together or with single spaces or dashes between digits, matched whole and with no
-        checksum, plus 13-digit Visa numbers, so mask guards also redact long IDs, timestamps written as digits,
-        adjacent dates, numbered lists and amounts grouped with spaces. A mask guard applies
-        credit_card before its other rules, so no phone_number, ssn or street_address rule
-        takes part of a card first; a phone number or SSN written right next to a card is
-        masked with it as one <CREDIT_CARD>, and an international phone number of 14 or more
-        digits on its own is labelled <CREDIT_CARD>. The international branch of phone_number now
-        ends at a word boundary. ssn and ssn_simple accept a space or a dash between groups. A Surface whose Prompt Guard has a rule that cannot be evaluated
-        now refuses every request with 502 guardrail_unavailable and code
-        prompt_guard_pattern_unavailable before any upstream call, and saving such a Surface
-        is refused with 400, including when the rule is in a Variant's Prompt Guard. Built-in patterns that cannot be used are logged at ERROR at
-        startup and counted in agent_stream_prompt_guard_pattern_errors_total. An upgrade
-        does not replace a deployed prompt-guard.json: replace it from
+        pattern matched only digits written together, so 4545 4545 4545 4545 reached the
+        model, and the built-in ssn pattern used look-around the regex engine cannot
+        compile, so it never ran. credit_card now matches any run of 14 or more digits
+        written together or with single spaces or dashes, matched whole and with no
+        checksum, plus 13-digit Visa numbers; long IDs, timestamps written as digits,
+        adjacent dates, numbered lists, space-grouped amounts and numeric IDs in tool-call
+        arguments also match. ssn and ssn_simple accept a space or a dash between groups.
+        An upgrade does not replace a deployed prompt-guard.json: replace it from
         config/examples/prompt-guard.example.json, or Surfaces whose rules name ssn refuse
         every request until you do.
+    - timestamp: '2026-11-23T12:00:00.000Z'
+      title: Refuse requests whose Prompt Guard rule cannot be evaluated
+      description: >-
+        Affects 1.0.2 and earlier; fixed in the next release. A rule naming a built-in
+        pattern that was missing or did not compile, or a custom pattern that did not
+        compile, was skipped and the text passed through. A Surface whose enabled Prompt
+        Guard has such a rule, on either side, now refuses every request before any
+        upstream call, including text-to-speech, file upload and GET passthrough
+        requests, with 502 guardrail_unavailable and code
+        prompt_guard_pattern_unavailable. The response cache runs earlier, so a semantic
+        cache embedder still receives the request text and a cache hit is still served.
   breaking: []

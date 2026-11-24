@@ -44,6 +44,23 @@ Feature: LLM Surface Prompt Guard
     When the caller sends chat prompt "Summarize the release notes" to LLM Surface "guarded-chat"
     Then the request is refused because a Prompt Guard rule is unavailable
     And provider "bravo" received no chat completion requests
+    And the appliance reports Prompt Guard built-in pattern "ssn" as unusable
+
+  Scenario Outline: Prompt Guard refuses a <operation> request before provider invocation when its built-in pattern cannot be used
+    Given the operator can use the Admin API
+    And provider "bravo" can return chat completions
+    And the operator has published LLM Surface "guarded-chat" for route "/guarded-chat"
+    And LLM Surface "guarded-chat" uses Prompt Guard to reject prompts matching built-in pattern "ssn"
+    And the appliance has restarted with Prompt Guard built-in pattern "ssn" unusable
+    When the caller sends a "<operation>" request to LLM Surface "guarded-chat"
+    Then the request is refused because a Prompt Guard rule is unavailable
+    And provider "bravo" received no "<operation>" requests
+
+    Examples:
+      | operation      |
+      | text-to-speech |
+      | file upload    |
+      | file list      |
 
   Scenario: Prompt Guard masks a caller prompt before provider invocation
     Given provider "bravo" can return chat completions

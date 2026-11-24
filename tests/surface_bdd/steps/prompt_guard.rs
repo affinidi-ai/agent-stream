@@ -152,6 +152,20 @@ async fn llm_surface_still_has_no_prompt_guard(
     );
 }
 
+#[then(expr = "the appliance reports Prompt Guard built-in pattern {string} as unusable")]
+async fn appliance_reports_builtin_pattern_as_unusable(
+    world: &mut SurfaceWorld,
+    builtin: String,
+) {
+    let metrics = scrape_prometheus_metrics(world).await;
+    let count = metric_value(
+        &metrics,
+        "agent_stream_prompt_guard_pattern_errors_total",
+        &[("pattern", builtin.as_str()), ("reason", "compile_failed")],
+    );
+    assert_eq!(count, 1.0, "expected built-in pattern {builtin:?} to be reported as unusable once\n{metrics}");
+}
+
 #[then(expr = "the request is refused because a Prompt Guard rule is unavailable")]
 fn request_is_refused_because_prompt_guard_rule_is_unavailable(world: &mut SurfaceWorld) {
     let response = world

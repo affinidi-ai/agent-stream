@@ -376,12 +376,16 @@ mod tests {
         for bad in ["0123456789", "not a phone", "42"] {
             assert!(!re.is_match(bad), "unexpected phone match: {bad}");
         }
-        for followed_by_card in ["+1 415 555 0100 4545 4545 4545 4545", "+1 415 555 0100 4545454545454545"] {
+        for (text, number) in [
+            ("电话+8613812345678请", "+8613812345678"),
+            ("+14155550100x12", "+14155550100"),
+            ("tel_+4915123456789_", "+4915123456789"),
+        ] {
             assert_eq!(
-                re.find(followed_by_card)
+                re.find(text)
                     .map(|m| m.as_str()),
-                Some("+1 415 555 0100"),
-                "an international number stops at its end: {followed_by_card}"
+                Some(number),
+                "an international number written against a word character still matches: {text}"
             );
         }
     }

@@ -75,6 +75,10 @@
       "label": "Judge Indeterminate"
     },
     {
+      "id": "prompt_guard_unavailable",
+      "label": "Prompt Guard Rule Unavailable"
+    },
+    {
       "id": "redrive",
       "label": "Redrive (recovered)"
     },
@@ -92,6 +96,16 @@
       "patterns": [],
       "sources": [
         "judge"
+      ]
+    },
+    {
+      "category": "prompt_guard_unavailable",
+      "exact": [
+        "prompt_guard_pattern_unavailable"
+      ],
+      "patterns": [],
+      "sources": [
+        "prompt_guard_unavailable"
       ]
     },
     {

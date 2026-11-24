@@ -26,13 +26,13 @@
       "label": "Phone Numbers",
       "icon": "fa-phone",
       "description": "Matches US, international (+country code), and Australian mobile phone numbers",
-      "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d\\b)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"
+      "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"
     },
     {
       "key": "credit_card",
       "label": "Credit Card Numbers",
       "icon": "fa-credit-card",
-      "description": "Matches card numbers: any run of 14 or more digits written together or with single spaces or dashes between digits, matched whole, and 13-digit Visa numbers. No checksum, so long IDs, numbered lists and grouped amounts also match",
+      "description": "Matches card numbers: any run of 14 or more digits written together or with single spaces or dashes between digits, matched whole, and 13-digit Visa numbers. No checksum, so long IDs, adjacent dates, numbered lists and grouped amounts also match",
       "regex": "\\b(?:\\d(?:[ -]?\\d){13,}|4\\d{12})\\b"
     },
     {

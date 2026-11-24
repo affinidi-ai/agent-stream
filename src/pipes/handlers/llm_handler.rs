@@ -660,7 +660,7 @@ mod tests {
         };
         let err =
             LLMHandler::validate_config(&with_rule(json!({ "pattern": "(?!x)y", "label": "lookahead" }))).unwrap_err();
-        assert_eq!(err, "Prompt Guard custom pattern 'lookahead' does not compile");
+        assert_eq!(err, "Prompt Guard custom pattern 'lookahead' does not compile on the request side");
         let err = LLMHandler::validate_config(&with_rule(json!({ "builtin": "not_a_pattern" }))).unwrap_err();
         assert!(err.contains("built-in pattern 'not_a_pattern'"), "unexpected message: {err}");
         assert!(LLMHandler::validate_config(&with_rule(json!({ "pattern": r"ACC-\d{6}" }))).is_ok());
@@ -688,7 +688,10 @@ mod tests {
         };
         let err = LLMHandler::validate_config(&with_variant_rule(json!({ "pattern": "(?!x)y", "label": "lookahead" })))
             .unwrap_err();
-        assert_eq!(err, "variant 'guarded': Prompt Guard custom pattern 'lookahead' does not compile");
+        assert_eq!(
+            err,
+            "variant 'guarded': Prompt Guard custom pattern 'lookahead' does not compile on the response side"
+        );
         assert!(LLMHandler::validate_config(&with_variant_rule(json!({ "pattern": r"ACC-\d{6}" }))).is_ok());
     }
 

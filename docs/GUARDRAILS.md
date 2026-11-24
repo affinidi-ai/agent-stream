@@ -467,7 +467,7 @@ and Member.
 | Stage label | Source | Raw reasons |
 | --- | --- | --- |
 | `regex_request`, `regex_response` | `regex`, or `model_pii` for a model PII detector | The guard's reason |
-| `regex_request` | `prompt_guard_unavailable`, when a pattern rule cannot be evaluated (not a content match) | `prompt_guard_pattern_unavailable`, which the shipped taxonomy files as `uncategorized` |
+| `regex_request`, `regex_response` | `prompt_guard_unavailable`, when a pattern rule on that side cannot be evaluated (not a content match) | `prompt_guard_pattern_unavailable`, which the shipped taxonomy classifies as `prompt_guard_unavailable` |
 | `witness_request`, `witness_response` | The provider id, such as `enkryptai` or `azure_prompt_shields` | The triggered detectors or categories |
 | `judge` | `judge` | The matched rule's name and its category in `moderation` mode, or `judge_verdict_indeterminate` alone when a rule could not be evaluated |
 | `jury` | `jury` | The Jury's free-text reason |
@@ -510,7 +510,8 @@ which is also compiled in as the fallback.
 The shipped categories are `prompt_injection`, `jailbreak`, `toxicity`, `hate`,
 `violence`, `sexual_nsfw`, `self_harm`, `pii`, `secrets`, `bias`, `policy_violation`,
 `banned_keyword`, `relevancy`, `copyright_ip`, `system_prompt_leak`, `sponge_dos`,
-`hallucination`, `judge_indeterminate`, `redrive`, and `uncategorized`.
+`hallucination`, `judge_indeterminate`, `prompt_guard_unavailable`, `redrive`, and
+`uncategorized`.
 
 ### Counts
 
