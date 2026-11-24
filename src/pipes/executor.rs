@@ -9736,7 +9736,7 @@ mod tests {
                         let mut prompt_guard = json!({ "enabled": true });
                         prompt_guard[side] = json!([{ "regex": { "action": "reject", "rules": [rule.clone()] } }]);
                         config.prompt_guard = Some(serde_json::from_value(prompt_guard).expect("prompt guard config"));
-                        let executor = PipeExecutor::new_with_secrets(&config, Some(store()));
+                        let executor = PipeExecutor::new(&config);
                         let result = match path {
                             "streamed" => executor
                                 .execute_streaming(request(), None, CallerCredentials::default(), None)
