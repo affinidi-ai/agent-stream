@@ -121,7 +121,7 @@ in a deployment.
 | Setting | Behaviour |
 | --- | --- |
 | Top-level keys in `config.toml` | `server_mode`, `cache_refresh_interval_secs`, `backup_encryption_key` and the other top-level keys must appear before the first `[table]` header. Placed after one, TOML nests them under that table and they are silently ignored. |
-| Unknown keys | Ignored, not rejected, in every file except Surface records. A misspelled key takes no effect and produces no error. |
+| Unknown keys | Ignored, not rejected, in every file except Surface records. A misspelled key takes no effect and produces no error; in `saml.json` it logs a warning at startup ([`saml.json`](#samljson)). |
 | `backup_encryption_key` | Required. Startup fails unless it resolves to exactly 64 hex characters, whether or not a backup is ever taken. |
 | `[encryption] enabled`, `allow_unencrypted` | A required choice. Startup fails unless exactly one is `true`: `enabled = true` with a `key_source`, or `allow_unencrypted = true` to store data unencrypted. A config with neither, including one that only says `enabled = false`, does not start. See [`ENCRYPTION_AT_REST.md`](ENCRYPTION_AT_REST.md#choosing-encryption-or-plaintext). |
 | `[tls] cert_path`, `key_path` | Both files must exist even if no listener uses `https`. Validation runs before `--cert`/`--key` (or `AS_CERT`/`AS_KEY`) override them, so the override does not remove the need for the configured files. |
@@ -216,7 +216,7 @@ The bootstrap file, read once at startup. Fields and defaults are in
 | --- | --- | --- |
 | `channel_config_source` | `"local"` | `local` loads internal surface records from `storage_paths.agent_surfaces`. `dynamodb` loads them from `dynamodb_table` (using `aws_region` and `aws_profile`), falling back to the last snapshot in `storage_paths.config_cache` when DynamoDB is unreachable. Surfaces, Members and Teams always come from `_storage/`. |
 | `secrets_backend` | `"filesystem"` | `filesystem` keeps secrets under `storage_paths.secrets`. It is the only supported value; any other value stops startup with an error. |
-| `auth_mode` | `"passkey"` | `passkey` uses WebAuthn with `agent-stream.json` `webauthn`. `saml` requires `saml.json`; startup fails if it cannot be read. `oidc` requires `oidc.json`; startup fails if it cannot be read or a setting is refused. |
+| `auth_mode` | `"passkey"` | `passkey` uses WebAuthn with `agent-stream.json` `webauthn`. `saml` requires `saml.json`; startup fails if it cannot be read or a setting is refused. `saml.json` is not read or checked unless `auth_mode` is `saml`. `oidc` requires `oidc.json`; startup fails if it cannot be read or a setting is refused. |
 | `session_timeout_minutes` | `20` | Dashboard session lifetime from last use, for passkey, SAML and OIDC sign-in alike. A session never outlasts `session_max_lifetime_minutes`, so a larger value has no further effect. |
 | `session_max_lifetime_minutes` | `720` | Longest a dashboard session lasts after sign-in, however active it stays. Must be 1 to 1440; any other value stops startup with an error. See [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md). |
 | `server_mode` | `"active"` | `active` or `standby`. See [Server mode](CONFIGURATION_RELOAD.md#server-mode). |
@@ -332,8 +332,8 @@ Read only when `auth_mode = "saml"`
 
 | Area | Fields |
 | --- | --- |
-| Identity provider | `idp_entity_id`, `idp_sso_url`, `idp_slo_url`, `idp_cert_path` |
-| Service provider | `sp_entity_id`, `sp_acs_url`, `sign_requests`, `sp_key_path`, `sp_cert_path`, `require_encrypted_assertions` |
+| Identity provider | `idp_entity_id`, `idp_sso_url`, `idp_cert_path` |
+| Service provider | `sp_entity_id`, `sp_acs_url`, `sign_requests`, `sp_key_path`, `sp_cert_path` |
 | Claims | `attribute_mapping` from SAML claim URI to user field (`user_id`, `username`, `email`, `first_name`, `last_name`, `role`, `department`, `job_title`) |
 | Roles | `role_mapping` from identity-provider role value to `administrator`, `poweruser` or `user` |
 | Directory | `graph_api` (`tenant_id`, `client_id`, `client_secret`, `fetch_avatar`) for Microsoft Graph avatar lookup at sign-in. The token and photo requests use the shared external client ([`src/auth/saml/graph_api.rs`](../src/auth/saml/graph_api.rs)): a 30 s timeout, no redirect following, and the ambient `HTTP_PROXY`/`HTTPS_PROXY` settings |
@@ -354,6 +354,20 @@ holds gets their new SAML user ID as username. Users created by SAML are approve
 automatically and count against the `users` limit; the kept record of a deleted user does
 not. `idp_metadata_url` in the example is not
 read.
+
+Encrypted assertions and SAML single logout are not supported. `"require_encrypted_assertions": true`
+refuses startup; set it to `false` or remove it, and configure the identity provider to send
+unencrypted signed assertions. A SAML response that carries an encrypted assertion is refused at
+sign-in, and the log says "encrypted SAML assertions are not supported". A non-null
+`"idp_slo_url"` refuses startup; remove it. Signing out
+ends the dashboard session only; see the accepted risk in
+[Known limitations](DASHBOARD_SIGN_IN.md#known-limitations).
+
+Startup logs one warning that names up to 20 of the `saml.json` keys that are not read, and how
+many there are, at the top level and inside `attribute_mapping` and `graph_api`; keys set to
+`null` are not reported. Only key names are logged, each cut to 64 characters, and startup
+continues. `idp_metadata_url`
+and `graph_api.note` are ignored and not reported.
 
 ## `oidc.json`
 
@@ -460,7 +474,7 @@ Member and Team (dashboard test executions). See
 
 ## Configuration with no effect
 
-These are parsed without error and change nothing.
+These are parsed and change nothing, except where a row says a value logs a warning or refuses startup.
 
 | Setting | Notes |
 | --- | --- |
@@ -477,13 +491,15 @@ These are parsed without error and change nothing.
 | `agent-stream.json` `encryption`, `oob_connection`, `_note_*` | Ignored. |
 | `agent-stream.json` `logging.level`, `json`, `log_directory`, `audit_identity_binding_vp` | Ignored; only `logging.redaction` is read from this file. |
 | `agent-stream.json` routes of `type: "onboarding"` | Skipped at mount. |
-| `saml.json` `idp_metadata_url`, `graph_api.note` | Ignored. |
+| `saml.json` `idp_metadata_url`, `graph_api.note` | Ignored, and not reported by the startup warning about unread keys. |
+| `saml.json` `idp_slo_url` | A value refuses startup, because SAML single logout is not supported. `null` or absent is accepted. |
+| `saml.json` `require_encrypted_assertions` | `true` refuses startup, because encrypted assertions are not supported. `false` or absent is accepted. |
 | `--cors-origins` | Accepted by `--generate-bootstrap` and ignored. CORS comes from `agent-stream.json` `cors`. |
 
 ## Known limitations
 
 - Configuration files are not validated against a schema. Unknown keys, and keys placed under
-  the wrong TOML table, are ignored silently.
+  the wrong TOML table, are ignored silently; unknown keys in `saml.json` log a warning.
 - `listeners[].bind_address` cannot restrict a listener to one interface; every port binds
   `0.0.0.0`.
 
