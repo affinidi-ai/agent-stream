@@ -376,6 +376,14 @@ mod tests {
         for bad in ["0123456789", "not a phone", "42"] {
             assert!(!re.is_match(bad), "unexpected phone match: {bad}");
         }
+        for followed_by_card in ["+1 415 555 0100 4545 4545 4545 4545", "+1 415 555 0100 4545454545454545"] {
+            assert_eq!(
+                re.find(followed_by_card)
+                    .map(|m| m.as_str()),
+                Some("+1 415 555 0100"),
+                "an international number stops at its end: {followed_by_card}"
+            );
+        }
     }
 
     fn shipped_definitions() -> PromptGuardDefinitions {

@@ -19,7 +19,9 @@ changes:
         lists and amounts grouped with spaces. A mask guard that includes credit_card applies
         ssn, ssn_simple and phone_number first, then credit_card, then its other rules, so an
         SSN or phone number written right after a card is masked whole and no other rule
-        such as street_address takes part of a card. ssn and ssn_simple accept a space or a dash
+        such as street_address takes part of a card. The international branch of phone_number
+        now ends at a word boundary, so it no longer takes the first digits of a card written
+        right after the number. ssn and ssn_simple accept a space or a dash
         between groups. A Surface whose Prompt Guard has a rule that cannot be evaluated
         now refuses every request with 502 guardrail_unavailable and code
         prompt_guard_pattern_unavailable before any upstream call, and saving such a Surface

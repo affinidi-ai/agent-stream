@@ -992,7 +992,7 @@ mod tests {
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
             {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|\\d(?:[ -]?\\d){13,18})\\b"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
-            {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "\\b(?:(?:\\+1|1)[-. ]?)?(?:\\([2-9]\\d{2}\\)|[2-9]\\d{2})[-. ]?\\d{3}[-. ]?\\d{4}\\b"},
+            {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d\\b)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
             {"key": "street_address", "label": "Street Address", "icon": "fa-map-marker-alt", "description": "Address", "regex": "\\d{1,5}\\s\\w.\\s(\\b\\w*\\b\\s){1,2}\\w*.?"},
             {"key": "broken", "label": "Broken", "icon": "fa-ban", "description": "Does not compile", "regex": "(?!x)y"}
@@ -1884,6 +1884,21 @@ mod tests {
             let mut body = make_request("4545 4545 4545 4545 123-45-6789");
             assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
             assert_eq!(body["messages"][0]["content"], "<CREDIT_CARD> <SSN>", "rules in order {rules:?}");
+        }
+    }
+
+    #[test]
+    fn a_mask_guard_masks_an_international_phone_number_and_the_whole_card_after_it() {
+        init_test_definitions();
+        for rules in [["phone_number", "credit_card"], ["credit_card", "phone_number"]] {
+            for card in ["4545 4545 4545 4545", "4545454545454545"] {
+                let mut body = make_request(&format!("+1 415 555 0100 {card}"));
+                assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+                assert_eq!(
+                    body["messages"][0]["content"], "<PHONE_NUMBER> <CREDIT_CARD>",
+                    "card {card:?}, rules in order {rules:?}"
+                );
+            }
         }
     }
 
