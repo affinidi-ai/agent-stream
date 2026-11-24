@@ -900,50 +900,62 @@ fn application_order(rules: &RegexRules) -> Vec<(usize, &RegexRule)> {
     ordered
 }
 
-/// Whether byte `offset` of `text`, read as JSON, falls inside a string.
-fn inside_json_string(
-    text: &str,
-    offset: usize,
-) -> bool {
-    let mut in_string = false;
-    let mut escaped = false;
-    for byte in text.as_bytes()[..offset]
-        .iter()
-        .copied()
-    {
-        if escaped {
-            escaped = false;
-        } else if in_string && byte == b'\\' {
-            escaped = true;
-        } else if byte == b'"' {
-            in_string = !in_string;
-        }
-    }
-    in_string
+/// Whether `byte` can be part of a bare JSON number.
+fn is_json_number_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
 }
 
 /// Replace each matched range with its token, last first so earlier offsets
-/// stay valid. In JSON tool-call arguments, a token replacing a value outside
-/// a string, such as a bare number, is quoted so the arguments still parse.
+/// stay valid. In JSON tool-call arguments, a match outside a string is part of
+/// a bare number: the whole number is replaced by the quoted token, so the
+/// arguments still parse. `replacements` are in ascending order, so the arguments
+/// are scanned once.
 fn splice_tokens(
     text: &mut String,
     replacements: Vec<(std::ops::Range<usize>, String)>,
     json_arguments: bool,
 ) {
-    let quoted: Vec<bool> = replacements
-        .iter()
-        .map(|(range, _)| json_arguments && !inside_json_string(text, range.start))
-        .collect();
-    for ((range, token), quote) in replacements
-        .into_iter()
-        .zip(quoted)
-        .rev()
-    {
-        if quote {
-            text.replace_range(range, &format!("\"{token}\""));
+    let bytes = text.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut scanned = 0;
+    let mut spliced: Vec<(std::ops::Range<usize>, String)> = Vec::with_capacity(replacements.len());
+    for (mut range, token) in replacements {
+        let token = if json_arguments {
+            for &byte in &bytes[scanned..range.start.max(scanned)] {
+                if escaped {
+                    escaped = false;
+                } else if in_string && byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = !in_string;
+                }
+            }
+            scanned = scanned.max(range.start);
+            if in_string {
+                token
+            } else {
+                while range.start > 0 && is_json_number_byte(bytes[range.start - 1]) {
+                    range.start -= 1;
+                }
+                while range.end < bytes.len() && is_json_number_byte(bytes[range.end]) {
+                    range.end += 1;
+                }
+                format!("\"{token}\"")
+            }
         } else {
-            text.replace_range(range, &token);
+            token
+        };
+        if spliced
+            .last()
+            .is_some_and(|(previous, _)| range.start < previous.end)
+        {
+            continue;
         }
+        spliced.push((range, token));
+    }
+    for (range, token) in spliced.into_iter().rev() {
+        text.replace_range(range, &token);
     }
 }
 
@@ -1088,7 +1100,7 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:\\d(?:[ -]?\\d){13,}|4\\d{12})(?-u:\\b)"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
@@ -1901,6 +1913,30 @@ mod tests {
             assert!(note.starts_with("card ") && note.contains("CREDIT_CARD"), "{masked}");
             assert!(!masked.contains("4545 4545"), "{masked}");
         }
+    }
+
+    #[test]
+    fn masking_part_of_a_json_number_in_tool_call_arguments_replaces_the_whole_number() {
+        init_test_definitions();
+        let arguments = r#"{"a": -4545454545454545, "b": 4545454545454545.25, "c": 0.4545454545454545, "e": "x"}"#;
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &mask_guard(&["credit_card"])), GuardOutcome::Masked));
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+        for field in ["a", "b", "c"] {
+            assert_eq!(parsed[field], "<CREDIT_CARD>", "{field}: {masked}");
+        }
+        assert_eq!(parsed["e"], "x", "{masked}");
     }
 
     #[test]

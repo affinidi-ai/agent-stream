@@ -69,8 +69,9 @@ pattern guards force the buffered path; see
 Detection and masking cover each message's `content` (a string, or the `text` parts
 of a content array) and assistant `tool_calls[].function.arguments`. A mask guard
 rewrites tool-call arguments too, so a numeric ID of 14 or more digits in them is
-masked as a card. When the arguments are JSON, a token that replaces a bare value
-such as a number is quoted (`{"order_id": "<CREDIT_CARD>"}`), so they still parse.
+masked as a card. When the arguments are JSON and the match is part of a bare number,
+the whole number, sign and decimals included, is replaced by the quoted token
+(`{"order_id": "<CREDIT_CARD>"}`), so they still parse.
 Realtime voice sessions (`/v1/realtime`) run no Prompt Guard.
 
 ## Configuration
@@ -190,16 +191,18 @@ deployed `prompt-guard.json`; replace it from the shipped file to pick up patter
 | `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix |
 | `phone_number` | US, international (`+` country code), and Australian mobile numbers |
 | `credit_card` | Any run of 14 or more digits written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`), matched whole, and 13-digit Visa numbers written together. There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
-
-`credit_card`, `ssn` and `ssn_simple` match a number written straight after CJK or
-other non-ASCII text (`卡号4545454545454545`, `社保号123-45-6789`), but not one written
-straight after an ASCII letter, digit or `_` (`cc4545454545454545`). `credit_card` does
-not catch digits separated by a no-break space, a tab, two spaces, dots or an en dash,
-or a 13-digit Visa written with spaces (`4222 2222 2222 2`).
 | `date_of_birth` | Dates preceded by birth keywords (birth, dob, born) |
 | `ip_address` | IPv4 addresses with octet validation |
 | `passport` | US passport numbers |
 | `street_address` | Basic US street addresses |
+
+`credit_card`, `ssn` and `ssn_simple` match a number written straight after CJK or
+other non-ASCII text (`卡号4545454545454545`, `社保号123-45-6789`), but not one written
+straight after an ASCII letter, digit or `_` (`cc4545454545454545`). `ssn_simple` also
+matches an SSN written in other decimal digits (`١٢٣-٤٥-٦٧٨٩`) when it stands on its
+own; `ssn` and `credit_card` match ASCII digits only. `credit_card` does not catch digits
+separated by a no-break space, a tab, two spaces, dots or an en dash, or a 13-digit Visa
+written with spaces (`4222 2222 2222 2`).
 
 ### Rules that cannot be evaluated
 

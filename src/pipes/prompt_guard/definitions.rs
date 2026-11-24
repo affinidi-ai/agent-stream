@@ -510,9 +510,16 @@ mod tests {
     #[test]
     fn shipped_ssn_simple_pattern_matches_a_dash_or_space() {
         let re = shipped_regex("ssn_simple");
-        for good in ["123-45-6789", "123 45 6789", "666-00-0000", "社保号123-45-6789"] {
+        for good in ["123-45-6789", "123 45 6789", "666-00-0000", "社保号123-45-6789", "رقم ١٢٣-٤٥-٦٧٨٩."]
+        {
             assert!(re.is_match(good), "expected simple SSN match: {good}");
         }
+        assert_eq!(
+            re.find("رقم ١٢٣-٤٥-٦٧٨٩.")
+                .map(|m| m.as_str()),
+            Some("١٢٣-٤٥-٦٧٨٩"),
+            "an SSN in other decimal digits matches on its own"
+        );
         for bad in ["123456789", "212-555-1234", "+55 11 91234 5678"] {
             assert!(!re.is_match(bad), "unexpected simple SSN match: {bad}");
         }
