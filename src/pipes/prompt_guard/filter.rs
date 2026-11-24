@@ -825,41 +825,19 @@ enum RegexResult {
     Mask(String),
 }
 
-/// Built-ins whose numbers the `credit_card` pattern can run on into when one
-/// follows a card after a single space or dash (`4545 4545 4545 4545 123-45-6789`).
-const CARD_ADJACENT_BUILTINS: [&str; 3] = ["ssn", "ssn_simple", "phone_number"];
-
-fn is_builtin(
-    rule: &RegexRule,
-    key: &str,
-) -> bool {
-    matches!(rule, RegexRule::Builtin { builtin } if builtin == key)
+fn is_credit_card(rule: &RegexRule) -> bool {
+    matches!(rule, RegexRule::Builtin { builtin } if builtin == "credit_card")
 }
 
-/// The order a guard applies its rules in. A mask guard with `credit_card`
-/// applies the built-ins a card can run on into first, so they mask that number
-/// whole, then `credit_card`, so no other rule (such as `street_address`) takes
-/// part of a card first, then its other rules; each group keeps its listed
-/// order. Any other guard applies its rules as listed.
+/// The order a guard applies its rules in. A mask guard applies `credit_card`
+/// before its other rules, which keep their listed order: the card pattern
+/// masks a whole run of digits joined by single spaces or dashes, so a phone
+/// number, SSN or other rule cannot take part of a card before it does. Any
+/// other guard applies its rules as listed.
 fn application_order(rules: &RegexRules) -> Vec<&RegexRule> {
     let mut ordered: Vec<&RegexRule> = rules.rules.iter().collect();
-    if rules.action == GuardAction::Mask
-        && ordered
-            .iter()
-            .any(|rule| is_builtin(rule, "credit_card"))
-    {
-        ordered.sort_by_key(|rule| {
-            if CARD_ADJACENT_BUILTINS
-                .iter()
-                .any(|key| is_builtin(rule, key))
-            {
-                0
-            } else if is_builtin(rule, "credit_card") {
-                1
-            } else {
-                2
-            }
-        });
+    if rules.action == GuardAction::Mask {
+        ordered.sort_by_key(|rule| !is_credit_card(rule));
     }
     ordered
 }
@@ -990,7 +968,7 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|\\d(?:[ -]?\\d){13,18})\\b"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\b(?:\\d(?:[ -]?\\d){13,}|4\\d{12})\\b"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d\\b)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
@@ -1878,28 +1856,47 @@ mod tests {
     }
 
     #[test]
-    fn a_mask_guard_masks_a_number_right_after_a_card_before_the_card_rule_runs_on_into_it() {
+    fn a_mask_guard_masks_a_card_and_the_number_written_right_after_it_as_one_card() {
         init_test_definitions();
-        for rules in [["credit_card", "ssn"], ["ssn", "credit_card"]] {
-            let mut body = make_request("4545 4545 4545 4545 123-45-6789");
-            assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
-            assert_eq!(body["messages"][0]["content"], "<CREDIT_CARD> <SSN>", "rules in order {rules:?}");
+        for (other, text) in
+            [("ssn", "4545 4545 4545 4545 123-45-6789"), ("phone_number", "4545 4545 4545 4545 212-555-1234")]
+        {
+            for rules in [["credit_card", other], [other, "credit_card"]] {
+                let mut body = make_request(text);
+                assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+                assert_eq!(body["messages"][0]["content"], "<CREDIT_CARD>", "{text:?}, rules in order {rules:?}");
+            }
         }
     }
 
     #[test]
-    fn a_mask_guard_masks_an_international_phone_number_and_the_whole_card_after_it() {
+    fn a_mask_guard_masks_an_international_phone_number_and_the_card_after_it_as_one_card() {
         init_test_definitions();
-        for rules in [["phone_number", "credit_card"], ["credit_card", "phone_number"]] {
+        for phone in ["+1 415 555 0100", "+65 6123 4567"] {
             for card in ["4545 4545 4545 4545", "4545454545454545"] {
-                let mut body = make_request(&format!("+1 415 555 0100 {card}"));
-                assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
-                assert_eq!(
-                    body["messages"][0]["content"], "<PHONE_NUMBER> <CREDIT_CARD>",
-                    "card {card:?}, rules in order {rules:?}"
-                );
+                for rules in [["phone_number", "credit_card"], ["credit_card", "phone_number"]] {
+                    let mut body = make_request(&format!("{phone} {card}"));
+                    assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+                    assert_eq!(
+                        body["messages"][0]["content"], "+<CREDIT_CARD>",
+                        "{phone} then card {card:?}, rules in order {rules:?}"
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn a_mask_guard_with_credit_card_still_masks_a_phone_number_and_ssn_on_their_own() {
+        init_test_definitions();
+        let mut body = make_request("Call +65 6123 4567, SSN 123-45-6789");
+        let rules = mask_guard(&["phone_number", "ssn", "credit_card"]);
+        assert!(matches!(apply_request_guards(&mut body, &rules), GuardOutcome::Masked));
+        assert_eq!(body["messages"][0]["content"], "Call <PHONE_NUMBER>, SSN <SSN>");
+
+        let mut long_number = make_request("Call +49 1512 3456 7890");
+        assert!(matches!(apply_request_guards(&mut long_number, &rules), GuardOutcome::Masked));
+        assert_eq!(long_number["messages"][0]["content"], "Call +<CREDIT_CARD>");
     }
 
     #[test]

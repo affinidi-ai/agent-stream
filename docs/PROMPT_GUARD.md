@@ -127,18 +127,20 @@ Each entry in `request` or `response` is `{ "regex": RegexRules, "rejection": Re
 | `mask_mode` | `redact` | With `mask`: `redact` replaces each match with `<ENTITY>`; `pseudonymize` replaces each distinct value with a NER ID. |
 | `restore_in_response` | `false` | Request side, `pseudonymize` only: put the real values back in the answer. |
 | `link_pronouns` | `false` | Request side, `pseudonymize` only: link a pronoun to a lone named person. |
-| `rules` | required | Built-in or custom patterns, applied in order. |
+| `rules` | required | Built-in or custom patterns, applied in order; a `mask` guard applies `credit_card` first (see below). |
 
 A rule is either `{"builtin": "<key>"}` or `{"pattern": "<regex>", "label": "<name>"}`.
-Rules run in sequence, each on the output of the one before. A `mask` guard that
-includes `credit_card` runs its rules in three groups, each in listed order: first
-`ssn`, `ssn_simple` and `phone_number`, then `credit_card`, then the rest. The card
-pattern can run on into a number that follows a card after a single space or dash
-(`4545 4545 4545 4545 123-45-6789`), so those rules mask that number first; and no
-other rule, such as `street_address`, can take part of a card before `credit_card`
-masks it. This holds within one guard; across separate guards, list the `ssn` or
-`phone_number` guard before the `credit_card` guard, and the `credit_card` guard before
-any other. With `reject`,
+Rules run in sequence, each on the output of the one before. A `mask` guard runs
+`credit_card` before its other rules, which keep their listed order. The card pattern
+masks a whole run of digits joined by single spaces or dashes, so no other rule, such
+as `phone_number`, `ssn` or `street_address`, can take part of a card first. A phone
+number or SSN written right next to a card is masked with it as one `<CREDIT_CARD>`:
+`+65 6123 4567 4545 4545 4545 4545` becomes `+<CREDIT_CARD>`, and
+`4545 4545 4545 4545 123-45-6789` becomes `<CREDIT_CARD>`. For the same reason, an
+international phone number of 14 or more digits on its own (`+49 1512 3456 7890`) is
+labelled `<CREDIT_CARD>`, not `<PHONE_NUMBER>`. This holds within one guard; across
+separate guards, list the `credit_card` guard first.
+With `reject`,
 processing stops at the first match, which returns the guard's `rejection` or the
 default 403 body
 `{"error":{"message":"Request rejected: content violates prompt guard policy","type":"prompt_guard_violation","code":"content_policy_violation"}}`.
@@ -168,7 +170,7 @@ deployed `prompt-guard.json`; replace it from the shipped file to pick up patter
 | `ssn` | US Social Security Numbers with a dash or space between groups (`NNN-NN-NNNN`, `NNN NN NNNN`), excluding invalid area, group and serial numbers |
 | `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix |
 | `phone_number` | US, international (`+` country code), and Australian mobile numbers |
-| `credit_card` | Visa, Mastercard, Amex, Diners Club, Discover, and JCB numbers, and any 14 to 19 digit number written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`). There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
+| `credit_card` | Any run of 14 or more digits written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`), matched whole, and 13-digit Visa numbers. There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
 | `date_of_birth` | Dates preceded by birth keywords (birth, dob, born) |
 | `ip_address` | IPv4 addresses with octet validation |
 | `passport` | US passport numbers |
@@ -190,9 +192,9 @@ compile. Prompt Guard fails closed on such a rule:
   The guard's `rejection` is not used, and the `WARN` log line names the rule and why.
   Rejection telemetry records it with source `prompt_guard_unavailable` and reason
   token `prompt_guard_pattern_unavailable`, not as a content match. Surfaces without
-  such a rule are unaffected. The exception is a semantic response
-  cache: its embedder receives the request text before Prompt Guard runs, on every
-  request, so it receives it here too.
+  such a rule are unaffected. The response cache runs before Prompt Guard on every
+  request, so two exceptions apply: a semantic cache's embedder receives the request
+  text, and a cache hit is still served.
 - At startup, each built-in pattern that does not compile, or a file that did not load,
   is logged at `ERROR` and counted in `agent_stream_prompt_guard_pattern_errors_total`
   ([OBSERVABILITY.md](OBSERVABILITY.md)).

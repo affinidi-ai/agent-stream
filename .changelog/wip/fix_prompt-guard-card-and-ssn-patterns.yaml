@@ -13,16 +13,15 @@ changes:
         reached the model, and the built-in ssn pattern used look-around the regex engine
         cannot compile, so it never ran. A rule naming a built-in pattern that was missing
         or did not compile, or a custom pattern that did not compile, was skipped and the
-        text passed through. credit_card now also matches any 14 to 19 digit number written
-        together or with single spaces or dashes between digits, with no checksum, so mask
-        guards also redact long IDs, timestamps written as digits, adjacent dates, numbered
-        lists and amounts grouped with spaces. A mask guard that includes credit_card applies
-        ssn, ssn_simple and phone_number first, then credit_card, then its other rules, so an
-        SSN or phone number written right after a card is masked whole and no other rule
-        such as street_address takes part of a card. The international branch of phone_number
-        now ends at a word boundary, so it no longer takes the first digits of a card written
-        right after the number. ssn and ssn_simple accept a space or a dash
-        between groups. A Surface whose Prompt Guard has a rule that cannot be evaluated
+        text passed through. credit_card now matches any run of 14 or more digits written
+        together or with single spaces or dashes between digits, matched whole and with no
+        checksum, plus 13-digit Visa numbers, so mask guards also redact long IDs, timestamps written as digits,
+        adjacent dates, numbered lists and amounts grouped with spaces. A mask guard applies
+        credit_card before its other rules, so no phone_number, ssn or street_address rule
+        takes part of a card first; a phone number or SSN written right next to a card is
+        masked with it as one <CREDIT_CARD>, and an international phone number of 14 or more
+        digits on its own is labelled <CREDIT_CARD>. The international branch of phone_number now
+        ends at a word boundary. ssn and ssn_simple accept a space or a dash between groups. A Surface whose Prompt Guard has a rule that cannot be evaluated
         now refuses every request with 502 guardrail_unavailable and code
         prompt_guard_pattern_unavailable before any upstream call, and saving such a Surface
         is refused with 400, including when the rule is in a Variant's Prompt Guard. Built-in patterns that cannot be used are logged at ERROR at

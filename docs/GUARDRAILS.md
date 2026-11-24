@@ -33,7 +33,7 @@ classified into a [rejection category](#rejection-categories).
 Fail closed is the default; an Expert Witness with `fail_open: true` lets a request
 through when its provider is unavailable (see [Fail-open and fail-closed](#fail-open-and-fail-closed)).
 A Prompt Guard pattern rule that cannot be evaluated always refuses the request
-before any upstream call (see
+before any upstream call other than the response cache (see
 [PROMPT_GUARD.md](PROMPT_GUARD.md#rules-that-cannot-be-evaluated)).
 
 ## Pipeline order
@@ -258,7 +258,8 @@ Prompt Guard pattern rules have no fail-open option. A rule that names a built-i
 pattern that is not loaded or did not compile, or a custom pattern that does not
 compile, refuses the request with `502` and
 `{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`
-before any upstream call; see
+before any upstream call. The response cache runs earlier, so a semantic cache's
+embedder still receives the request text and a cache hit is still served; see
 [PROMPT_GUARD.md](PROMPT_GUARD.md#rules-that-cannot-be-evaluated).
 
 ### Overriding the built-in profile
@@ -466,6 +467,7 @@ and Member.
 | Stage label | Source | Raw reasons |
 | --- | --- | --- |
 | `regex_request`, `regex_response` | `regex`, or `model_pii` for a model PII detector | The guard's reason |
+| `regex_request` | `prompt_guard_unavailable`, when a pattern rule cannot be evaluated (not a content match) | `prompt_guard_pattern_unavailable`, which the shipped taxonomy files as `uncategorized` |
 | `witness_request`, `witness_response` | The provider id, such as `enkryptai` or `azure_prompt_shields` | The triggered detectors or categories |
 | `judge` | `judge` | The matched rule's name and its category in `moderation` mode, or `judge_verdict_indeterminate` alone when a rule could not be evaluated |
 | `jury` | `jury` | The Jury's free-text reason |
