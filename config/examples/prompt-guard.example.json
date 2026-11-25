@@ -33,7 +33,7 @@
       "label": "Credit Card Numbers",
       "icon": "fa-credit-card",
       "description": "Matches card numbers: any run of 14 or more digits written together or with single spaces or dashes between digits, matched whole, and 13-digit Visa numbers written together. No checksum, so long IDs, adjacent dates, numbered lists and grouped amounts also match",
-      "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)"
+      "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)|\\b\\d(?:[ -]?\\d){13,}\\b"
     },
     {
       "key": "date_of_birth",

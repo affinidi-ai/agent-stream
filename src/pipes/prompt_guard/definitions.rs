@@ -457,12 +457,14 @@ mod tests {
             ("卡号4545454545454545", "4545454545454545"),
             ("カード番号4545-4545-4545-4545です", "4545-4545-4545-4545"),
             ("номер 4545 4545 4545 4545.", "4545 4545 4545 4545"),
+            ("رقم البطاقة ٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥.", "٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥"),
+            ("JCB 35١٢٣٤٥٦٧٨٩٠١٢٣٤", "35١٢٣٤٥٦٧٨٩٠١٢٣٤"),
         ] {
             assert_eq!(
                 re.find(text)
                     .map(|m| m.as_str()),
                 Some(card),
-                "a card next to non-ASCII text matches: {text}"
+                "a card next to non-ASCII text, or in other decimal digits, matches: {text}"
             );
         }
         for (text, run) in [

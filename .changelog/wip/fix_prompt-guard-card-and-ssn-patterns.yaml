@@ -78,8 +78,9 @@ changes:
         numeric IDs in tool-call arguments also match. ssn and ssn_simple accept a space
         or a dash between groups. credit_card, ssn and ssn_simple also match a number
         written straight after CJK or other non-ASCII text, but not straight after an
-        ASCII letter. ssn_simple still matches an SSN written in other decimal digits on
-        its own; ssn and credit_card match ASCII digits only. No-break spaces, tabs, double spaces, dots and en dashes between
+        ASCII letter. credit_card and ssn_simple also match a number written in other
+        decimal digits, such as Arabic-Indic, on its own; ssn matches ASCII digits only.
+        No-break spaces, tabs, double spaces, dots and en dashes between
         digits are not caught. These fixes take effect only once the deployed
         prompt-guard.json is replaced; see the breaking entry.
     - timestamp: '2026-11-23T12:00:00.000Z'

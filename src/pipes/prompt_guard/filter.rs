@@ -1100,7 +1100,7 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)|\\b\\d(?:[ -]?\\d){13,}\\b"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},

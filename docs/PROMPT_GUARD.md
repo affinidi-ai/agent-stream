@@ -198,9 +198,10 @@ deployed `prompt-guard.json`; replace it from the shipped file to pick up patter
 
 `credit_card`, `ssn` and `ssn_simple` match a number written straight after CJK or
 other non-ASCII text (`卡号4545454545454545`, `社保号123-45-6789`), but not one written
-straight after an ASCII letter, digit or `_` (`cc4545454545454545`). `ssn_simple` also
-matches an SSN written in other decimal digits (`١٢٣-٤٥-٦٧٨٩`) when it stands on its
-own; `ssn` and `credit_card` match ASCII digits only. `credit_card` does not catch digits
+straight after an ASCII letter, digit or `_` (`cc4545454545454545`). `credit_card` and
+`ssn_simple` also match a number written in other decimal digits (`٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥`,
+`١٢٣-٤٥-٦٧٨٩`) when it stands on its own; `ssn` matches ASCII digits only. `credit_card`
+does not catch digits
 separated by a no-break space, a tab, two spaces, dots or an en dash, or a 13-digit Visa
 written with spaces (`4222 2222 2222 2`).
 
