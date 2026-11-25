@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Remove a cargo-audit ignore entry that no longer matches Cargo.lock** — RUSTSEC-2022-0040 (owning_ref) was ignored for a transitive dependency of ssi that is no longer in Cargo.lock. The ignore is gone, so `cargo audit` reports the advisory again if an affected version comes back.
+
 ## [1.0.2] - 2026-11-18
 
 ### Breaking
