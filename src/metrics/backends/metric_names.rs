@@ -72,6 +72,7 @@ pub mod prom {
 
     // Prompt Guard
     pub const PROMPT_GUARD_PATTERN_ERRORS_TOTAL: &str = "agent_stream_prompt_guard_pattern_errors_total";
+    pub const PROMPT_GUARD_UNUSABLE_RULES_TOTAL: &str = "agent_stream_prompt_guard_unusable_rules_total";
 
     // LLM cross-provider failover — only reachable via the live request path
     // (run_failover_if_needed in pipes/executor.rs), which no inline unit test

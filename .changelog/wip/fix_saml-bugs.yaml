@@ -16,6 +16,15 @@ changes:
         kept disabled. Other user events send it empty, and the dashboard's generated user
         samples leave it out, since they serve every user event. It is listed with the user
         runtime variables and in the example configuration.
+    - timestamp: '2026-11-25T17:40:00.000Z'
+      title: Report stored Surfaces whose Prompt Guard rules cannot be evaluated
+      description: >-
+        At startup, and within one refresh interval when a Surface changes on disk, every
+        enabled Prompt Guard rule of a stored Surface or Variant that cannot be evaluated is
+        logged at ERROR naming the Surface, the rule and its side, and counted in the new
+        agent_stream_prompt_guard_unusable_rules_total metric (labels side and reason). Such
+        Surfaces refuse every request with 502, so administrators now see them before
+        callers do. An unlabelled custom pattern is named by its position, never its regex.
   changed:
     - timestamp: '2026-11-25T11:25:02.000Z'
       title: Word user delete by sign-in method and mark deleted users on the Users page

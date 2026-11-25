@@ -938,16 +938,18 @@ enum PipeChange<'a> {
     Delete(&'a str),
 }
 
-/// Apply a single pipe change picked up from storage: re-sync its route in the
-/// live route table, drop its cached config/executor so the next request reads
-/// the fresh config, and recompile (or remove) its OPA policy. Route removal /
-/// registration is per-pipe, not a full route-table rebuild.
+/// Apply a single pipe change picked up from storage: report its Prompt Guard
+/// rules that cannot be evaluated, re-sync its route in the live route table,
+/// drop its cached config/executor so the next request reads the fresh config,
+/// and recompile (or remove) its OPA policy. Route removal / registration is
+/// per-pipe, not a full route-table rebuild.
 async fn apply_pipe_change(
     route_manager: &crate::pipes::PipeRouteManager,
     change: PipeChange<'_>,
 ) {
     match change {
         PipeChange::Upsert(pipe) => {
+            crate::pipes::prompt_guard::report_unusable_rules(pipe);
             if let Err(e) = route_manager
                 .sync_pipe(pipe)
                 .await
@@ -2012,6 +2014,7 @@ pub async fn run_axum_proxy(
         {
             Ok(store) => {
                 info!("Pipe store initialized");
+                crate::pipes::prompt_guard::report_unusable_rules_in_store(&store).await;
                 Some(Arc::new(store))
             }
             Err(e) => {
@@ -4269,6 +4272,38 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn a_surface_changed_on_disk_with_an_unusable_prompt_guard_rule_is_reported() {
+        let counter = || {
+            crate::metrics::backends::prometheus::PROMPT_GUARD_UNUSABLE_RULES
+                .with_label_values(&["request", "custom_pattern_invalid"])
+                .get()
+        };
+        let mut surface = crate::pipes::PipeConfig::new(
+            "changed-on-disk".to_string(),
+            "changed-on-disk".to_string(),
+            crate::pipes::PipeType::Webhook {
+                endpoint: "https://example.com".to_string(),
+            },
+        );
+        surface.route = Some("/changed-on-disk".to_string());
+        surface.prompt_guard = Some(
+            serde_json::from_value(serde_json::json!({
+                "enabled": true,
+                "request": [{ "regex": { "action": "reject", "rules": [{ "pattern": "(?!x)y" }] } }],
+            }))
+            .unwrap(),
+        );
+        let route_manager = crate::pipes::PipeRouteManager::new(Arc::new(tokio::sync::RwLock::new(
+            crate::pipes::route_manager::PipeRouteMap::new(),
+        )));
+        let before = counter();
+
+        run(apply_pipe_change(&route_manager, PipeChange::Upsert(&surface)));
+
+        assert_eq!(counter() - before, 1);
     }
 
     #[test]

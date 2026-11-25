@@ -601,7 +601,7 @@ pub enum GuardSide {
 }
 
 impl GuardSide {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Request => "request",
             Self::Response => "response",
@@ -623,28 +623,43 @@ fn rule_name(
     }
 }
 
-/// Why `rule` cannot be evaluated, or `None` when it can. `compiles` decides
-/// whether a custom pattern compiles.
+/// A regex rule that cannot be evaluated: the side it is on, a stable reason
+/// for the metric label, and a description for logs and errors that names the
+/// rule and its side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleIssue {
+    pub side: GuardSide,
+    pub reason: &'static str,
+    pub description: String,
+}
+
+/// Metric reason for a custom pattern that does not compile.
+const CUSTOM_PATTERN_INVALID: &str = "custom_pattern_invalid";
+
+/// Why `rule` cannot be evaluated, or `None` when it can: a reason and a
+/// description. `compiles` decides whether a custom pattern compiles.
 fn rule_issue(
     rule: &RegexRule,
     position: usize,
-    compiles: impl Fn(&str) -> bool,
-) -> Option<String> {
+    compiles: &dyn Fn(&str) -> bool,
+) -> Option<(&'static str, String)> {
     let name = rule_name(rule, position);
     match rule {
-        RegexRule::Builtin { builtin } => {
-            super::definitions::builtin_issue(builtin).map(|issue| format!("{name} {}", issue.description()))
+        RegexRule::Builtin { builtin } => super::definitions::builtin_issue(builtin)
+            .map(|issue| (issue.reason(), format!("{name} {}", issue.description()))),
+        RegexRule::Pattern { pattern, .. } => {
+            (!compiles(pattern)).then(|| (CUSTOM_PATTERN_INVALID, format!("{name} does not compile")))
         }
-        RegexRule::Pattern { pattern, .. } => (!compiles(pattern)).then(|| format!("{name} does not compile")),
     }
 }
 
-/// The first rule in `config`'s request and response regex guards that cannot
-/// be evaluated: its side, and a description for logs and errors.
-fn first_rule_issue(
-    config: &PromptGuardConfig,
-    compiles: impl Fn(&str) -> bool,
-) -> Option<(GuardSide, String)> {
+/// Every rule in `config`'s request and response regex guards that cannot be
+/// evaluated, request side first, in rule order. Lazy, so a caller that needs
+/// only the first stops there.
+pub(super) fn rule_issues<'a>(
+    config: &'a PromptGuardConfig,
+    compiles: &'a dyn Fn(&str) -> bool,
+) -> impl Iterator<Item = RuleIssue> + 'a {
     let request = config
         .request
         .iter()
@@ -655,13 +670,18 @@ fn first_rule_issue(
         .map(|guard| (GuardSide::Response, &guard.regex));
     request
         .chain(response)
-        .find_map(|(side, rules)| {
+        .flat_map(move |(side, rules)| {
             rules
                 .rules
                 .iter()
                 .enumerate()
-                .find_map(|(index, rule)| rule_issue(rule, index + 1, &compiles))
-                .map(|issue| (side, format!("{issue} on the {} side", side.as_str())))
+                .filter_map(move |(index, rule)| {
+                    rule_issue(rule, index + 1, compiles).map(|(reason, issue)| RuleIssue {
+                        side,
+                        reason,
+                        description: format!("{issue} on the {} side", side.as_str()),
+                    })
+                })
         })
 }
 
@@ -673,8 +693,8 @@ pub fn validate_regex_rules(config: &PromptGuardConfig) -> Result<(), String> {
     if !config.enabled {
         return Ok(());
     }
-    match first_rule_issue(config, |pattern| Regex::new(pattern).is_ok()) {
-        Some((_, issue)) => Err(format!("Prompt Guard {issue}")),
+    match rule_issues(config, &|pattern| Regex::new(pattern).is_ok()).next() {
+        Some(issue) => Err(format!("Prompt Guard {}", issue.description)),
         None => Ok(()),
     }
 }
@@ -687,9 +707,9 @@ pub fn unusable_rule_rejection(config: &PromptGuardConfig) -> Option<(GuardSide,
     if !config.enabled {
         return None;
     }
-    let (side, issue) = first_rule_issue(config, |pattern| get_or_compile_regex(pattern).is_some())?;
-    warn!("Prompt guard rule unavailable, refusing the request: {issue}");
-    Some((side, rule_unavailable_rejection(&issue)))
+    let issue = rule_issues(config, &|pattern| get_or_compile_regex(pattern).is_some()).next()?;
+    warn!("Prompt guard rule unavailable, refusing the request: {}", issue.description);
+    Some((issue.side, rule_unavailable_rejection(&issue.description)))
 }
 
 /// The 502 rejection for a rule that cannot be evaluated. The guard's own
@@ -1062,7 +1082,9 @@ fn apply_regex_rules(
                             .map(|m| m.range())
                             .collect()
                     } else {
-                        let issue = rule_issue(rule, position, |_| true).unwrap_or_else(|| rule_name(rule, position));
+                        let issue = rule_issue(rule, position, &|_| true)
+                            .map(|(_, description)| description)
+                            .unwrap_or_else(|| rule_name(rule, position));
                         warn!("Prompt guard: {issue} — refusing");
                         return RegexResult::Unavailable(issue);
                     };
@@ -1168,21 +1190,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Test definitions JSON matching the config file patterns
-    const TEST_DEFINITIONS: &str = r#"{
-        "defined_patterns": [
-            {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\d(?:[ -]?\\d){13,}|(?-u:\\b)4[0-9]{12}(?-u:\\b)"},
-            {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
-            {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
-            {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
-            {"key": "street_address", "label": "Street Address", "icon": "fa-map-marker-alt", "description": "Address", "regex": "\\d{1,5}\\s\\w.\\s(\\b\\w*\\b\\s){1,2}\\w*.?"},
-            {"key": "broken", "label": "Broken", "icon": "fa-ban", "description": "Does not compile", "regex": "(?!x)y"}
-        ]
-    }"#;
-
     fn init_test_definitions() {
-        let _ = super::super::definitions::init_definitions_from_str(TEST_DEFINITIONS);
+        super::super::definitions::init_test_definitions();
     }
 
     fn make_request(content: &str) -> Value {

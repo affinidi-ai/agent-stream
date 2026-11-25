@@ -63,7 +63,7 @@ router and binds the listeners.
 6. Load the internal surface records, validate configuration, and hand over to the orchestrator.
 7. Open the settings, identity, secrets, and policy-definition stores, and the authentication mode (passkey, SAML or OIDC).
 8. Open the gateway, mediator, credential, model catalog, media, and governance stores.
-9. Open the Surface store, compile every Surface and appliance-wide policy, and start the enabled Surfaces.
+9. Open the Surface store and report its Prompt Guard rules that cannot be evaluated, compile every Surface and appliance-wide policy, and start the enabled Surfaces.
 10. Compile Trust Fabric policies; a compile failure exits the process.
 11. Open the budget, response-cache, Member, Prompt, and Team stores, seeding default Members and Teams.
 12. Open the telemetry and drift stores and start the governance retention sweep, drift evaluator, and drift scheduler.

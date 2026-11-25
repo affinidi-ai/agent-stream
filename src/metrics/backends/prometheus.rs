@@ -211,6 +211,20 @@ lazy_static! {
         counter
     };
 
+    /// Prompt Guard rules of stored Surfaces and Variants that cannot be evaluated,
+    /// found at startup and when a Surface changes on disk (labeled by side, reason).
+    /// A rise means requests to a Surface are refused until its rule is fixed.
+    pub static ref PROMPT_GUARD_UNUSABLE_RULES: IntCounterVec = {
+        let opts = Opts::new(
+            names::PROMPT_GUARD_UNUSABLE_RULES_TOTAL,
+            "Prompt Guard rules of stored Surfaces that cannot be evaluated (side = request|response, \
+             reason = unknown|compile_failed|definitions_missing|custom_pattern_invalid)",
+        );
+        let counter = IntCounterVec::new(opts, &["side", "reason"]).unwrap();
+        REGISTRY.register(Box::new(counter.clone())).unwrap();
+        counter
+    };
+
     /// Number of identities seen
     pub static ref UNIQUE_IDENTITIES: IntGauge = {
         let opts = Opts::new(names::UNIQUE_IDENTITIES, "Number of unique agent identities observed");
@@ -738,6 +752,15 @@ pub fn track_prompt_guard_pattern_error(
 ) {
     PROMPT_GUARD_PATTERN_ERRORS
         .with_label_values(&[pattern, reason])
+        .inc();
+}
+
+pub fn track_prompt_guard_unusable_rule(
+    side: &str,
+    reason: &str,
+) {
+    PROMPT_GUARD_UNUSABLE_RULES
+        .with_label_values(&[side, reason])
         .inc();
 }
 
