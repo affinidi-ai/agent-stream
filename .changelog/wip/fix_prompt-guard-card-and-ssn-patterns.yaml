@@ -37,9 +37,11 @@ changes:
       description: >-
         Because credit_card now matches any run of 14 or more digits joined by single
         spaces or dashes, a reject guard that names it refuses text such as dates written
-        next to each other (2026-11-24 2026-11-25), order IDs (ORD-20261124-000123) and a
-        phone number followed by more digits (212 555 1234 2026) with its rejection or the
-        default 403. Put credit_card in a mask guard where such text is expected.
+        next to each other (2026-11-24 2026-11-25), order IDs (ORD-20261124-000123), a
+        phone number followed by more digits (212 555 1234 2026), full-precision decimals
+        in tool-call arguments and long digit runs in other scripts, such as a phone number
+        written in Arabic-Indic digits (٠٠٩٧١٥٠١٢٣٤٥٦٧٨), with its rejection or the default
+        403. Put credit_card in a mask guard where such text is expected.
     - timestamp: '2026-11-24T12:00:00.000Z'
       title: Refuse saving a Surface whose Prompt Guard rule cannot be evaluated
       description: >-
@@ -63,7 +65,9 @@ changes:
         produced invalid JSON. When the arguments are JSON and a match is part of a bare
         number, the whole number, sign and decimals included, is now replaced by the
         quoted token, so they still parse. With pseudonymize, the NER ID and its restore
-        value cover that whole number, so distinct numbers get distinct IDs.
+        value cover that whole number, so distinct numbers get distinct IDs. A token in the
+        arguments is JSON-escaped, so a custom label holding a quote or backslash keeps
+        them valid. A restored number comes back as a JSON string.
   removed: []
   security:
     - timestamp: '2026-11-23T12:00:00.000Z'
@@ -80,7 +84,8 @@ changes:
         or a dash between groups. credit_card, ssn and ssn_simple also match a number
         written straight after CJK or other non-ASCII text, but not straight after an
         ASCII letter. credit_card and ssn_simple also match a number written in other
-        decimal digits, such as Arabic-Indic, on its own; ssn matches ASCII digits only.
+        decimal digits, such as Arabic-Indic, including straight after a letter; ssn
+        matches ASCII digits only.
         No-break spaces, tabs, double spaces, dots and en dashes between
         digits are not caught. These fixes take effect only once the deployed
         prompt-guard.json is replaced; see the breaking entry.
@@ -108,11 +113,18 @@ changes:
     - timestamp: '2026-11-24T13:30:00.000Z'
       title: Replace prompt-guard.json and fix uncompilable custom Prompt Guard patterns
       description: >-
-        An upgrade keeps the deployed prompt-guard.json. Until it is replaced from
-        config/examples/prompt-guard.example.json, Surfaces whose rules name ssn answer
-        every request with 502 prompt_guard_pattern_unavailable and their saves are
-        refused with 400, and the credit_card, ssn_simple and phone_number fixes do not
-        apply, so spaced cards still pass. A Surface stored with a custom pattern that
-        does not compile, which was silently skipped before, now answers every request
-        with 502 prompt_guard_pattern_unavailable and refuses saves with 400: correct or
-        remove the pattern. The WARN log line and the 400 error name the rule.
+        An upgrade keeps the deployed prompt-guard.json, and the container image does not
+        carry the example file. Until it is replaced with
+        config/examples/prompt-guard.example.json from the release tag, merged with any
+        patterns you added, Surfaces whose rules name ssn answer every request with 502
+        prompt_guard_pattern_unavailable and their saves are refused with 400, and the
+        credit_card, ssn_simple and phone_number fixes do not apply, so spaced cards still
+        pass. Once it is replaced, reject guards that name credit_card also refuse long
+        digit runs in any script; see the changed entry on reject guards. A Surface
+        stored with a custom pattern that does not compile, which was silently skipped
+        before, now answers every request with 502 prompt_guard_pattern_unavailable and
+        refuses saves with 400: correct or remove the pattern. Before upgrading, list the
+        Surfaces through the Admin API and look for "builtin": "ssn" and for custom
+        patterns using look-around or backreferences ((?=, (?!, (?<=, (?<! or \1),
+        which the regex engine does not support. The WARN log line and the 400 error
+        name the rule.

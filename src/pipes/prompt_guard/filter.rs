@@ -905,23 +905,34 @@ fn is_json_number_byte(byte: u8) -> bool {
     byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
 }
 
-/// The ranges of `text` to replace for `matches`, each with whether its token is
-/// quoted. In JSON tool-call arguments, a match outside a string is part of a
-/// bare number: its range covers the whole number, which is replaced by a quoted
+/// Where a replacement token lands, which decides how it is written.
+#[derive(Clone, Copy)]
+enum TokenPlace {
+    /// Plain text: the token is written as is.
+    Text,
+    /// Inside a JSON string: the token is JSON-escaped.
+    JsonString,
+    /// In place of a bare JSON value: the token is written as a JSON string.
+    JsonValue,
+}
+
+/// The ranges of `text` to replace for `matches`, each with where its token
+/// lands. In JSON tool-call arguments, a match outside a string is part of a bare
+/// number: its range covers the whole number, which is replaced by a JSON string
 /// token so the arguments still parse. `matches` are in ascending order, so the
 /// arguments are scanned once; a range overlapping the one before is dropped.
 fn replacement_ranges(
     text: &str,
     matches: Vec<std::ops::Range<usize>>,
     json_arguments: bool,
-) -> Vec<(std::ops::Range<usize>, bool)> {
+) -> Vec<(std::ops::Range<usize>, TokenPlace)> {
     let bytes = text.as_bytes();
     let mut in_string = false;
     let mut escaped = false;
     let mut scanned = 0;
-    let mut ranges: Vec<(std::ops::Range<usize>, bool)> = Vec::with_capacity(matches.len());
+    let mut ranges: Vec<(std::ops::Range<usize>, TokenPlace)> = Vec::with_capacity(matches.len());
     for mut range in matches {
-        let mut quoted = false;
+        let mut place = TokenPlace::Text;
         if json_arguments {
             for &byte in &bytes[scanned..range.start.max(scanned)] {
                 if escaped {
@@ -933,14 +944,16 @@ fn replacement_ranges(
                 }
             }
             scanned = scanned.max(range.start);
-            if !in_string {
+            if in_string {
+                place = TokenPlace::JsonString;
+            } else {
                 while range.start > 0 && is_json_number_byte(bytes[range.start - 1]) {
                     range.start -= 1;
                 }
                 while range.end < bytes.len() && is_json_number_byte(bytes[range.end]) {
                     range.end += 1;
                 }
-                quoted = true;
+                place = TokenPlace::JsonValue;
             }
         }
         if ranges
@@ -949,7 +962,7 @@ fn replacement_ranges(
         {
             continue;
         }
-        ranges.push((range, quoted));
+        ranges.push((range, place));
     }
     ranges
 }
@@ -968,7 +981,7 @@ fn splice_tokens(
 /// pseudonym and its restore value cover exactly what was removed.
 fn replacement_token(
     value: &str,
-    quoted: bool,
+    place: TokenPlace,
     redact_token: &str,
     entity: &str,
     mask_mode: MaskMode,
@@ -978,10 +991,14 @@ fn replacement_token(
         MaskMode::Redact => redact_token.to_string(),
         MaskMode::Pseudonymize => allocator.token_for(entity, value),
     };
-    if quoted {
-        format!("\"{token}\"")
-    } else {
-        token
+    let json = || serde_json::to_string(&token).unwrap_or_else(|_| format!("\"{token}\""));
+    match place {
+        TokenPlace::Text => token,
+        TokenPlace::JsonValue => json(),
+        TokenPlace::JsonString => {
+            let quoted = json();
+            quoted[1..quoted.len() - 1].to_string()
+        }
     }
 }
 
@@ -1050,10 +1067,10 @@ fn apply_regex_rules(
                             let replacements: Vec<(std::ops::Range<usize>, String)> =
                                 replacement_ranges(&current, ranges, json_arguments)
                                     .into_iter()
-                                    .map(|(range, quoted)| {
+                                    .map(|(range, place)| {
                                         let token = replacement_token(
                                             &current[range.clone()],
-                                            quoted,
+                                            place,
                                             &redact_token,
                                             &entity,
                                             rules.mask_mode,
@@ -1095,10 +1112,10 @@ fn apply_regex_rules(
                                 let replacements: Vec<(std::ops::Range<usize>, String)> =
                                     replacement_ranges(&current, ranges, json_arguments)
                                         .into_iter()
-                                        .map(|(range, quoted)| {
+                                        .map(|(range, place)| {
                                             let token = replacement_token(
                                                 &current[range.clone()],
-                                                quoted,
+                                                place,
                                                 &redact_token,
                                                 &entity,
                                                 rules.mask_mode,
@@ -1137,7 +1154,7 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)|\\b\\d(?:[ -]?\\d){13,}\\b"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)|[0-9]*[\\d&&[^0-9]](?:[ -]?\\d){13,}"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
@@ -2040,7 +2057,7 @@ mod tests {
         init_test_definitions();
         let mut alloc = PseudonymAllocator::default();
         let guards = pseudonymize_guard(&["credit_card"]);
-        let arguments = r#"{"a": -4545454545454545, "b": 4545454545454545.25}"#;
+        let arguments = r#"{"a": -4545454545454545, "b": 4545454545454545.25, "c": -122.41941550000001, "d": 4545454545454545.12345678901234}"#;
         let mut body = json!({
             "messages": [
                 { "role": "assistant", "content": Value::Null, "tool_calls": [
@@ -2067,6 +2084,43 @@ mod tests {
         assert_ne!(parsed["a"], parsed["b"], "distinct numbers get distinct NER IDs: {masked}");
         assert_eq!(restored("a"), "-4545454545454545");
         assert_eq!(restored("b"), "4545454545454545.25");
+        assert_eq!(restored("c"), "-122.41941550000001");
+        assert_eq!(restored("d"), "4545454545454545.12345678901234");
+        assert_eq!(map.len(), 4, "a number holding two matches gets one NER ID, with no orphan: {map:?}");
+    }
+
+    #[test]
+    fn a_masked_token_is_json_escaped_in_tool_call_arguments() {
+        let guards = vec![RequestGuard {
+            regex: RegexRules {
+                action: GuardAction::Mask,
+                mask_mode: MaskMode::Redact,
+                restore_in_response: false,
+                link_pronouns: false,
+                rules: vec![RegexRule::Pattern {
+                    pattern: r"\d{17}".to_string(),
+                    label: Some(r#"Acct "ID" \x"#.to_string()),
+                }],
+            },
+            rejection: None,
+        }];
+        let arguments = r#"{"order": 12345678901234567, "note": "id 12345678901234567"}"#;
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &guards), GuardOutcome::Masked));
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+        assert_eq!(parsed["order"], r#"<ACCT "ID" \X>"#, "{masked}");
+        assert_eq!(parsed["note"], r#"id <ACCT "ID" \X>"#, "{masked}");
     }
 
     #[test]

@@ -458,13 +458,16 @@ mod tests {
             ("カード番号4545-4545-4545-4545です", "4545-4545-4545-4545"),
             ("номер 4545 4545 4545 4545.", "4545 4545 4545 4545"),
             ("رقم البطاقة ٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥.", "٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥"),
+            ("رقم٤٥٤٥٤٥٤٥٤٥٤٥٤٥٤٥", "٤٥٤٥٤٥٤٥٤٥٤٥٤٥٤٥"),
             ("JCB 35١٢٣٤٥٦٧٨٩٠١٢٣٤", "35١٢٣٤٥٦٧٨٩٠١٢٣٤"),
+            ("4111111111111١١١", "4111111111111"),
         ] {
             assert_eq!(
                 re.find(text)
                     .map(|m| m.as_str()),
                 Some(card),
-                "a card next to non-ASCII text, or in other decimal digits, matches: {text}"
+                "a card next to non-ASCII text, or in other decimal digits, matches; a run that \
+                 switches digit script after its ASCII part forms a card stops at the switch: {text}"
             );
         }
         for (text, run) in [
@@ -496,6 +499,7 @@ mod tests {
         );
         for bad in [
             "ssn123-45-6789",
+            "١٢٣-٤٥-٦٧٨٩",
             "666-12-3456",
             "000-12-3456",
             "912-34-5678",
@@ -512,7 +516,8 @@ mod tests {
     #[test]
     fn shipped_ssn_simple_pattern_matches_a_dash_or_space() {
         let re = shipped_regex("ssn_simple");
-        for good in ["123-45-6789", "123 45 6789", "666-00-0000", "社保号123-45-6789", "رقم ١٢٣-٤٥-٦٧٨٩."]
+        for good in
+            ["123-45-6789", "123 45 6789", "666-00-0000", "社保号123-45-6789", "رقم ١٢٣-٤٥-٦٧٨٩.", "رقم١٢٣-٤٥-٦٧٨٩"]
         {
             assert!(re.is_match(good), "expected simple SSN match: {good}");
         }

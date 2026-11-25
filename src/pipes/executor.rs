@@ -4062,8 +4062,6 @@ impl PipeExecutor {
         let _request_start = std::time::SystemTime::now();
         let trace_id = trace_id.unwrap_or_else(|| format!("pipe-{}", uuid::Uuid::new_v4()));
 
-        self.refuse_unusable_prompt_guard_rules()?;
-
         // ── Prompt guard (request) ──
         // Runs before routing and validation so the Decider and Judge both
         // evaluate the masked content, and a blocked request never reaches

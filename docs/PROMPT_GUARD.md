@@ -71,7 +71,9 @@ of a content array) and assistant `tool_calls[].function.arguments`. A mask guar
 rewrites tool-call arguments too, so a numeric ID of 14 or more digits in them is
 masked as a card. When the arguments are JSON and the match is part of a bare number,
 the whole number, sign and decimals included, is replaced by the quoted token
-(`{"order_id": "<CREDIT_CARD>"}`), so they still parse.
+(`{"order_id": "<CREDIT_CARD>"}`), so they still parse. A token in the arguments is
+JSON-escaped, so a custom label holding `"` or `\` keeps them valid. With
+`restore_in_response`, a masked number comes back as a JSON string, not a number.
 Realtime voice sessions (`/v1/realtime`) run no Prompt Guard.
 
 ## Configuration
@@ -95,7 +97,7 @@ Realtime voice sessions (`/v1/realtime`) run no Prompt Guard.
     }
   ],
   "response": [
-    { "regex": { "action": "reject", "rules": [ { "builtin": "credit_card" } ] } }
+    { "regex": { "action": "mask", "rules": [ { "builtin": "credit_card" } ] } }
   ],
   "llm_pii": [
     {
@@ -182,7 +184,9 @@ Each entry has a `key`, `label`, `icon`, `description`, and `regex`. A pattern w
 regex does not compile cannot be used; see
 [Rules that cannot be evaluated](#rules-that-cannot-be-evaluated).
 `GET /v1/prompt-guard/config` serves the pattern list. An upgrade does not replace a
-deployed `prompt-guard.json`; replace it from the shipped file to pick up pattern fixes.
+deployed `prompt-guard.json`, and the container image does not carry the example file:
+take it from the release tag in the source repository, merge in any patterns you added,
+and replace the deployed file to pick up pattern fixes.
 
 | Key | Matches |
 | --- | --- |
@@ -200,10 +204,13 @@ deployed `prompt-guard.json`; replace it from the shipped file to pick up patter
 other non-ASCII text (`卡号4545454545454545`, `社保号123-45-6789`), but not one written
 straight after an ASCII letter, digit or `_` (`cc4545454545454545`). `credit_card` and
 `ssn_simple` also match a number written in other decimal digits (`٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥`,
-`١٢٣-٤٥-٦٧٨٩`) when it stands on its own; `ssn` matches ASCII digits only. `credit_card`
-does not catch digits
-separated by a no-break space, a tab, two spaces, dots or an en dash, or a 13-digit Visa
-written with spaces (`4222 2222 2222 2`).
+`١٢٣-٤٥-٦٧٨٩`), with no boundary check, so also straight after a letter, and a run of
+other decimal digits longer than an SSN can be matched in part; `ssn` matches ASCII
+digits only. A card that switches digit script part-way is matched only up to the
+switch when its ASCII part already forms a card (`4111111111111١١١` masks
+`4111111111111`). `credit_card` does not catch digits separated by a no-break space, a
+tab, two spaces, dots or an en dash, or a 13-digit Visa written with spaces
+(`4222 2222 2222 2`).
 
 ### Rules that cannot be evaluated
 
