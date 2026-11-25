@@ -443,31 +443,30 @@ mod tests {
         ] {
             assert!(re.is_match(good), "expected card match: {good}");
         }
-        for bad in [
-            "+55 11 91234 5678",
-            "212-555-1234",
-            "123-45-6789",
-            "123456789",
-            "cc4545454545454545",
-            "card_4545454545454545",
-        ] {
+        for bad in ["+55 11 91234 5678", "212-555-1234", "123-45-6789", "123456789", "card_4111111111111"] {
             assert!(!re.is_match(bad), "unexpected card match: {bad}");
         }
         for (text, card) in [
             ("卡号4545454545454545", "4545454545454545"),
             ("カード番号4545-4545-4545-4545です", "4545-4545-4545-4545"),
             ("номер 4545 4545 4545 4545.", "4545 4545 4545 4545"),
+            ("cc4545454545454545", "4545454545454545"),
+            ("card_4545454545454545", "4545454545454545"),
             ("رقم البطاقة ٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥.", "٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥"),
             ("رقم٤٥٤٥٤٥٤٥٤٥٤٥٤٥٤٥", "٤٥٤٥٤٥٤٥٤٥٤٥٤٥٤٥"),
             ("JCB 35١٢٣٤٥٦٧٨٩٠١٢٣٤", "35١٢٣٤٥٦٧٨٩٠١٢٣٤"),
-            ("4111111111111١١١", "4111111111111"),
+            ("354١٢٣٤٥٦٧٨٩٠١٢٣", "354١٢٣٤٥٦٧٨٩٠١٢٣"),
+            ("4545 4545 4545 ٤٥٤٥", "4545 4545 4545 ٤٥٤٥"),
+            ("4545-4545-٤٥٤٥-٤٥٤٥", "4545-4545-٤٥٤٥-٤٥٤٥"),
+            ("4545٤٥٤٥٤٥٤٥٤٥٤٥", "4545٤٥٤٥٤٥٤٥٤٥٤٥"),
+            ("4111111111111١١١", "4111111111111١١١"),
+            ("4545 4545 4545 4545 4545号", "4545 4545 4545 4545 4545"),
         ] {
             assert_eq!(
                 re.find(text)
                     .map(|m| m.as_str()),
                 Some(card),
-                "a card next to non-ASCII text, or in other decimal digits, matches; a run that \
-                 switches digit script after its ASCII part forms a card stops at the switch: {text}"
+                "a card matches whole in any digit script, wherever it is written: {text}"
             );
         }
         for (text, run) in [
@@ -521,13 +520,21 @@ mod tests {
         {
             assert!(re.is_match(good), "expected simple SSN match: {good}");
         }
-        assert_eq!(
-            re.find("رقم ١٢٣-٤٥-٦٧٨٩.")
-                .map(|m| m.as_str()),
-            Some("١٢٣-٤٥-٦٧٨٩"),
-            "an SSN in other decimal digits matches on its own"
-        );
-        for bad in ["123456789", "212-555-1234", "+55 11 91234 5678"] {
+        for (text, ssn) in [
+            ("رقم ١٢٣-٤٥-٦٧٨٩.", "١٢٣-٤٥-٦٧٨٩"),
+            ("123-٤٥-6789", "123-٤٥-6789"),
+            ("١٢٣-45-6789", "١٢٣-45-6789"),
+            ("١٢٣-٤٥-6789", "١٢٣-٤٥-6789"),
+            ("123 45 678٩", "123 45 678٩"),
+        ] {
+            assert_eq!(
+                re.find(text)
+                    .map(|m| m.as_str()),
+                Some(ssn),
+                "an SSN with any non-ASCII digit matches: {text}"
+            );
+        }
+        for bad in ["123456789", "212-555-1234", "+55 11 91234 5678", "ssn123-45-6789", "1234-56-78901"] {
             assert!(!re.is_match(bad), "unexpected simple SSN match: {bad}");
         }
     }

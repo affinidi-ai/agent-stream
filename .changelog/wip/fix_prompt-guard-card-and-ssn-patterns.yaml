@@ -39,7 +39,8 @@ changes:
         spaces or dashes, a reject guard that names it refuses text such as dates written
         next to each other (2026-11-24 2026-11-25), order IDs (ORD-20261124-000123), a
         phone number followed by more digits (212 555 1234 2026), full-precision decimals
-        in tool-call arguments and long digit runs in other scripts, such as a phone number
+        in tool-call arguments, runs of 14 or more digits inside alphanumeric IDs, and
+        long digit runs in other scripts, such as a phone number
         written in Arabic-Indic digits (٠٠٩٧١٥٠١٢٣٤٥٦٧٨), with its rejection or the default
         403. Put credit_card in a mask guard where such text is expected.
     - timestamp: '2026-11-24T12:00:00.000Z'
@@ -65,9 +66,9 @@ changes:
         produced invalid JSON. When the arguments are JSON and a match is part of a bare
         number, the whole number, sign and decimals included, is now replaced by the
         quoted token, so they still parse. With pseudonymize, the NER ID and its restore
-        value cover that whole number, so distinct numbers get distinct IDs. A token in the
-        arguments is JSON-escaped, so a custom label holding a quote or backslash keeps
-        them valid. A restored number comes back as a JSON string.
+        value cover that whole number, so distinct numbers get distinct IDs. A token from a
+        custom label drops any quote or backslash, so it never needs escaping and is
+        restored as written. A restored number comes back as a JSON string.
   removed: []
   security:
     - timestamp: '2026-11-23T12:00:00.000Z'
@@ -80,11 +81,12 @@ changes:
         written together or with single spaces or dashes, matched whole and with no
         checksum, plus 13-digit Visa numbers written together; long IDs, timestamps
         written as digits, adjacent dates, numbered lists, space-grouped amounts and
-        numeric IDs in tool-call arguments also match. ssn and ssn_simple accept a space
-        or a dash between groups. credit_card, ssn and ssn_simple also match a number
-        written straight after CJK or other non-ASCII text, but not straight after an
-        ASCII letter. credit_card and ssn_simple also match a number written in other
-        decimal digits, such as Arabic-Indic, including straight after a letter; ssn
+        numeric IDs in tool-call arguments also match. credit_card has no word boundary,
+        so it matches a card in any digit script or mixing scripts, straight after CJK
+        text or a letter, and inside alphanumeric IDs. ssn and ssn_simple accept a space
+        or a dash between groups and match an ASCII-digit SSN straight after CJK or other
+        non-ASCII text, but not straight after an ASCII letter. ssn_simple also matches
+        an SSN holding any non-ASCII digit, including straight after a letter; ssn
         matches ASCII digits only.
         No-break spaces, tabs, double spaces, dots and en dashes between
         digits are not caught. These fixes take effect only once the deployed
@@ -125,6 +127,6 @@ changes:
         before, now answers every request with 502 prompt_guard_pattern_unavailable and
         refuses saves with 400: correct or remove the pattern. Before upgrading, list the
         Surfaces through the Admin API and look for "builtin": "ssn" and for custom
-        patterns using look-around or backreferences ((?=, (?!, (?<=, (?<! or \1),
-        which the regex engine does not support. The WARN log line and the 400 error
+        patterns using syntax the regex engine does not support, for example look-around,
+        atomic groups or backreferences ((?=, (?!, (?<=, (?<!, (?>, \1 or \k<name>). The WARN log line and the 400 error
         name the rule.

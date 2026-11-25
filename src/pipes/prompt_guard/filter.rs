@@ -932,6 +932,12 @@ fn replacement_ranges(
     let mut scanned = 0;
     let mut ranges: Vec<(std::ops::Range<usize>, TokenPlace)> = Vec::with_capacity(matches.len());
     for mut range in matches {
+        if ranges
+            .last()
+            .is_some_and(|(previous, _)| range.start < previous.end)
+        {
+            continue;
+        }
         let mut place = TokenPlace::Text;
         if json_arguments {
             for &byte in &bytes[scanned..range.start.max(scanned)] {
@@ -965,6 +971,17 @@ fn replacement_ranges(
         ranges.push((range, place));
     }
     ranges
+}
+
+/// The entity name a custom rule's label gives its tokens: the label upper-cased,
+/// without `"` or `\`, so a token never needs escaping in JSON and is restored as
+/// written.
+fn token_entity(label: &str) -> String {
+    label
+        .to_uppercase()
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\'))
+        .collect()
 }
 
 /// Replace each range with its token, last first so earlier offsets stay valid.
@@ -1100,14 +1117,15 @@ fn apply_regex_rules(
                                 return RegexResult::Reject(format!("Matched {name}"));
                             }
                             GuardAction::Mask => {
-                                let redact_token = label
-                                    .as_deref()
-                                    .map(|l| format!("<{}>", l.to_uppercase()))
-                                    .unwrap_or_else(|| "<MASKED>".to_string());
                                 let entity = label
                                     .as_deref()
-                                    .map(|l| l.to_uppercase())
+                                    .map(token_entity)
                                     .unwrap_or_else(|| "CUSTOM".to_string());
+                                let redact_token = if label.is_some() {
+                                    format!("<{entity}>")
+                                } else {
+                                    "<MASKED>".to_string()
+                                };
                                 // Allocate in reading order, then splice in reverse.
                                 let replacements: Vec<(std::ops::Range<usize>, String)> =
                                     replacement_ranges(&current, ranges, json_arguments)
@@ -1154,7 +1172,7 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)|[0-9]*[\\d&&[^0-9]](?:[ -]?\\d){13,}"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\d(?:[ -]?\\d){13,}|(?-u:\\b)4[0-9]{12}(?-u:\\b)"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
             {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
             {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
@@ -2089,21 +2107,29 @@ mod tests {
         assert_eq!(map.len(), 4, "a number holding two matches gets one NER ID, with no orphan: {map:?}");
     }
 
-    #[test]
-    fn a_masked_token_is_json_escaped_in_tool_call_arguments() {
-        let guards = vec![RequestGuard {
+    fn custom_mask_guard(
+        pattern: &str,
+        label: &str,
+        mask_mode: MaskMode,
+    ) -> Vec<RequestGuard> {
+        vec![RequestGuard {
             regex: RegexRules {
                 action: GuardAction::Mask,
-                mask_mode: MaskMode::Redact,
-                restore_in_response: false,
+                mask_mode,
+                restore_in_response: mask_mode == MaskMode::Pseudonymize,
                 link_pronouns: false,
                 rules: vec![RegexRule::Pattern {
-                    pattern: r"\d{17}".to_string(),
-                    label: Some(r#"Acct "ID" \x"#.to_string()),
+                    pattern: pattern.to_string(),
+                    label: Some(label.to_string()),
                 }],
             },
             rejection: None,
-        }];
+        }]
+    }
+
+    #[test]
+    fn a_label_with_quotes_or_backslashes_keeps_tool_call_arguments_valid() {
+        let guards = custom_mask_guard(r"\d{17}", r#"Acct "ID" \x"#, MaskMode::Redact);
         let arguments = r#"{"order": 12345678901234567, "note": "id 12345678901234567"}"#;
         let mut body = json!({
             "messages": [
@@ -2119,8 +2145,60 @@ mod tests {
             .as_str()
             .expect("arguments stay a string");
         let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
-        assert_eq!(parsed["order"], r#"<ACCT "ID" \X>"#, "{masked}");
-        assert_eq!(parsed["note"], r#"id <ACCT "ID" \X>"#, "{masked}");
+        assert_eq!(parsed["order"], "<ACCT ID X>", "{masked}");
+        assert_eq!(parsed["note"], "id <ACCT ID X>", "{masked}");
+    }
+
+    #[test]
+    fn a_pseudonym_from_a_label_with_quotes_is_restored_in_tool_call_arguments() {
+        let mut alloc = PseudonymAllocator::default();
+        let guards = custom_mask_guard(r"\d{17}", r#"Acct "ID""#, MaskMode::Pseudonymize);
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": r#"{"order": 12345678901234567}"# } }
+                ] }
+            ]
+        });
+
+        apply_request_guards_into(&mut body, &guards, &mut alloc);
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string")
+            .to_string();
+        let mut resp = json!({
+            "choices": [
+                { "message": { "content": Value::Null, "tool_calls": [
+                    { "function": { "arguments": masked } }
+                ] } }
+            ]
+        });
+        assert!(rehydrate_response(&mut resp, &alloc.rehydration_map()));
+        let restored = resp["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        assert_eq!(restored, r#"{"order": "12345678901234567"}"#);
+    }
+
+    #[test]
+    fn many_matches_in_one_long_json_number_are_replaced_once() {
+        let digits = "7".repeat(3000);
+        let guards = custom_mask_guard(r"\d{3}", "group", MaskMode::Redact);
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": format!(r#"{{"n": 0.{digits}}}"#) } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &guards), GuardOutcome::Masked));
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        assert_eq!(masked, r#"{"n": "<GROUP>"}"#);
     }
 
     #[test]

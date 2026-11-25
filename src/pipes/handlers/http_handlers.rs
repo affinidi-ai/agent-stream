@@ -5560,7 +5560,14 @@ async fn proxy_api_get(
             record_front_door_block(state, &resolved, &resolved, &Value::Null, "team_gate", code, &body);
             return (status, Json(body)).into_response();
         }
-        crate::teams::TeamGateDecision::Allow(mut ctx) => (ctx.call_budget.take(), Some(ctx)),
+        crate::teams::TeamGateDecision::Allow(mut ctx) => {
+            crate::observability::request_context::update(|request| {
+                request
+                    .usage
+                    .set_team_context(&ctx)
+            });
+            (ctx.call_budget.take(), Some(ctx))
+        }
         crate::teams::TeamGateDecision::Skip => (None, None),
     };
 
@@ -5729,7 +5736,14 @@ async fn proxy_file_upload(
             record_front_door_block(state, &resolved, &resolved, &Value::Null, "team_gate", code, &body);
             return (status, Json(body)).into_response();
         }
-        crate::teams::TeamGateDecision::Allow(mut ctx) => (ctx.call_budget.take(), Some(ctx)),
+        crate::teams::TeamGateDecision::Allow(mut ctx) => {
+            crate::observability::request_context::update(|request| {
+                request
+                    .usage
+                    .set_team_context(&ctx)
+            });
+            (ctx.call_budget.take(), Some(ctx))
+        }
         crate::teams::TeamGateDecision::Skip => (None, None),
     };
 

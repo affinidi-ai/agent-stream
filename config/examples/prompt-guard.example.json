@@ -19,7 +19,7 @@
       "label": "US SSN (Simple Format)",
       "icon": "fa-id-card",
       "description": "Matches any NNN-NN-NNNN, NNN NN NNNN or mixed-separator form without range validation",
-      "regex": "(?-u:\\b)[0-9]{3}[- ][0-9]{2}[- ][0-9]{4}(?-u:\\b)|[\\d&&[^0-9]]{3}[- ][\\d&&[^0-9]]{2}[- ][\\d&&[^0-9]]{4}"
+      "regex": "(?-u:\\b)[0-9]{3}[- ][0-9]{2}[- ][0-9]{4}(?-u:\\b)|(?:[\\d&&[^0-9]]\\d\\d|[0-9][\\d&&[^0-9]]\\d|[0-9]{2}[\\d&&[^0-9]])[- ]\\d{2}[- ]\\d{4}|[0-9]{3}[- ](?:[\\d&&[^0-9]]\\d|[0-9][\\d&&[^0-9]])[- ]\\d{4}|[0-9]{3}[- ][0-9]{2}[- ](?:[\\d&&[^0-9]]\\d{3}|[0-9][\\d&&[^0-9]]\\d{2}|[0-9]{2}[\\d&&[^0-9]]\\d|[0-9]{3}[\\d&&[^0-9]])"
     },
     {
       "key": "phone_number",
@@ -33,7 +33,7 @@
       "label": "Credit Card Numbers",
       "icon": "fa-credit-card",
       "description": "Matches card numbers: any run of 14 or more digits written together or with single spaces or dashes between digits, matched whole, and 13-digit Visa numbers written together. No checksum, so long IDs, adjacent dates, numbered lists and grouped amounts also match",
-      "regex": "(?-u:\\b)(?:[0-9](?:[ -]?[0-9]){13,}|4[0-9]{12})(?-u:\\b)|[0-9]*[\\d&&[^0-9]](?:[ -]?\\d){13,}"
+      "regex": "\\d(?:[ -]?\\d){13,}|(?-u:\\b)4[0-9]{12}(?-u:\\b)"
     },
     {
       "key": "date_of_birth",

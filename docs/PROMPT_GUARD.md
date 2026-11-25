@@ -71,9 +71,8 @@ of a content array) and assistant `tool_calls[].function.arguments`. A mask guar
 rewrites tool-call arguments too, so a numeric ID of 14 or more digits in them is
 masked as a card. When the arguments are JSON and the match is part of a bare number,
 the whole number, sign and decimals included, is replaced by the quoted token
-(`{"order_id": "<CREDIT_CARD>"}`), so they still parse. A token in the arguments is
-JSON-escaped, so a custom label holding `"` or `\` keeps them valid. With
-`restore_in_response`, a masked number comes back as a JSON string, not a number.
+(`{"order_id": "<CREDIT_CARD>"}`), so they still parse. With `restore_in_response`, a
+masked number comes back as a JSON string, not a number.
 Realtime voice sessions (`/v1/realtime`) run no Prompt Guard.
 
 ## Configuration
@@ -170,7 +169,8 @@ The `INFO` log line for the rejection names the built-in pattern or custom rule 
 matched, never the matched text.
 
 The entity name used in a placeholder is the built-in key upper-cased (`EMAIL`,
-`PHONE_NUMBER`, `STREET_ADDRESS`), or a custom rule's `label` upper-cased. A custom
+`PHONE_NUMBER`, `STREET_ADDRESS`), or a custom rule's `label` upper-cased without any
+`"` or `\`, so a token needs no escaping in JSON and is restored as written. A custom
 rule without a label redacts to `<MASKED>` and pseudonymises as `CUSTOM`.
 
 ### Built-in patterns
@@ -192,25 +192,25 @@ and replace the deployed file to pick up pattern fixes.
 | --- | --- |
 | `email` | Email addresses |
 | `ssn` | US Social Security Numbers with a dash or space between groups (`NNN-NN-NNNN`, `NNN NN NNNN`), excluding invalid area, group and serial numbers |
-| `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix |
+| `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix, digits in any script |
 | `phone_number` | US, international (`+` country code), and Australian mobile numbers |
-| `credit_card` | Any run of 14 or more digits written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`), matched whole, and 13-digit Visa numbers written together. There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
+| `credit_card` | Any run of 14 or more digits, in any script, written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`), matched whole wherever it is written, and 13-digit Visa numbers written together. There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
 | `date_of_birth` | Dates preceded by birth keywords (birth, dob, born) |
 | `ip_address` | IPv4 addresses with octet validation |
 | `passport` | US passport numbers |
 | `street_address` | Basic US street addresses |
 
-`credit_card`, `ssn` and `ssn_simple` match a number written straight after CJK or
-other non-ASCII text (`卡号4545454545454545`, `社保号123-45-6789`), but not one written
-straight after an ASCII letter, digit or `_` (`cc4545454545454545`). `credit_card` and
-`ssn_simple` also match a number written in other decimal digits (`٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥`,
-`١٢٣-٤٥-٦٧٨٩`), with no boundary check, so also straight after a letter, and a run of
-other decimal digits longer than an SSN can be matched in part; `ssn` matches ASCII
-digits only. A card that switches digit script part-way is matched only up to the
-switch when its ASCII part already forms a card (`4111111111111١١١` masks
-`4111111111111`). `credit_card` does not catch digits separated by a no-break space, a
-tab, two spaces, dots or an en dash, or a 13-digit Visa written with spaces
-(`4222 2222 2222 2`).
+`credit_card` has no word boundary: it matches a card in any digit script, or mixing
+scripts (`4545 4545 4545 ٤٥٤٥`), straight after CJK text or a letter
+(`卡号4545454545454545`, `cc4545454545454545`), so a run of 14 or more digits inside an
+alphanumeric ID also matches. Only its 13-digit Visa branch keeps an ASCII word
+boundary. `ssn` and `ssn_simple` match an ASCII-digit SSN straight after CJK or other
+non-ASCII text (`社保号123-45-6789`), but not straight after an ASCII letter, digit or
+`_`. `ssn_simple` also matches an SSN holding any non-ASCII digit (`١٢٣-٤٥-٦٧٨٩`,
+`123-٤٥-6789`) with no boundary check, so also straight after a letter, and can match
+part of a longer such run; `ssn` matches ASCII digits only. `credit_card` does not
+catch digits separated by a no-break space, a tab, two spaces, dots or an en dash, or a
+13-digit Visa written with spaces (`4222 2222 2222 2`).
 
 ### Rules that cannot be evaluated
 
