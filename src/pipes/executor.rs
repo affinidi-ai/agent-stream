@@ -535,6 +535,9 @@ fn model_pii_stage_detail(outcome: &ModelPiiOutcome) -> (bool, String) {
 /// jury reason tokens survive to the telemetry boundary instead of being
 /// flattened into the response body. The handler classifies `raw_reasons`
 /// (interpreted in the context of `source`) into canonical categories.
+/// Rejection source of a refusal because a Prompt Guard rule cannot be evaluated.
+pub const PROMPT_GUARD_UNAVAILABLE_SOURCE: &str = "prompt_guard_unavailable";
+
 #[derive(Debug, Clone)]
 pub struct RejectionMeta {
     pub stage: RejectionStage,
@@ -1526,6 +1529,7 @@ impl PipeExecutor {
 
             self.admit_platform_stages()
                 .await?;
+            self.refuse_unusable_prompt_guard_rules()?;
 
             // Per-request routing preferences (`models` / `provider`) filter and
             // reorder the surface's own candidate pool (primary + failover / LB
@@ -2172,6 +2176,8 @@ impl PipeExecutor {
         self.admit_platform_stages()
             .await?;
 
+        self.refuse_unusable_prompt_guard_rules()?;
+
         // ── Prompt guard (request) ──
         // Mirror the buffered path's request masking so the provider only ever
         // sees pseudonyms and the map for response re-hydration is available: a
@@ -2607,6 +2613,8 @@ impl PipeExecutor {
                 .await?;
         }
 
+        self.refuse_unusable_prompt_guard_rules()?;
+
         // ── Prompt guard (request) ──
         if let Some(prompt_guard) = &self.config.prompt_guard
             && prompt_guard.enabled
@@ -2761,9 +2769,9 @@ impl PipeExecutor {
     /// Forward a raw POST body (e.g. a `multipart/form-data` file upload for
     /// `POST /v1/files`) to the upstream provider verbatim, preserving the
     /// caller's `Content-Type` (including the multipart boundary). Runs the
-    /// request-side gates (circuit breaker, rate limit, provider auth, SSRF);
-    /// the body is opaque, so content guards, parameter rules, and token
-    /// metering do not apply.
+    /// request-side gates (circuit breaker, rate limit, the Prompt Guard
+    /// unusable-rule refusal, provider auth, SSRF); the body is opaque, so
+    /// content guards, parameter rules, and token metering do not apply.
     pub async fn execute_upload(
         &self,
         path_suffix: Option<String>,
@@ -2790,6 +2798,8 @@ impl PipeExecutor {
             self.check_rate_limits(None)
                 .await?;
         }
+
+        self.refuse_unusable_prompt_guard_rules()?;
 
         use crate::pipes::types::llm_provider_ext::LLMProviderExt;
         let provider = match &self.config.pipe_type {
@@ -2960,6 +2970,8 @@ impl PipeExecutor {
             self.check_rate_limits(None)
                 .await?;
         }
+
+        self.refuse_unusable_prompt_guard_rules()?;
 
         use crate::pipes::types::llm_provider_ext::LLMProviderExt;
         let provider = match &self.config.pipe_type {
@@ -6185,6 +6197,26 @@ impl PipeExecutor {
                 .insert(secret_id.to_string(), secret.clone());
         }
         Ok(resolved)
+    }
+
+    /// Refuse the request before any upstream call when the Surface's Prompt
+    /// Guard has a request or response regex rule that cannot be evaluated.
+    fn refuse_unusable_prompt_guard_rules(&self) -> Result<(), PipeError> {
+        match self
+            .config
+            .prompt_guard
+            .as_ref()
+            .and_then(crate::pipes::prompt_guard::unusable_rule_rejection)
+        {
+            Some((side, rejection)) => {
+                let stage = match side {
+                    crate::pipes::prompt_guard::GuardSide::Request => RejectionStage::RegexRequest,
+                    crate::pipes::prompt_guard::GuardSide::Response => RejectionStage::RegexResponse,
+                };
+                Err(PipeError::guard_rejected(rejection, stage, PROMPT_GUARD_UNAVAILABLE_SOURCE))
+            }
+            None => Ok(()),
+        }
     }
 
     /// Run every enabled model-PII detector for a request-side prompt guard.
@@ -9701,6 +9733,82 @@ mod tests {
             assert_eq!(backup.requests(), 1, "precondition: the backup was called");
             assert_eq!(base.header_values(KEY_HEADER), vec!["BASE"]);
             assert_eq!(backup.header_values(KEY_HEADER), vec!["BACKUP"]);
+        }
+
+        #[tokio::test]
+        async fn a_prompt_guard_rule_that_cannot_be_evaluated_refuses_the_call_before_the_upstream() {
+            for rule in [json!({ "builtin": "not_a_pattern" }), json!({ "pattern": "(?!x)y", "label": "lookahead" })] {
+                for side in ["request", "response"] {
+                    for path in ["buffered", "streamed", "binary", "upload", "get"] {
+                        let base = CaptureUpstream::answering("hello back").await;
+                        let _allowed = allow(&[&base]);
+                        let mut config = surface(&base.url);
+                        let mut prompt_guard = json!({ "enabled": true });
+                        prompt_guard[side] = json!([{ "regex": { "action": "reject", "rules": [rule.clone()] } }]);
+                        config.prompt_guard = Some(serde_json::from_value(prompt_guard).expect("prompt guard config"));
+                        config.retry_policy = Some(crate::pipes::config::RetryPolicy {
+                            max_retries: 3,
+                            initial_backoff_ms: 60_000,
+                            max_backoff_ms: 60_000,
+                            backoff_multiplier: 1.0,
+                        });
+                        let executor = PipeExecutor::new(&config);
+                        let result = tokio::time::timeout(StdDuration::from_secs(5), async {
+                            match path {
+                                "streamed" => executor
+                                    .execute_streaming(request(), None, CallerCredentials::default(), None)
+                                    .await
+                                    .map(|_| ()),
+                                "binary" => executor
+                                    .execute_binary(
+                                        json!({ "model": "tts-1", "input": "hello" }),
+                                        Some("/v1/audio/speech".to_string()),
+                                        CallerCredentials::default(),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                "upload" => executor
+                                    .execute_upload(
+                                        Some("/v1/files".to_string()),
+                                        "multipart/form-data; boundary=x".to_string(),
+                                        b"--x--\r\n".to_vec(),
+                                        CallerCredentials::default(),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                "get" => executor
+                                    .execute_get(Some("/v1/files/file-1".to_string()), CallerCredentials::default())
+                                    .await
+                                    .map(|_| ()),
+                                _ => executor
+                                    .execute(request(), None, None, None, None)
+                                    .await
+                                    .map(|_| ()),
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|_| panic!("{rule} on the {side}, {path} path: refused without retrying"));
+
+                        let case = format!("{rule} on the {side}, {path} path");
+                        match result {
+                            Err(PipeError::PromptGuardRejected {
+                                status_code, body, rejection, ..
+                            }) => {
+                                assert_eq!(status_code, 502, "{case}");
+                                let body: Value = serde_json::from_str(&body).expect("rejection body is JSON");
+                                assert_eq!(body["error"]["type"], "guardrail_unavailable", "{case}");
+                                assert_eq!(body["error"]["code"], "prompt_guard_pattern_unavailable", "{case}");
+                                let meta = rejection.expect("the refusal carries rejection metadata");
+                                assert_eq!(meta.source, "prompt_guard_unavailable", "{case}");
+                                assert_eq!(meta.raw_reasons, vec!["prompt_guard_pattern_unavailable"], "{case}");
+                                assert_eq!(meta.stage.label(), format!("regex_{side}"), "{case}");
+                            }
+                            other => panic!("{case}: expected the unusable rule to refuse the call, got {other:?}"),
+                        }
+                        assert_eq!(base.requests(), 0, "{case}: the upstream was not called");
+                    }
+                }
+            }
         }
 
         #[tokio::test]

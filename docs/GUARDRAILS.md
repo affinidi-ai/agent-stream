@@ -32,6 +32,10 @@ classified into a [rejection category](#rejection-categories).
 
 Fail closed is the default; an Expert Witness with `fail_open: true` lets a request
 through when its provider is unavailable (see [Fail-open and fail-closed](#fail-open-and-fail-closed)).
+A Prompt Guard pattern rule that cannot be evaluated always refuses the request
+before any upstream call other than the response cache, except a realtime voice
+session, which runs no Prompt Guard (see
+[PROMPT_GUARD.md](PROMPT_GUARD.md#rules-that-cannot-be-evaluated)).
 
 ## Pipeline order
 
@@ -251,6 +255,14 @@ duration.
 A witness with a stored key whose call the caller's budget refuses refuses the
 request, whatever `fail_open` says. A keyless witness is never refused for budget.
 
+Prompt Guard pattern rules have no fail-open option. A rule that names a built-in
+pattern that is not loaded or did not compile, or a custom pattern that does not
+compile, refuses the request with `502` and
+`{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`
+before any upstream call. The response cache runs earlier, so a semantic cache's
+embedder still receives the request text and a cache hit is still served; see
+[PROMPT_GUARD.md](PROMPT_GUARD.md#rules-that-cannot-be-evaluated).
+
 ### Overriding the built-in profile
 
 Set `profile` to change the request shape, auth header, or verdict location without
@@ -456,6 +468,7 @@ and Member.
 | Stage label | Source | Raw reasons |
 | --- | --- | --- |
 | `regex_request`, `regex_response` | `regex`, or `model_pii` for a model PII detector | The guard's reason |
+| `regex_request`, `regex_response` | `prompt_guard_unavailable`, when a pattern rule on that side cannot be evaluated (not a content match) | `prompt_guard_pattern_unavailable`, which the shipped taxonomy classifies as `prompt_guard_unavailable` |
 | `witness_request`, `witness_response` | The provider id, such as `enkryptai` or `azure_prompt_shields` | The triggered detectors or categories |
 | `judge` | `judge` | The matched rule's name and its category in `moderation` mode, or `judge_verdict_indeterminate` alone when a rule could not be evaluated |
 | `jury` | `jury` | The Jury's free-text reason |
@@ -498,7 +511,8 @@ which is also compiled in as the fallback.
 The shipped categories are `prompt_injection`, `jailbreak`, `toxicity`, `hate`,
 `violence`, `sexual_nsfw`, `self_harm`, `pii`, `secrets`, `bias`, `policy_violation`,
 `banned_keyword`, `relevancy`, `copyright_ip`, `system_prompt_leak`, `sponge_dos`,
-`hallucination`, `judge_indeterminate`, `redrive`, and `uncategorized`.
+`hallucination`, `judge_indeterminate`, `prompt_guard_unavailable`, `redrive`, and
+`uncategorized`.
 
 ### Counts
 

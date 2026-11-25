@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tracing::{info, warn};
+use tracing::{error, info};
 
 /// Global singleton holding the loaded prompt guard definitions.
 /// Initialized once at startup via `init_definitions()`.
@@ -66,28 +66,17 @@ pub fn init_definitions(path: &str) -> Result<(), String> {
     let defs: PromptGuardDefinitions =
         serde_json::from_str(&content).map_err(|e| format!("Failed to parse prompt-guard.json: {}", e))?;
 
-    // Pre-validate all regex patterns at startup.
-    let mut compiled: HashMap<String, Regex> = HashMap::new();
-    for pattern in &defs.defined_patterns {
-        match Regex::new(&pattern.regex) {
-            Ok(re) => {
-                compiled.insert(pattern.key.clone(), re);
-            }
-            Err(e) => {
-                warn!(
-                    "Invalid regex for prompt guard pattern '{}': {} — pattern will be skipped at runtime",
-                    pattern.key, e
-                );
-            }
-        }
-    }
-
-    info!("Loaded {} prompt guard pattern definitions ({} valid regexes)", defs.defined_patterns.len(), compiled.len());
+    // Pre-compile all regex patterns at startup. A pattern that does not compile
+    // is left out and reported by `report_definition_problems` once logging is up.
+    let (compiled, problems) = compile_patterns(&defs);
 
     // Store compiled regexes in a separate OnceLock
     COMPILED_REGEXES
         .set(compiled)
         .map_err(|_| "Prompt guard compiled regexes already initialized".to_string())?;
+    COMPILE_PROBLEMS
+        .set(problems)
+        .map_err(|_| "Prompt guard compile problems already initialized".to_string())?;
 
     DEFINITIONS
         .set(defs)
@@ -98,6 +87,43 @@ pub fn init_definitions(path: &str) -> Result<(), String> {
 
 /// Pre-compiled regexes for built-in patterns, keyed by pattern key.
 static COMPILED_REGEXES: OnceLock<HashMap<String, Regex>> = OnceLock::new();
+
+/// The built-in patterns that did not compile at load, with their errors.
+static COMPILE_PROBLEMS: OnceLock<Vec<DefinitionProblem>> = OnceLock::new();
+
+/// Compile every defined pattern: the regexes that compile, keyed by pattern key,
+/// and a problem for each one that does not.
+fn compile_patterns(defs: &PromptGuardDefinitions) -> (HashMap<String, Regex>, Vec<DefinitionProblem>) {
+    let mut compiled = HashMap::new();
+    let mut problems = Vec::new();
+    for pattern in &defs.defined_patterns {
+        match Regex::new(&pattern.regex) {
+            Ok(re) => {
+                compiled.insert(pattern.key.clone(), re);
+            }
+            Err(e) => problems.push(DefinitionProblem {
+                pattern: pattern.key.clone(),
+                issue: PatternIssue::CompileFailed,
+                detail: compile_error_reason(&e),
+            }),
+        }
+    }
+    (compiled, problems)
+}
+
+/// Why a regex did not compile, without the expression itself, which may hold
+/// literals the pattern was written to catch. A syntax error quotes the
+/// expression and ends with an `error: <reason>` line; only that reason is kept.
+fn compile_error_reason(error: &regex::Error) -> String {
+    let message = error.to_string();
+    let last = message
+        .lines()
+        .last()
+        .unwrap_or_default();
+    last.strip_prefix("error: ")
+        .unwrap_or(last)
+        .to_string()
+}
 
 /// Get the loaded definitions. Returns None if not yet initialized.
 pub fn get_definitions() -> Option<&'static PromptGuardDefinitions> {
@@ -119,6 +145,125 @@ pub fn get_compiled_regex(key: &str) -> Option<&'static Regex> {
     COMPILED_REGEXES
         .get()
         .and_then(|map| map.get(key))
+}
+
+/// Why a built-in pattern named by a Prompt Guard rule cannot be evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternIssue {
+    /// `prompt-guard.json` was not loaded, so no built-in pattern is available.
+    DefinitionsMissing,
+    /// The pattern is defined, but its regex did not compile.
+    CompileFailed,
+    /// No pattern with this key is defined.
+    Unknown,
+}
+
+impl PatternIssue {
+    /// Stable label used in logs, errors and the `reason` metric label.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::DefinitionsMissing => "definitions_missing",
+            Self::CompileFailed => "compile_failed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Plain description used in log lines, rejection reasons and save errors.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::DefinitionsMissing => "is unavailable because prompt-guard.json did not load",
+            Self::CompileFailed => "did not compile",
+            Self::Unknown => "is not defined",
+        }
+    }
+}
+
+/// Why the built-in pattern `key` cannot be evaluated, or `None` when it can.
+pub fn builtin_issue(key: &str) -> Option<PatternIssue> {
+    builtin_issue_in(DEFINITIONS.get(), COMPILED_REGEXES.get(), key)
+}
+
+fn builtin_issue_in(
+    defs: Option<&PromptGuardDefinitions>,
+    compiled: Option<&HashMap<String, Regex>>,
+    key: &str,
+) -> Option<PatternIssue> {
+    let (Some(defs), Some(compiled)) = (defs, compiled) else {
+        return Some(PatternIssue::DefinitionsMissing);
+    };
+    if compiled.contains_key(key) {
+        None
+    } else if defs
+        .defined_patterns
+        .iter()
+        .any(|p| p.key == key)
+    {
+        Some(PatternIssue::CompileFailed)
+    } else {
+        Some(PatternIssue::Unknown)
+    }
+}
+
+/// A built-in pattern problem found at load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DefinitionProblem {
+    /// The pattern key, empty when the whole file did not load.
+    pattern: String,
+    issue: PatternIssue,
+    detail: String,
+}
+
+/// The problems to report: the compile problems kept at load, or one
+/// `DefinitionsMissing` problem when `prompt-guard.json` did not load.
+fn definition_problems_in(
+    compile_problems: Option<&[DefinitionProblem]>,
+    load_error: Option<&str>,
+) -> Vec<DefinitionProblem> {
+    match compile_problems {
+        Some(problems) => problems.to_vec(),
+        None => vec![DefinitionProblem {
+            pattern: String::new(),
+            issue: PatternIssue::DefinitionsMissing,
+            detail: load_error
+                .unwrap_or("not loaded")
+                .to_string(),
+        }],
+    }
+}
+
+/// Log each built-in pattern problem found at load at `ERROR` and count it in
+/// `agent_stream_prompt_guard_pattern_errors_total`. The definitions load before
+/// logging starts, so this runs once logging is up. `load_error` is why
+/// `prompt-guard.json` did not load, when it did not.
+pub fn report_definition_problems(load_error: Option<&str>) {
+    if let Some(defs) = DEFINITIONS.get() {
+        let valid = COMPILED_REGEXES
+            .get()
+            .map_or(0, HashMap::len);
+        info!("Loaded {} prompt guard pattern definitions ({valid} valid regexes)", defs.defined_patterns.len());
+    }
+    for problem in definition_problems_in(
+        COMPILE_PROBLEMS
+            .get()
+            .map(Vec::as_slice),
+        load_error,
+    ) {
+        if problem.issue == PatternIssue::DefinitionsMissing {
+            error!(
+                "Prompt guard definitions not loaded: {} — requests to Surfaces whose rules name a built-in pattern are refused",
+                problem.detail
+            );
+        } else {
+            error!(
+                "Prompt guard built-in pattern '{}' did not compile: {} — requests to Surfaces whose rules name it are refused",
+                problem.pattern, problem.detail
+            );
+        }
+        crate::metrics::backends::prometheus::track_prompt_guard_pattern_error(
+            &problem.pattern,
+            problem.issue.reason(),
+        );
+    }
 }
 
 /// Get the pattern definition by key.
@@ -249,5 +394,223 @@ mod tests {
         for bad in ["0123456789", "not a phone", "42"] {
             assert!(!re.is_match(bad), "unexpected phone match: {bad}");
         }
+        for (text, number) in [
+            ("电话+8613812345678请", "+8613812345678"),
+            ("+14155550100x12", "+14155550100"),
+            ("tel_+4915123456789_", "+4915123456789"),
+        ] {
+            assert_eq!(
+                re.find(text)
+                    .map(|m| m.as_str()),
+                Some(number),
+                "an international number written against a word character still matches: {text}"
+            );
+        }
+    }
+
+    fn shipped_definitions() -> PromptGuardDefinitions {
+        serde_json::from_str(include_str!("../../../config/examples/prompt-guard.example.json"))
+            .expect("example prompt-guard JSON parses")
+    }
+
+    fn shipped_regex(key: &str) -> Regex {
+        let defs = shipped_definitions();
+        let pattern = defs
+            .defined_patterns
+            .iter()
+            .find(|p| p.key == key)
+            .unwrap_or_else(|| panic!("{key} pattern present"));
+        Regex::new(&pattern.regex).unwrap_or_else(|e| panic!("{key} regex compiles: {e}"))
+    }
+
+    #[test]
+    fn every_shipped_pattern_compiles() {
+        assert_eq!(compile_patterns(&shipped_definitions()).1, Vec::new());
+    }
+
+    #[test]
+    fn shipped_credit_card_pattern_matches_cards_in_any_grouping() {
+        let re = shipped_regex("credit_card");
+        for good in [
+            "4545 4545 4545 4545",
+            "4545-4545-4545-4545",
+            "4111 1111 11111111",
+            "4545454545454545",
+            "4111111111111",
+            "378282246310005",
+            "My credit card number is 4545 4545 4545 4545",
+            "20261123120000",
+        ] {
+            assert!(re.is_match(good), "expected card match: {good}");
+        }
+        for bad in ["+55 11 91234 5678", "212-555-1234", "123-45-6789", "123456789", "card_4111111111111"] {
+            assert!(!re.is_match(bad), "unexpected card match: {bad}");
+        }
+        for (text, card) in [
+            ("卡号4545454545454545", "4545454545454545"),
+            ("カード番号4545-4545-4545-4545です", "4545-4545-4545-4545"),
+            ("номер 4545 4545 4545 4545.", "4545 4545 4545 4545"),
+            ("cc4545454545454545", "4545454545454545"),
+            ("card_4545454545454545", "4545454545454545"),
+            ("رقم البطاقة ٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥.", "٤٥٤٥ ٤٥٤٥ ٤٥٤٥ ٤٥٤٥"),
+            ("رقم٤٥٤٥٤٥٤٥٤٥٤٥٤٥٤٥", "٤٥٤٥٤٥٤٥٤٥٤٥٤٥٤٥"),
+            ("JCB 35١٢٣٤٥٦٧٨٩٠١٢٣٤", "35١٢٣٤٥٦٧٨٩٠١٢٣٤"),
+            ("354١٢٣٤٥٦٧٨٩٠١٢٣", "354١٢٣٤٥٦٧٨٩٠١٢٣"),
+            ("4545 4545 4545 ٤٥٤٥", "4545 4545 4545 ٤٥٤٥"),
+            ("4545-4545-٤٥٤٥-٤٥٤٥", "4545-4545-٤٥٤٥-٤٥٤٥"),
+            ("4545٤٥٤٥٤٥٤٥٤٥٤٥", "4545٤٥٤٥٤٥٤٥٤٥٤٥"),
+            ("4111111111111١١١", "4111111111111١١١"),
+            ("4545 4545 4545 4545 4545号", "4545 4545 4545 4545 4545"),
+        ] {
+            assert_eq!(
+                re.find(text)
+                    .map(|m| m.as_str()),
+                Some(card),
+                "a card matches whole in any digit script, wherever it is written: {text}"
+            );
+        }
+        for (text, run) in [
+            ("+65 6123 4567 4545 4545 4545 4545", "65 6123 4567 4545 4545 4545 4545"),
+            ("+1 415 555 0100 4545454545454545", "1 415 555 0100 4545454545454545"),
+            ("4545 4545 4545 4545 123-45-6789", "4545 4545 4545 4545 123-45-6789"),
+            ("4545454545454545 is my card", "4545454545454545"),
+        ] {
+            assert_eq!(
+                re.find(text)
+                    .map(|m| m.as_str()),
+                Some(run),
+                "a card matches the whole run of digits around it: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_ssn_pattern_matches_valid_ssns_with_a_dash_or_space() {
+        let re = shipped_regex("ssn");
+        for good in ["123-45-6789", "123 45 6789", "899-99-9999", "001-01-0001", "My SSN is 123 45 6789"] {
+            assert!(re.is_match(good), "expected SSN match: {good}");
+        }
+        assert_eq!(
+            re.find("社保号123-45-6789です")
+                .map(|m| m.as_str()),
+            Some("123-45-6789"),
+            "an SSN next to CJK text matches"
+        );
+        for bad in [
+            "ssn123-45-6789",
+            "١٢٣-٤٥-٦٧٨٩",
+            "666-12-3456",
+            "000-12-3456",
+            "912-34-5678",
+            "123-00-4567",
+            "123-45-0000",
+            "123456789",
+            "212-555-1234",
+            "+55 11 91234 5678",
+        ] {
+            assert!(!re.is_match(bad), "unexpected SSN match: {bad}");
+        }
+    }
+
+    #[test]
+    fn shipped_ssn_simple_pattern_matches_a_dash_or_space() {
+        let re = shipped_regex("ssn_simple");
+        for good in
+            ["123-45-6789", "123 45 6789", "666-00-0000", "社保号123-45-6789", "رقم ١٢٣-٤٥-٦٧٨٩.", "رقم١٢٣-٤٥-٦٧٨٩"]
+        {
+            assert!(re.is_match(good), "expected simple SSN match: {good}");
+        }
+        for (text, ssn) in [
+            ("رقم ١٢٣-٤٥-٦٧٨٩.", "١٢٣-٤٥-٦٧٨٩"),
+            ("123-٤٥-6789", "123-٤٥-6789"),
+            ("١٢٣-45-6789", "١٢٣-45-6789"),
+            ("١٢٣-٤٥-6789", "١٢٣-٤٥-6789"),
+            ("123 45 678٩", "123 45 678٩"),
+        ] {
+            assert_eq!(
+                re.find(text)
+                    .map(|m| m.as_str()),
+                Some(ssn),
+                "an SSN with any non-ASCII digit matches: {text}"
+            );
+        }
+        for bad in ["123456789", "212-555-1234", "+55 11 91234 5678", "ssn123-45-6789", "1234-56-78901"] {
+            assert!(!re.is_match(bad), "unexpected simple SSN match: {bad}");
+        }
+    }
+
+    fn definitions_with(patterns: &[(&str, &str)]) -> PromptGuardDefinitions {
+        PromptGuardDefinitions {
+            defined_patterns: patterns
+                .iter()
+                .map(|(key, regex)| PatternDefinition {
+                    key: key.to_string(),
+                    label: key.to_string(),
+                    icon: String::new(),
+                    description: String::new(),
+                    regex: regex.to_string(),
+                })
+                .collect(),
+            pii_detection_prompt: default_pii_detection_prompt(),
+        }
+    }
+
+    #[test]
+    fn builtin_issue_names_why_a_pattern_cannot_be_used() {
+        let defs = definitions_with(&[("good", r"\d+"), ("broken", r"(?!x)y")]);
+        let (map, _) = compile_patterns(&defs);
+        assert_eq!(builtin_issue_in(Some(&defs), Some(&map), "good"), None);
+        assert_eq!(builtin_issue_in(Some(&defs), Some(&map), "broken"), Some(PatternIssue::CompileFailed));
+        assert_eq!(builtin_issue_in(Some(&defs), Some(&map), "absent"), Some(PatternIssue::Unknown));
+        assert_eq!(builtin_issue_in(None, None, "good"), Some(PatternIssue::DefinitionsMissing));
+    }
+
+    #[test]
+    fn definition_problems_report_each_pattern_that_does_not_compile() {
+        let defs = definitions_with(&[("good", r"\d+"), ("broken", r"(?!hunter2)y")]);
+        let (compiled, kept) = compile_patterns(&defs);
+        assert_eq!(compiled.len(), 1);
+        let problems = definition_problems_in(Some(&kept), None);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].pattern, "broken");
+        assert_eq!(problems[0].issue, PatternIssue::CompileFailed);
+        assert_eq!(problems[0].issue.reason(), "compile_failed");
+        assert!(
+            problems[0]
+                .detail
+                .contains("look-around"),
+            "unexpected detail: {}",
+            problems[0].detail
+        );
+        assert!(
+            !problems[0]
+                .detail
+                .contains("hunter2"),
+            "the detail quotes the regex: {}",
+            problems[0].detail
+        );
+    }
+
+    #[test]
+    fn definition_problems_report_a_file_that_did_not_load_with_an_empty_pattern() {
+        let problems = definition_problems_in(None, Some("Failed to read prompt-guard.json"));
+        assert_eq!(
+            problems,
+            vec![DefinitionProblem {
+                pattern: String::new(),
+                issue: PatternIssue::DefinitionsMissing,
+                detail: "Failed to read prompt-guard.json".to_string(),
+            }]
+        );
+        assert_eq!(problems[0].issue.reason(), "definitions_missing");
+    }
+
+    #[test]
+    fn tracking_a_pattern_error_increments_the_counter_for_its_labels() {
+        let counter = crate::metrics::backends::prometheus::PROMPT_GUARD_PATTERN_ERRORS
+            .with_label_values(&["test-pattern", "compile_failed"]);
+        let before = counter.get();
+        crate::metrics::backends::prometheus::track_prompt_guard_pattern_error("test-pattern", "compile_failed");
+        assert_eq!(counter.get(), before + 1);
     }
 }

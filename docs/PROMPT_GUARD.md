@@ -38,9 +38,11 @@ until configured.
 On the request side, inside each executor attempt, in this order
 (`execute_once` and `execute_streaming` in [`src/pipes/executor.rs`](../src/pipes/executor.rs)):
 
-1. Pattern guards (`prompt_guard.request`), in list order.
-2. Model PII detectors (`prompt_guard.llm_pii`), on the already-masked text.
-3. Pronoun linking, when any request guard sets `link_pronouns`.
+1. A check that every request and response pattern rule can be evaluated; see
+   [Rules that cannot be evaluated](#rules-that-cannot-be-evaluated).
+2. Pattern guards (`prompt_guard.request`), in list order.
+3. Model PII detectors (`prompt_guard.llm_pii`), on the already-masked text.
+4. Pronoun linking, when any request guard sets `link_pronouns`.
 
 Then the request Expert Witnesses, Judge, and Decider run, then the model. On the
 response side, after the Jury: pattern guards (`prompt_guard.response`), then the
@@ -65,7 +67,13 @@ pattern guards force the buffered path; see
 [GUARDRAILS.md](GUARDRAILS.md#pipeline-order).
 
 Detection and masking cover each message's `content` (a string, or the `text` parts
-of a content array) and assistant `tool_calls[].function.arguments`.
+of a content array) and assistant `tool_calls[].function.arguments`. A mask guard
+rewrites tool-call arguments too, so a numeric ID of 14 or more digits in them is
+masked as a card. When the arguments are JSON and the match is part of a bare number,
+the whole number, sign and decimals included, is replaced by the quoted token
+(`{"order_id": "<CREDIT_CARD>"}`), so they still parse. With `restore_in_response`, a
+masked number comes back as a JSON string, not a number.
+Realtime voice sessions (`/v1/realtime`) run no Prompt Guard.
 
 ## Configuration
 
@@ -88,7 +96,7 @@ of a content array) and assistant `tool_calls[].function.arguments`.
     }
   ],
   "response": [
-    { "regex": { "action": "reject", "rules": [ { "builtin": "credit_card" } ] } }
+    { "regex": { "action": "mask", "rules": [ { "builtin": "credit_card" } ] } }
   ],
   "llm_pii": [
     {
@@ -125,10 +133,35 @@ Each entry in `request` or `response` is `{ "regex": RegexRules, "rejection": Re
 | `mask_mode` | `redact` | With `mask`: `redact` replaces each match with `<ENTITY>`; `pseudonymize` replaces each distinct value with a NER ID. |
 | `restore_in_response` | `false` | Request side, `pseudonymize` only: put the real values back in the answer. |
 | `link_pronouns` | `false` | Request side, `pseudonymize` only: link a pronoun to a lone named person. |
-| `rules` | required | Built-in or custom patterns, applied in order. |
+| `rules` | required | Built-in or custom patterns, applied in order; a `mask` guard applies `credit_card` first (see below). |
 
 A rule is either `{"builtin": "<key>"}` or `{"pattern": "<regex>", "label": "<name>"}`.
-Rules run in sequence, each on the output of the one before. With `reject`,
+Rules run in sequence, each on the output of the one before. A `mask` guard runs
+`credit_card` before its other rules, which keep their listed order. The card pattern
+masks a whole run of digits joined by single spaces or dashes, so no other rule, such
+as `phone_number`, `ssn` or `street_address`, can take part of a card first. A phone
+number or SSN written right next to a card is masked with it as one `<CREDIT_CARD>`:
+`+65 6123 4567 4545 4545 4545 4545` becomes `+<CREDIT_CARD>`, and
+`4545 4545 4545 4545 123-45-6789` becomes `<CREDIT_CARD>`. For the same reason, an
+international phone number of 14 or more digits on its own (`+49 1512 3456 7890`) is
+labelled `<CREDIT_CARD>`, not `<PHONE_NUMBER>`, and a house number written right after
+a card (`4545 4545 4545 4545 12 Main Street`) joins the card match, so `street_address`
+no longer matches the rest of the address. This holds within one guard; across
+separate guards, list the `credit_card` guard first. Guards run in sequence on the
+rewritten text, so the order across guards matters:
+
+- A mask guard with `credit_card` absorbs an SSN or phone number written right next to
+  a card before later guards run, so a later reject guard on `ssn` does not see it and
+  the request is masked rather than rejected.
+- A `phone_number` or `street_address` guard listed before the `credit_card` guard
+  takes part of a card and leaves the rest too short to match:
+  `+1 415 555 0100 4545 4545 4545 4545` becomes `<PHONE_NUMBER>5 4545 4545 4545`.
+
+A reject guard with `credit_card` refuses every input the card pattern matches,
+including dates written next to each other (`Can we meet 2026-11-24 2026-11-25`),
+order IDs (`Order ORD-20261124-000123`) and a phone number followed by more digits
+(`212 555 1234 2026`). Put `credit_card` in a mask guard where such text is expected.
+With `reject`,
 processing stops at the first match, which returns the guard's `rejection` or the
 default 403 body
 `{"error":{"message":"Request rejected: content violates prompt guard policy","type":"prompt_guard_violation","code":"content_policy_violation"}}`.
@@ -136,7 +169,8 @@ The `INFO` log line for the rejection names the built-in pattern or custom rule 
 matched, never the matched text.
 
 The entity name used in a placeholder is the built-in key upper-cased (`EMAIL`,
-`PHONE_NUMBER`, `STREET_ADDRESS`), or a custom rule's `label` upper-cased. A custom
+`PHONE_NUMBER`, `STREET_ADDRESS`), or a custom rule's `label` upper-cased without any
+`"` or `\`, so a token needs no escaping in JSON and is restored as written. A custom
 rule without a label redacts to `<MASKED>` and pseudonymises as `CUSTOM`.
 
 ### Built-in patterns
@@ -146,21 +180,69 @@ Built-in patterns are loaded once at startup from `prompt-guard.json`, named by
 ([`src/pipes/prompt_guard/definitions.rs`](../src/pipes/prompt_guard/definitions.rs)).
 The shipped file is
 [`config/examples/prompt-guard.example.json`](../config/examples/prompt-guard.example.json).
-Each entry has a `key`, `label`, `icon`, `description`, and `regex`. An invalid regex
-is skipped with a warning at load, and a rule naming an unknown key is skipped with a
-warning at request time. `GET /v1/prompt-guard/config` serves the pattern list.
+Each entry has a `key`, `label`, `icon`, `description`, and `regex`. A pattern whose
+regex does not compile cannot be used; see
+[Rules that cannot be evaluated](#rules-that-cannot-be-evaluated).
+`GET /v1/prompt-guard/config` serves the pattern list. An upgrade does not replace a
+deployed `prompt-guard.json`, and the container image does not carry the example file:
+take it from the release tag in the source repository, merge in any patterns you added,
+and replace the deployed file to pick up pattern fixes.
 
 | Key | Matches |
 | --- | --- |
 | `email` | Email addresses |
-| `ssn` | US Social Security Numbers (`NNN-NN-NNNN`), excluding invalid ranges |
-| `ssn_simple` | Any `NNN-NN-NNNN` |
+| `ssn` | US Social Security Numbers with a dash or space between groups (`NNN-NN-NNNN`, `NNN NN NNNN`), excluding invalid area, group and serial numbers |
+| `ssn_simple` | Any `NNN-NN-NNNN` or `NNN NN NNNN`, dashes and spaces in any mix, digits in any script |
 | `phone_number` | US, international (`+` country code), and Australian mobile numbers |
-| `credit_card` | Visa, Mastercard, Amex, Diners Club, Discover, and JCB numbers |
+| `credit_card` | Any run of 14 or more digits, in any script, written together or with single spaces or dashes between digits (`4545 4545 4545 4545`, `4111 1111 11111111`), matched whole wherever it is written, and 13-digit Visa numbers written together. There is no checksum, so long IDs, timestamps written as digits, grouped references, adjacent dates, numbered lists (`1 2 3 4 5 6 7 8 9 10 11 12`) and amounts grouped with spaces (`1 000 000 000 000 000`) also match. |
 | `date_of_birth` | Dates preceded by birth keywords (birth, dob, born) |
 | `ip_address` | IPv4 addresses with octet validation |
 | `passport` | US passport numbers |
 | `street_address` | Basic US street addresses |
+
+`credit_card` has no word boundary: it matches a card in any digit script, or mixing
+scripts (`4545 4545 4545 ٤٥٤٥`), straight after CJK text or a letter
+(`卡号4545454545454545`, `cc4545454545454545`), so a run of 14 or more digits inside an
+alphanumeric ID also matches. Only its 13-digit Visa branch keeps an ASCII word
+boundary. `ssn` and `ssn_simple` match an ASCII-digit SSN straight after CJK or other
+non-ASCII text (`社保号123-45-6789`), but not straight after an ASCII letter, digit or
+`_`. `ssn_simple` also matches an SSN holding any non-ASCII digit (`١٢٣-٤٥-٦٧٨٩`,
+`123-٤٥-6789`) with no boundary check, so also straight after a letter, and can match
+part of a longer such run; `ssn` matches ASCII digits only. `credit_card` does not
+catch digits separated by a no-break space, a tab, two spaces, dots or an en dash, or a
+13-digit Visa written with spaces (`4222 2222 2222 2`).
+
+### Rules that cannot be evaluated
+
+A pattern rule cannot be evaluated when it names a built-in pattern that is not
+defined, whose regex did not compile, or that is unavailable because
+`prompt-guard.json` did not load, or when it is a custom `pattern` that does not
+compile. Prompt Guard fails closed on such a rule:
+
+- Saving a Surface, or one of its Variants, through the Admin API when its enabled
+  Prompt Guard has one is refused with `400`, and the error names the rule. An
+  unlabelled custom pattern is named by its position in its guard (`custom pattern #2`),
+  never by its regex. Surfaces that arrive another way, such as a Surface template or a
+  hot reload, are not checked when saved; they are refused at request time, below.
+- A Surface already stored with one, for example after `prompt-guard.json` changed,
+  refuses every request before any upstream call, whichever side the rule is on, with
+  `502`. That covers chat, streamed, text-to-speech, file upload and transcription
+  requests and GET passthrough reads; realtime voice sessions run no Prompt Guard and
+  are not refused. The refusal is not retried under a `retry_policy`. The body is
+  `{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}`.
+  The guard's `rejection` is not used, and the `WARN` log line names the rule and why.
+  Rejection telemetry records it under the stage of the rule's side (`regex_request` or
+  `regex_response`), with source `prompt_guard_unavailable` and reason token
+  `prompt_guard_pattern_unavailable`, which the shipped taxonomy classifies as
+  `prompt_guard_unavailable` rather than as a content match. A deployed
+  `rejection_categories.json` replaces the shipped taxonomy whole, so copy that
+  category and its mapping from the example into it. Surfaces without
+  such a rule are unaffected. The response cache runs before Prompt Guard on every
+  request, so two exceptions apply: a semantic cache's embedder receives the request
+  text, and a cache hit is still served.
+- At startup, each built-in pattern that does not compile, or a file that did not load,
+  is logged at `ERROR` and counted in `agent_stream_prompt_guard_pattern_errors_total`
+  ([OBSERVABILITY.md](OBSERVABILITY.md)).
 
 ## Model-backed detection
 

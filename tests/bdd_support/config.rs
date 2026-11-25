@@ -71,7 +71,7 @@ pub fn write_scenario_config(
     fs::write(config_dir.join("rbac.json"), "{}\n").expect("rbac config should be written");
     fs::write(config_dir.join("llm.json"), "{\"providers\":[]}\n").expect("LLM catalog should be written");
     fs::write(config_dir.join("saml.json"), "{}\n").expect("SAML config should be written");
-    fs::write(config_dir.join("prompt-guard.json"), "{}\n").expect("prompt guard config should be written");
+    write_prompt_guard_definitions(&config_dir, SHIPPED_PROMPT_GUARD_DEFINITIONS);
     fs::write(config_dir.join("marketplace-models.json"), "[]\n").expect("marketplace catalog should be written");
     fs::write(config_dir.join("rejection_categories.json"), "{}\n").expect("rejection taxonomy should be written");
 
@@ -129,6 +129,33 @@ json = false
     fs::write(&allowlist_path, &endpoint_allowlist).expect("endpoint allowlist should be written");
 
     ScenarioConfig { config_dir, config_path }
+}
+
+/// The Prompt Guard built-in pattern definitions the appliance ships with.
+const SHIPPED_PROMPT_GUARD_DEFINITIONS: &str = include_str!("../../config/examples/prompt-guard.example.json");
+
+pub fn write_prompt_guard_definitions(
+    config_dir: &Path,
+    definitions: &str,
+) {
+    fs::write(config_dir.join("prompt-guard.json"), definitions).expect("prompt guard config should be written");
+}
+
+/// The shipped Prompt Guard definitions with built-in pattern `key` replaced by
+/// a regex the appliance cannot compile.
+pub fn prompt_guard_definitions_with_unusable(key: &str) -> String {
+    let mut definitions: serde_json::Value =
+        serde_json::from_str(SHIPPED_PROMPT_GUARD_DEFINITIONS).expect("shipped prompt guard definitions should parse");
+    let pattern = definitions["defined_patterns"]
+        .as_array_mut()
+        .and_then(|patterns| {
+            patterns
+                .iter_mut()
+                .find(|pattern| pattern["key"] == key)
+        })
+        .unwrap_or_else(|| panic!("shipped prompt guard definitions should define {key:?}"));
+    pattern["regex"] = json!("(?!unusable)x");
+    serde_json::to_string_pretty(&definitions).expect("prompt guard definitions should serialize")
 }
 
 pub fn provider_endpoint_allowlist(provider_base_urls: &[String]) -> String {

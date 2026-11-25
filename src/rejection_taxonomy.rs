@@ -468,6 +468,18 @@ mod tests {
     }
 
     #[test]
+    fn builtin_taxonomy_classifies_unavailable_prompt_guard_rules() {
+        let tax = builtin();
+        let unavailable = vec!["prompt_guard_pattern_unavailable".to_string()];
+
+        assert_eq!(
+            tax.classify(&unavailable, "prompt_guard_unavailable"),
+            vec!["prompt_guard_unavailable".to_string()]
+        );
+        assert_eq!(tax.classify(&unavailable, "regex"), vec!["uncategorized".to_string()]);
+    }
+
+    #[test]
     fn builtin_taxonomy_declares_redrive_category() {
         // The synthetic `redrive` category must be enumerable so the rejection
         // read endpoint reports recovered redrives, even though no mapping rule

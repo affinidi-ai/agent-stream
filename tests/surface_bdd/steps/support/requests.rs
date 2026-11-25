@@ -329,6 +329,11 @@ pub(crate) fn provider_operation(name: &str) -> ProviderOperation {
         "file upload" => ("POST", "/v1/files", OperationBody::Multipart),
         "audio transcription" => ("POST", "/v1/audio/transcriptions", OperationBody::Multipart),
         "audio translation" => ("POST", "/v1/audio/translations", OperationBody::Multipart),
+        "text-to-speech" => (
+            "POST",
+            "/v1/audio/speech",
+            OperationBody::Json(json!({ "model": "mock-small", "input": DEFAULT_CALLER_PROMPT, "voice": "alloy" })),
+        ),
         "vector store creation" => (
             "POST",
             "/v1/vector_stores",

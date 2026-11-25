@@ -170,7 +170,7 @@ turn.
 | Rate limit | Surface requests and tokens per minute | 429 |
 | Stage budget admission | Checks platform-key spend for Judge, Jurors, Decider, PII models, and Witnesses against the caller's budget | 429 |
 | Request routing | `models[]` and `provider{}` narrow or reorder the Surface's own pool | 502 |
-| Prompt Guard (request) | Pattern and model-backed detection, NER IDs ([`src/pipes/prompt_guard/`](src/pipes/prompt_guard/)) | Configured, default 403 |
+| Prompt Guard (request) | Pattern and model-backed detection, NER IDs ([`src/pipes/prompt_guard/`](src/pipes/prompt_guard/)) | Configured, default 403; 502 if a request or response pattern rule cannot be evaluated |
 | Expert Witness (request) | External classifiers on the masked request | Configured, default 403; 502 if unavailable and not fail-open |
 | Judge, Decider | Judge and Decider in parallel; for Comparer and Summariser, Judge then fan-out to every Candidate ([`src/pipes/judge_jury/`](src/pipes/judge_jury/)) | Configured, default 403; 502 if every Candidate fails |
 | Request preparation | Parameter rules and the wire transform to the provider's format | — |
