@@ -314,7 +314,7 @@ fn get_user_variables() -> RuntimeVariableCategory {
                 name: "OUTCOME".to_string(),
                 label: "Delete Outcome".to_string(),
                 description:
-                    "On user.deleted: removed, or kept when the user's OpenID Connect or SAML record is kept disabled"
+                    "On user.deleted: removed, or kept when the user's OpenID Connect or SAML record is kept disabled; empty on other user events"
                         .to_string(),
                 example: "$OUTCOME".to_string(),
                 category: "user".to_string(),

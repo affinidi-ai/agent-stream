@@ -499,9 +499,13 @@ is outside the caller's token scope, or that is an `audit` integration.
 
 Gateway values: `GATEWAY_ID`, `GATEWAY_NAME`, `GATEWAY_DESCRIPTION`, `GATEWAY_DID`,
 `GATEWAY_TYPE`, `GATEWAY_STATUS`, and `GATEWAY_OLD_STATUS` on a status change. User values:
-`USER_ID`, `USERNAME`, `USER_EMAIL`, `USER_ROLE`, `USER_STATUS`, and on `user.deleted`
-`OUTCOME`: `removed` when the record is gone, `kept` when an OIDC or SAML user's record is kept
-disabled (see [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md#deleting-an-oidc-or-saml-user)).
+`USER_ID`, `USERNAME`, `USER_EMAIL`, `USER_ROLE`, `USER_STATUS`, and `OUTCOME`: on
+`user.deleted`, `removed` when the record is gone and `kept` when an OIDC or SAML user's record
+is kept disabled (see [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md#deleting-an-oidc-or-saml-user));
+empty on every other user event. The dashboard's generated samples leave `OUTCOME` out, since
+they serve every event of the category. A user event's `OLD_STATE` and `NEW_STATE` hold the user
+as the user API returns it: never the passkeys, and the provider account (`oidc` or `saml_id`)
+only on a deleted user's kept record, which keeps it after approval until the next sign-in.
 
 ### Connection Point invitations
 

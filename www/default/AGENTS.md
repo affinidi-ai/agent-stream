@@ -62,7 +62,9 @@ buttons, empty states, list/table, page shell) and a new-page recipe, see
     Template**), the Email subject and body, and the Slack message text from the
     backend runtime-variable catalogue (`GET /integrations/runtime-variables`:
     the general variables plus the category's own), so a sample only uses
-    variables that category can substitute. Every sample leads with
+    variables that category can substitute. A category variable only some of its
+    events fill (`EVENT_SPECIFIC_VARIABLES`: `OUTCOME`, filled on `user.deleted`)
+    is left out, since the sample serves every event. Every sample leads with
     `appliance_id: ${APPLIANCE_ID}` (a general variable the backend fills on
     every delivery and never takes from event or caller values: the **Appliance
     ID** set in Settings › System Settings (`appliance_id`,

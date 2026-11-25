@@ -396,7 +396,7 @@
               "runtime_variables": [
                 {
                   "name": "NEW_STATE",
-                  "description": "Complete user object as JSON after approval (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                  "description": "Complete user object as JSON after approval (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in, sign_in_method), as the user API returns it: no passkeys, and the provider account (oidc or saml_id) only on a deleted user's kept record"
                 },
                 {
                   "name": "OLD_STATE",
@@ -419,11 +419,11 @@
               "runtime_variables": [
                 {
                   "name": "OLD_STATE",
-                  "description": "Complete user object as JSON before the update (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                  "description": "Complete user object as JSON before the update (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in, sign_in_method), as the user API returns it: no passkeys, and the provider account (oidc or saml_id) only on a deleted user's kept record"
                 },
                 {
                   "name": "NEW_STATE",
-                  "description": "Complete user object as JSON after the update (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                  "description": "Complete user object as JSON after the update (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in, sign_in_method), as the user API returns it: no passkeys, and the provider account (oidc or saml_id) only on a deleted user's kept record"
                 },
                 {
                   "name": "EVENT_TYPE",
@@ -442,7 +442,7 @@
               "runtime_variables": [
                 {
                   "name": "OLD_STATE",
-                  "description": "Complete user object as JSON before deletion (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                  "description": "Complete user object as JSON before deletion (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in, sign_in_method), as the user API returns it: no passkeys, and the provider account (oidc or saml_id) only on a deleted user's kept record"
                 },
                 {
                   "name": "NEW_STATE",
@@ -454,7 +454,7 @@
                 },
                 {
                   "name": "OUTCOME",
-                  "description": "What happened to the record: 'removed', or 'kept' when an OpenID Connect or SAML user's record is kept disabled"
+                  "description": "What happened to the record: 'removed', or 'kept' when an OpenID Connect or SAML user's record is kept disabled. Empty on every other user event"
                 },
                 {
                   "name": "TIMESTAMP",
@@ -469,7 +469,7 @@
               "runtime_variables": [
                 {
                   "name": "NEW_STATE",
-                  "description": "Complete user object as JSON (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in)"
+                  "description": "Complete user object as JSON (user_id, username, email, role, status, is_primary, first_name, last_name, department, job_title, avatar_path, created_at, updated_at, last_logged_in, sign_in_method), as the user API returns it: no passkeys, and the provider account (oidc or saml_id) only on a deleted user's kept record"
                 },
                 {
                   "name": "OLD_STATE",

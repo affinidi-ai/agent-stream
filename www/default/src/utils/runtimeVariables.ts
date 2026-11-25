@@ -283,7 +283,7 @@ function getFallbackRuntimeVariables(): RuntimeVariablesResponse {
             name: 'OUTCOME',
             label: 'Delete Outcome',
             description:
-              "On user.deleted: removed, or kept when the user's OpenID Connect or SAML record is kept disabled",
+              "On user.deleted: removed, or kept when the user's OpenID Connect or SAML record is kept disabled; empty on other user events",
             example: '$OUTCOME',
             category: 'user',
           },

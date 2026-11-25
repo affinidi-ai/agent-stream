@@ -81,10 +81,10 @@ describe('deleteConfirmNotice', () => {
     expect(deleteConfirmNotice(passkey, true)).toBeUndefined();
   });
 
-  it('has a shorter form for the Users table that still says approving brings them back', () => {
+  it('has a shorter form for the Users table that still says what approving again does', () => {
     const short = deleteConfirmNotice(saml, true);
     expect(short).toBe(
-      'SAML user: the record is kept disabled until an administrator approves it again.'
+      'SAML user: the record is kept disabled. Approving it again lets that account sign in as the same user.'
     );
     expect(short!.length).toBeLessThan(deleteConfirmNotice(saml)!.length);
     expect(deleteConfirmNotice(oidc, true)).toMatch(/^OpenID Connect user:/);

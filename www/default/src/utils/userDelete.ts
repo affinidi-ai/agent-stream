@@ -45,7 +45,7 @@ export const deleteConfirmNotice = (user: DeletableUser, compact = false): strin
     return undefined;
   }
   if (compact) {
-    return `${PROVIDER_NAME[method]} user: the record is kept disabled until an administrator approves it again.`;
+    return `${PROVIDER_NAME[method]} user: the record is kept disabled. Approving it again lets that account sign in as the same user.`;
   }
   return `This user signs in with ${PROVIDER_NAME[method]}. Their record is not removed: it is kept disabled under their provider account, so their next sign-in is refused. Approving them again lets that account sign in as the same user, with the role from the ${ROLE_SOURCE[method]} mapping.`;
 };

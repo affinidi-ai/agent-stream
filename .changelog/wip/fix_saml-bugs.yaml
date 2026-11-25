@@ -13,8 +13,9 @@ changes:
       description: >-
         The user.deleted integration event carries an OUTCOME value, removed or kept, so an
         integration can tell a removed user from an OpenID Connect or SAML user whose record is
-        kept disabled. It is listed with the user runtime variables and in the example
-        configuration.
+        kept disabled. Other user events send it empty, and the dashboard's generated user
+        samples leave it out, since they serve every user event. It is listed with the user
+        runtime variables and in the example configuration.
   changed:
     - timestamp: '2026-11-25T11:25:02.000Z'
       title: Word user delete by sign-in method and mark deleted users on the Users page
@@ -27,5 +28,15 @@ changes:
         button.
   fixed: []
   removed: []
-  security: []
+  security:
+    - timestamp: '2026-11-25T12:30:00.000Z'
+      title: Keep passkeys and provider accounts out of user integration events
+      description: >-
+        Affects 1.0.2 and earlier; fixed in the next release. The OLD_STATE and NEW_STATE of
+        user events sent the stored user record to integrations, including the user's passkey
+        credentials and the OpenID Connect or SAML account of users who were never deleted,
+        which the user API hides. They now hold the user as the user API returns it: no
+        passkeys, the sign-in method, and the provider account only on a deleted user's kept
+        record. An integration that read oidc or saml_id from a live user's state no longer
+        receives them.
   breaking: []
