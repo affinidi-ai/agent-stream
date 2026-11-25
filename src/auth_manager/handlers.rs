@@ -535,8 +535,9 @@ pub async fn delete_user(
         && let Some(notif_store) = &notification_store
     {
         let notif = notif_store.clone();
+        let outcome = deleted.outcome;
         tokio::spawn(async move {
-            crate::integrations::trigger_user_deleted(notif.as_ref(), &user_data).await;
+            crate::integrations::trigger_user_deleted(notif.as_ref(), &user_data, outcome).await;
         });
     }
 

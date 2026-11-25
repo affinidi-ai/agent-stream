@@ -453,6 +453,10 @@
                   "description": "Always 'user.deleted'"
                 },
                 {
+                  "name": "OUTCOME",
+                  "description": "What happened to the record: 'removed', or 'kept' when an OpenID Connect or SAML user's record is kept disabled"
+                },
+                {
                   "name": "TIMESTAMP",
                   "description": "ISO 8601 timestamp when the event occurred"
                 }

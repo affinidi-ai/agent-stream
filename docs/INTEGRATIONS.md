@@ -499,7 +499,9 @@ is outside the caller's token scope, or that is an `audit` integration.
 
 Gateway values: `GATEWAY_ID`, `GATEWAY_NAME`, `GATEWAY_DESCRIPTION`, `GATEWAY_DID`,
 `GATEWAY_TYPE`, `GATEWAY_STATUS`, and `GATEWAY_OLD_STATUS` on a status change. User values:
-`USER_ID`, `USERNAME`, `USER_EMAIL`, `USER_ROLE`, `USER_STATUS`.
+`USER_ID`, `USERNAME`, `USER_EMAIL`, `USER_ROLE`, `USER_STATUS`, and on `user.deleted`
+`OUTCOME`: `removed` when the record is gone, `kept` when an OIDC or SAML user's record is kept
+disabled (see [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md#deleting-an-oidc-or-saml-user)).
 
 ### Connection Point invitations
 

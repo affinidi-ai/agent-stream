@@ -316,21 +316,28 @@ record is kept `Disabled` and marked deleted, so that sign-in is refused like an
 user's (`403`, no reason shown; `user_disabled` in the OIDC log).
 
 The endpoint answers `200` with `{"outcome": "removed"}` for a user who signs in with a
-passkey, and `{"outcome": "disabled"}` for a kept record. The `user.deleted` event fires only
+passkey, and `{"outcome": "kept"}` for a kept record. The `user.deleted` event fires only
 for the call that changed the record, decided while the user lock is held, so two concurrent
-deletes fire it once and a repeat delete of a kept record answers `disabled` without firing it.
+deletes fire it once and a repeat delete of a kept record answers `kept` without firing it. The
+event's `OUTCOME` value is `removed` or `kept` (see
+[`INTEGRATIONS.md`](INTEGRATIONS.md#gateway-and-user-events)).
 
-The user API sets `has_oidc_account` to `true` for a user with an OIDC account, before and
-after delete. It tells anyone who can read users how the account signs in, and nothing more:
-the issuer and `sub` stay hidden until the record is kept. For such a user the Users and Edit
-User pages show a notice during the delete confirm step, as visible text so it also appears on
-touch devices (a shorter text in the Users table, which shows it on its own line under the row
-actions). The Users page success message says the record was kept. No OIDC wording is shown for
-other users, and SAML users get the kept-record success message without a confirm notice.
+The user API returns `sign_in_method` for every user: `passkey`, `oidc` or `saml`, before and
+after delete. It names the kind of account only: the OIDC issuer and `sub`, or the SAML user
+ID, stay hidden until the record is kept. A kept record also returns `deleted_at`.
+
+The Users and Edit User pages word the delete from the sign-in method. For an OIDC or SAML user
+the delete button title and a notice during the confirm step say the record is kept disabled
+and that approving it again lets that account sign in as the same user; the notice is visible
+text, so it also appears on touch devices (a shorter text in the Users table, on its own line
+under the row actions). The success message follows the returned outcome and names the
+provider. A passkey user sees no OIDC or SAML wording. A kept record shows a `DELETED` badge in
+the Users list, the user details and the Edit User page, the Users status filter has a
+`Deleted` choice, and a kept record has no delete button.
 
 Rejecting a pending user on the Notifications page uses the same endpoint. Only passkey
-registrations raise that notification, so the reject confirm has no OIDC notice, and its success
-message says the record was kept if the outcome is `disabled`.
+registrations raise that notification, so the reject confirm has no OIDC or SAML notice, and its
+success message says the record was kept if the outcome is `kept`.
 
 - **Cleared:** first and last name, email, department, job title, avatar link and passkeys.
   The username becomes the user id and the role goes back to `user`.
@@ -344,19 +351,29 @@ message says the record was kept if the outcome is `disabled`.
   tokens whose secret the user last received are revoked (see
   [`ACCESS_TOKENS.md`](ACCESS_TOKENS.md)), and the uploaded avatar image files are removed
   (the shared default avatar never is). A file that cannot be removed is logged and does not
-  stop the delete. The `user.deleted` integration event fires once, and the delete is logged
-  on the `audit` target as `user.deleted` with the number of tokens revoked; deleting a kept
-  record again changes nothing.
+  stop the delete. An avatar upload or SAML avatar fetch that finishes after the delete is not
+  linked to the record, and its file is removed. The `user.deleted` integration event fires
+  once, and the delete is logged on the `audit` target as `user.deleted` with the number of
+  tokens revoked; deleting a kept record again changes nothing.
 - **User limit:** a kept record does not count toward the `users` limit. Approving it again
-  gives it a seat, so that approval answers `403` when the limit is reached.
+  gives it a seat, so that approval answers `403` when the limit is reached. The seat is
+  counted and taken under the user lock, so two approvals racing for the last seat admit one.
 - **Signing in again:** an administrator sets the status back to `approved`. The next
   sign-in is the same user, with the role set from the claim or attribute mapping again. A
   role in the kept record is not used. Approving fires `user.approved` (without the welcome
   notification) as well as `user.updated`, so an integration that offboarded the person on
   `user.deleted` sees them return, and ends any session and revokes any access token still
   bound to the user.
-- Terms Acceptance Records survive user deletion; see
-  [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md).
+- **Other data stored by user id:** delete leaves it in place, for a removed user and a kept
+  record alike.
+  - Personal settings (`users/<user_id>.json` under `[storage_paths] settings`) and the
+    user's own notifications: an approved-again kept record gets them back. A removed user's
+    are left on disk; only a session of that user id reads them, and user ids are random and
+    never reused.
+  - Terms Acceptance Records survive user deletion as consent evidence; see
+    [`TERMS_AND_CONSENT.md`](TERMS_AND_CONSENT.md).
+  - The user integrations configuration (`PUT /v1/users/integrations`) is one appliance-wide
+    trigger configuration, not stored per user, so delete does not touch it.
 
 ## Sign-in throttling
 
@@ -426,7 +443,7 @@ with explicit scopes may only read them (see
 
 | Route | Permission | Purpose |
 | --- | --- | --- |
-| `GET /v1/profile` | Any signed-in user | The caller's username, role, status, profile fields, avatar path and last sign-in |
+| `GET /v1/profile` | Any signed-in user | The caller's username, role, status, sign-in method, profile fields, avatar path and last sign-in |
 | `PUT /v1/profile` | Any signed-in user; refused to an access token with explicit scopes | Update `first_name`, `last_name`, `email`, `department` and `job_title`; omitted fields are kept |
 | `POST /v1/profile/avatar` | Any signed-in user; refused to an access token with explicit scopes | Upload an avatar as multipart field `avatar`; returns the updated profile |
 | `GET /v1/permissions` | Any signed-in user | The caller's permissions (see [`RBAC.md`](RBAC.md#permissions-response)) |

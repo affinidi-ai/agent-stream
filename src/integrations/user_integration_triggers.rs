@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use super::filesystem::FileSystemNotificationStore;
-use crate::auth::storage::UserData;
+use crate::auth::storage::{DeleteOutcome, UserData};
 
 /// Trigger user integrations for user.created event
 pub async fn trigger_user_created(
@@ -97,17 +97,25 @@ pub async fn trigger_user_updated(
 pub async fn trigger_user_deleted(
     integration_store: &FileSystemNotificationStore,
     user: &UserData,
+    outcome: DeleteOutcome,
 ) {
     info!("Triggering user.deleted integrations for user: {}", user.username);
+    trigger_user_integrations(integration_store, &user_deleted_values(user, outcome), "user.deleted").await;
+}
 
+/// The values of a user.deleted event: the user before deletion, and
+/// `OUTCOME`, `removed` or `kept`, saying what happened to the record.
+fn user_deleted_values(
+    user: &UserData,
+    outcome: DeleteOutcome,
+) -> HashMap<String, String> {
     let mut runtime_values = HashMap::new();
-    // For DELETE events, only OLD_STATE is populated (pre-deletion state)
     runtime_values.insert("OLD_STATE".to_string(), serde_json::to_string(&user).unwrap_or_default());
     runtime_values.insert("NEW_STATE".to_string(), String::new());
     runtime_values.insert("EVENT_TYPE".to_string(), "user.deleted".to_string());
     runtime_values.insert("TIMESTAMP".to_string(), chrono::Utc::now().to_rfc3339());
+    runtime_values.insert("OUTCOME".to_string(), outcome.as_str().to_string());
 
-    // Add user-specific variables
     runtime_values.insert("USER_ID".to_string(), user.user_id.clone());
     runtime_values.insert("USERNAME".to_string(), user.username.clone());
     runtime_values.insert(
@@ -118,8 +126,7 @@ pub async fn trigger_user_deleted(
     );
     runtime_values.insert("USER_ROLE".to_string(), format!("{}", user.role));
     runtime_values.insert("USER_STATUS".to_string(), format!("{}", user.status));
-
-    trigger_user_integrations(integration_store, &runtime_values, "user.deleted").await;
+    runtime_values
 }
 
 /// Trigger user integrations for user.login event
@@ -312,5 +319,50 @@ async fn trigger_user_integrations(
         } else {
             info!("Successfully triggered user integration: {}", integration.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::types::{UserRole, UserStatus};
+
+    fn user() -> UserData {
+        let now = chrono::Utc::now();
+        UserData {
+            user_id: "u-1".to_string(),
+            username: "alice".to_string(),
+            passkeys: Vec::new(),
+            role: UserRole::User,
+            status: UserStatus::Approved,
+            is_primary: false,
+            first_name: None,
+            last_name: None,
+            email: Some("alice@example.com".to_string()),
+            department: None,
+            job_title: None,
+            avatar_path: None,
+            created_at: now,
+            updated_at: now,
+            last_logged_in: None,
+            saml_id: None,
+            oidc: None,
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn a_user_deleted_event_says_whether_the_record_was_removed_or_kept() {
+        let removed = user_deleted_values(&user(), DeleteOutcome::Removed);
+        let kept = user_deleted_values(&user(), DeleteOutcome::Kept);
+
+        assert_eq!(removed["OUTCOME"], "removed");
+        assert_eq!(kept["OUTCOME"], "kept");
+        assert_eq!(kept["EVENT_TYPE"], "user.deleted");
+        assert_eq!(kept["USER_ID"], "u-1");
+        assert_eq!(kept["USERNAME"], "alice");
+        assert_eq!(kept["USER_EMAIL"], "alice@example.com");
+        assert_eq!(kept["NEW_STATE"], "");
+        assert!(kept["OLD_STATE"].contains("\"user_id\":\"u-1\""), "{}", kept["OLD_STATE"]);
     }
 }

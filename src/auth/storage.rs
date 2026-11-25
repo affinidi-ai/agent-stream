@@ -70,12 +70,31 @@ pub struct UserData {
 }
 
 /// What deleting a user did to the record: `Removed` when it is gone,
-/// `Disabled` when it is kept, scrubbed and refused at sign-in.
+/// `Kept` when it stays disabled, scrubbed and refused at sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeleteOutcome {
     Removed,
-    Disabled,
+    Kept,
+}
+
+impl DeleteOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::Kept => "kept",
+        }
+    }
+}
+
+/// How a user signs in to the dashboard. A user with an OpenID provider or
+/// SAML account is kept, not removed, when deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignInMethod {
+    Passkey,
+    Oidc,
+    Saml,
 }
 
 /// The result of a delete: the outcome, and whether this call changed the
@@ -108,6 +127,18 @@ fn avatar_file_name(avatar_path: Option<&str>) -> Option<std::ffi::OsString> {
 impl StorableEntity for UserData {
     fn id(&self) -> &str {
         &self.user_id
+    }
+}
+
+impl UserData {
+    pub fn sign_in_method(&self) -> SignInMethod {
+        if self.oidc.is_some() {
+            SignInMethod::Oidc
+        } else if self.saml_id.is_some() {
+            SignInMethod::Saml
+        } else {
+            SignInMethod::Passkey
+        }
     }
 }
 
@@ -469,14 +500,14 @@ impl PasskeyStorage {
 
         if user_data.deleted_at.is_some() {
             return Ok(DeleteResult {
-                outcome: DeleteOutcome::Disabled,
+                outcome: DeleteOutcome::Kept,
                 changed: false,
             });
         }
 
         let avatar_path = user_data.avatar_path.clone();
 
-        let outcome = if user_data.oidc.is_none() && user_data.saml_id.is_none() {
+        let outcome = if user_data.sign_in_method() == SignInMethod::Passkey {
             self.storage
                 .delete(&user_data.user_id)
                 .await?;
@@ -499,7 +530,7 @@ impl PasskeyStorage {
             self.save_user(&user_data)
                 .await?;
             tracing::info!(user_id = %user_data.user_id, "Disabled the record of a deleted federated user");
-            DeleteOutcome::Disabled
+            DeleteOutcome::Kept
         };
 
         self.remove_avatar_files(&user_data.user_id, avatar_path.as_deref())
@@ -617,7 +648,9 @@ impl ReloadOnPromotion for PasskeyStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeleteOutcome, DeleteResult, OidcIdentity, PasskeyStorage, UserData, UserRole, UserStatus};
+    use super::{
+        DeleteOutcome, DeleteResult, OidcIdentity, PasskeyStorage, SignInMethod, UserData, UserRole, UserStatus,
+    };
     use crate::config::{LimitDefinition, LimitExceeded, LimitsConfig};
     use crate::server::mode::ReloadOnPromotion;
     use tempfile::tempdir;
@@ -720,7 +753,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_reports_disabled_for_a_kept_record_and_again_for_a_repeat() {
+    async fn delete_reports_kept_for_a_kept_record_and_again_for_a_repeat() {
         let temp_dir = tempdir().unwrap();
         let storage = storage_in(temp_dir.path()).await;
         storage
@@ -737,11 +770,33 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(first.outcome, DeleteOutcome::Disabled);
+        assert_eq!(first.outcome, DeleteOutcome::Kept);
         assert!(first.changed);
-        assert_eq!(repeat.outcome, DeleteOutcome::Disabled);
+        assert_eq!(repeat.outcome, DeleteOutcome::Kept);
         assert!(!repeat.changed);
-        assert_eq!(serde_json::to_string(&first.outcome).unwrap(), "\"disabled\"");
+        assert_eq!(serde_json::to_string(&first.outcome).unwrap(), "\"kept\"");
+    }
+
+    #[test]
+    fn an_outcome_name_matches_its_json_value() {
+        for outcome in [DeleteOutcome::Removed, DeleteOutcome::Kept] {
+            assert_eq!(serde_json::to_string(&outcome).unwrap(), format!("\"{}\"", outcome.as_str()));
+        }
+    }
+
+    #[test]
+    fn the_sign_in_method_follows_the_provider_account_the_user_has() {
+        let mut saml = user("saml-1");
+        saml.saml_id = Some("saml-account".to_string());
+        let mut both = oidc_user("both");
+        both.saml_id = Some("saml-account".to_string());
+
+        assert_eq!(user("plain").sign_in_method(), SignInMethod::Passkey);
+        assert_eq!(saml.sign_in_method(), SignInMethod::Saml);
+        assert_eq!(oidc_user("oidc-1").sign_in_method(), SignInMethod::Oidc);
+        assert_eq!(both.sign_in_method(), SignInMethod::Oidc);
+        assert_eq!(serde_json::to_string(&SignInMethod::Passkey).unwrap(), "\"passkey\"");
+        assert_eq!(serde_json::to_string(&SignInMethod::Saml).unwrap(), "\"saml\"");
     }
 
     #[tokio::test]
@@ -781,8 +836,8 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(a.outcome, DeleteOutcome::Disabled);
-        assert_eq!(b.outcome, DeleteOutcome::Disabled);
+        assert_eq!(a.outcome, DeleteOutcome::Kept);
+        assert_eq!(b.outcome, DeleteOutcome::Kept);
     }
 
     #[tokio::test]
@@ -865,11 +920,29 @@ mod tests {
             .await
             .unwrap();
 
-        storage
+        let first = storage
+            .delete_user("saml-user")
+            .await
+            .unwrap();
+        let repeat = storage
             .delete_user("saml-user")
             .await
             .unwrap();
 
+        assert_eq!(
+            first,
+            DeleteResult {
+                outcome: DeleteOutcome::Kept,
+                changed: true
+            }
+        );
+        assert_eq!(
+            repeat,
+            DeleteResult {
+                outcome: DeleteOutcome::Kept,
+                changed: false
+            }
+        );
         let kept = storage
             .load_user_by_saml_id("saml-1")
             .await
@@ -1300,6 +1373,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_concurrent_approvals_of_kept_records_fill_only_the_one_remaining_seat() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
+        let mut second = oidc_user("oidc-2");
+        second.oidc = Some(OidcIdentity {
+            issuer: "https://idp.example.com".to_string(),
+            subject: "sub-2".to_string(),
+        });
+        storage
+            .save_user(&second)
+            .await
+            .unwrap();
+        storage
+            .delete_user("oidc-2")
+            .await
+            .unwrap();
+        let limits = users_limit(2);
+
+        let (first, other) = tokio::join!(
+            storage.update_user("oidc-1", None, Some(UserStatus::Approved), &limits),
+            storage.update_user("oidc-2", None, Some(UserStatus::Approved), &limits)
+        );
+
+        let refused: Vec<anyhow::Error> = [first, other]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0]
+                .downcast_ref::<LimitExceeded>()
+                .is_some()
+        );
+        assert_eq!(
+            storage
+                .count_toward_user_limit()
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn an_update_by_id_changes_only_that_record_when_two_share_a_username() {
         let temp_dir = tempdir().unwrap();
         let storage = storage_in(temp_dir.path()).await;
@@ -1531,6 +1647,61 @@ mod tests {
             .unwrap();
         assert_eq!(plain.avatar_path.as_deref(), Some("avatars/plain.png"));
         assert!(kept.avatar_path.is_none());
+    }
+
+    async fn save_avatar_as_the_upload_and_saml_sign_in_do(
+        storage: &PasskeyStorage,
+        dir: &std::path::Path,
+        user_id: &str,
+    ) {
+        let relative = format!("avatars/{user_id}.png");
+        write_avatar(dir, &format!("{user_id}.png")).await;
+        if !storage
+            .set_avatar_if_approved(user_id, relative.clone())
+            .await
+            .unwrap()
+        {
+            storage
+                .remove_uploaded_avatar(user_id, &relative)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_user_has_no_avatar_file_or_link_whichever_of_delete_and_avatar_save_runs_first() {
+        for avatar_saved_first in [true, false] {
+            let temp_dir = tempdir().unwrap();
+            let storage = storage_in(temp_dir.path()).await;
+            storage
+                .save_user(&oidc_user("oidc-1"))
+                .await
+                .unwrap();
+
+            if avatar_saved_first {
+                save_avatar_as_the_upload_and_saml_sign_in_do(&storage, temp_dir.path(), "oidc-1").await;
+            }
+            storage
+                .delete_user("oidc-1")
+                .await
+                .unwrap();
+            if !avatar_saved_first {
+                save_avatar_as_the_upload_and_saml_sign_in_do(&storage, temp_dir.path(), "oidc-1").await;
+            }
+
+            let kept = storage
+                .load_user_by_id("oidc-1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(kept.avatar_path.is_none(), "avatar saved first: {avatar_saved_first}");
+            assert!(
+                !temp_dir
+                    .path()
+                    .join("avatars/oidc-1.png")
+                    .exists(),
+                "avatar saved first: {avatar_saved_first}"
+            );
+        }
     }
 
     #[tokio::test]
