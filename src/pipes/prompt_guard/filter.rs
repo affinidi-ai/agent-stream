@@ -62,27 +62,21 @@ impl From<&RejectionConfig> for GuardRejection {
     }
 }
 
-/// Cached compiled regex patterns, keyed by pattern string
-static COMPILED_REGEX_CACHE: LazyLock<std::sync::Mutex<HashMap<String, Regex>>> =
+/// Cached custom regex patterns, keyed by pattern string; `None` for a pattern
+/// that did not compile, so it is compiled once rather than per request.
+static COMPILED_REGEX_CACHE: LazyLock<std::sync::Mutex<HashMap<String, Option<Regex>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn get_or_compile_regex(pattern: &str) -> Option<Regex> {
     let mut cache = COMPILED_REGEX_CACHE
         .lock()
         .ok()?;
-    if let Some(regex) = cache.get(pattern) {
-        return Some(regex.clone());
+    if let Some(cached) = cache.get(pattern) {
+        return cached.clone();
     }
-    match Regex::new(pattern) {
-        Ok(regex) => {
-            cache.insert(pattern.to_string(), regex.clone());
-            Some(regex)
-        }
-        Err(e) => {
-            warn!("Invalid prompt guard regex pattern '{}': {}", pattern, e);
-            None
-        }
-    }
+    let compiled = Regex::new(pattern).ok();
+    cache.insert(pattern.to_string(), compiled.clone());
+    compiled
 }
 
 /// Allocates stable NER IDs for detected values within a single guard pass.
@@ -596,6 +590,125 @@ pub fn apply_response_guards(
     }
 }
 
+/// Body returned when a Prompt Guard rule cannot be evaluated.
+const RULE_UNAVAILABLE_BODY: &str = r#"{"error":{"message":"Prompt Guard rule unavailable","type":"guardrail_unavailable","code":"prompt_guard_pattern_unavailable"}}"#;
+
+/// The side of a Prompt Guard a regex guard is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardSide {
+    Request,
+    Response,
+}
+
+impl GuardSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
+        }
+    }
+}
+
+/// How a rule is named in logs, errors and rejection reasons. An unlabelled
+/// custom pattern is named by its 1-based position in its guard, never by its
+/// regex, which may be written to catch secrets.
+fn rule_name(
+    rule: &RegexRule,
+    position: usize,
+) -> String {
+    match rule {
+        RegexRule::Builtin { builtin } => format!("built-in pattern '{builtin}'"),
+        RegexRule::Pattern { label: Some(label), .. } => format!("custom pattern '{label}'"),
+        RegexRule::Pattern { label: None, .. } => format!("custom pattern #{position}"),
+    }
+}
+
+/// Why `rule` cannot be evaluated, or `None` when it can. `compiles` decides
+/// whether a custom pattern compiles.
+fn rule_issue(
+    rule: &RegexRule,
+    position: usize,
+    compiles: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let name = rule_name(rule, position);
+    match rule {
+        RegexRule::Builtin { builtin } => {
+            super::definitions::builtin_issue(builtin).map(|issue| format!("{name} {}", issue.description()))
+        }
+        RegexRule::Pattern { pattern, .. } => (!compiles(pattern)).then(|| format!("{name} does not compile")),
+    }
+}
+
+/// The first rule in `config`'s request and response regex guards that cannot
+/// be evaluated: its side, and a description for logs and errors.
+fn first_rule_issue(
+    config: &PromptGuardConfig,
+    compiles: impl Fn(&str) -> bool,
+) -> Option<(GuardSide, String)> {
+    let request = config
+        .request
+        .iter()
+        .map(|guard| (GuardSide::Request, &guard.regex));
+    let response = config
+        .response
+        .iter()
+        .map(|guard| (GuardSide::Response, &guard.regex));
+    request
+        .chain(response)
+        .find_map(|(side, rules)| {
+            rules
+                .rules
+                .iter()
+                .enumerate()
+                .find_map(|(index, rule)| rule_issue(rule, index + 1, &compiles))
+                .map(|issue| (side, format!("{issue} on the {} side", side.as_str())))
+        })
+}
+
+/// Refuse a Surface save whose enabled Prompt Guard has a regex rule that
+/// cannot be evaluated: a built-in pattern that is not loaded and compiled, or
+/// a custom pattern that does not compile. Custom patterns are compiled here
+/// without being cached, so a refused save leaves nothing behind.
+pub fn validate_regex_rules(config: &PromptGuardConfig) -> Result<(), String> {
+    if !config.enabled {
+        return Ok(());
+    }
+    match first_rule_issue(config, |pattern| Regex::new(pattern).is_ok()) {
+        Some((_, issue)) => Err(format!("Prompt Guard {issue}")),
+        None => Ok(()),
+    }
+}
+
+/// When an enabled Prompt Guard has a request or response regex rule that
+/// cannot be evaluated, the side the rule is on and a 502 rejection, so the
+/// request is refused before any upstream call instead of passing unchecked.
+/// `None` when every rule can be evaluated.
+pub fn unusable_rule_rejection(config: &PromptGuardConfig) -> Option<(GuardSide, GuardRejection)> {
+    if !config.enabled {
+        return None;
+    }
+    let (side, issue) = first_rule_issue(config, |pattern| get_or_compile_regex(pattern).is_some())?;
+    warn!("Prompt guard rule unavailable, refusing the request: {issue}");
+    Some((side, rule_unavailable_rejection(&issue)))
+}
+
+/// The 502 rejection for a rule that cannot be evaluated. The guard's own
+/// `rejection` is not used: the content was not flagged.
+fn rule_unavailable_rejection(issue: &str) -> GuardRejection {
+    GuardRejection {
+        status_code: 502,
+        body: RULE_UNAVAILABLE_BODY.to_string(),
+        content_type: "application/json".to_string(),
+        reason: Some(format!("prompt guard rule unavailable: {issue}")),
+        categories: vec![RULE_UNAVAILABLE_CATEGORY.to_string()],
+    }
+}
+
+/// Rejection category token for a rule that cannot be evaluated. Rejection
+/// telemetry classifies this token rather than the reason, which names the rule
+/// (`ssn`, `credit_card`) and would otherwise read as flagged content.
+pub const RULE_UNAVAILABLE_CATEGORY: &str = "prompt_guard_pattern_unavailable";
+
 /// Apply regex guard rules to request messages.
 ///
 /// Scans `messages[].content` in an OpenAI-compatible request body.
@@ -620,6 +733,7 @@ fn apply_regex_guard_to_messages(
                     r.reason = Some(reason);
                     return GuardOutcome::Rejected(r);
                 }
+                RegexResult::Unavailable(issue) => return GuardOutcome::Rejected(rule_unavailable_rejection(&issue)),
                 RegexResult::Mask(new_content) => {
                     *content = new_content;
                     any_masked = true;
@@ -643,6 +757,9 @@ fn apply_regex_guard_to_messages(
                             r.reason = Some(reason);
                             return GuardOutcome::Rejected(r);
                         }
+                        RegexResult::Unavailable(issue) => {
+                            return GuardOutcome::Rejected(rule_unavailable_rejection(&issue));
+                        }
                         RegexResult::Mask(new_text) => {
                             *text = new_text;
                             any_masked = true;
@@ -660,11 +777,14 @@ fn apply_regex_guard_to_messages(
                     .get_mut("function")
                     .and_then(|f| f.get_mut("arguments"))
                 {
-                    match apply_regex_rules_to_text(args, rules, allocator) {
+                    match apply_regex_rules_to_tool_arguments(args, rules, allocator) {
                         RegexResult::Reject(reason) => {
                             let mut r = rejection.clone();
                             r.reason = Some(reason);
                             return GuardOutcome::Rejected(r);
+                        }
+                        RegexResult::Unavailable(issue) => {
+                            return GuardOutcome::Rejected(rule_unavailable_rejection(&issue));
                         }
                         RegexResult::Mask(new_args) => {
                             *args = new_args;
@@ -712,6 +832,7 @@ fn apply_regex_guard_to_response(
                     r.reason = Some(reason);
                     return GuardOutcome::Rejected(r);
                 }
+                RegexResult::Unavailable(issue) => return GuardOutcome::Rejected(rule_unavailable_rejection(&issue)),
                 RegexResult::Mask(new_content) => {
                     *content = new_content;
                     any_masked = true;
@@ -730,6 +851,7 @@ fn apply_regex_guard_to_response(
                     r.reason = Some(reason);
                     return GuardOutcome::Rejected(r);
                 }
+                RegexResult::Unavailable(issue) => return GuardOutcome::Rejected(rule_unavailable_rejection(&issue)),
                 RegexResult::Mask(new_content) => {
                     *content = new_content;
                     any_masked = true;
@@ -751,32 +873,198 @@ enum RegexResult {
     NoMatch,
     Reject(String),
     Mask(String),
+    /// A rule could not be evaluated; the request is refused with the 502
+    /// [`rule_unavailable_rejection`], not the guard's own rejection.
+    Unavailable(String),
+}
+
+fn is_credit_card(rule: &RegexRule) -> bool {
+    matches!(rule, RegexRule::Builtin { builtin } if builtin == "credit_card")
+}
+
+/// The order a guard applies its rules in, each with its 1-based listed
+/// position. A mask guard applies `credit_card` before its other rules, which
+/// keep their listed order: the card pattern masks a whole run of digits joined
+/// by single spaces or dashes, so a phone number, SSN or other rule cannot take
+/// part of a card before it does. Any other guard applies its rules as listed.
+fn application_order(rules: &RegexRules) -> Vec<(usize, &RegexRule)> {
+    let mut ordered: Vec<(usize, &RegexRule)> = rules
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| (index + 1, rule))
+        .collect();
+    if rules.action == GuardAction::Mask {
+        ordered.sort_by_key(|(_, rule)| !is_credit_card(rule));
+    }
+    ordered
+}
+
+/// Whether `byte` can be part of a bare JSON number.
+fn is_json_number_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
+}
+
+/// Where a replacement token lands, which decides how it is written.
+#[derive(Clone, Copy)]
+enum TokenPlace {
+    /// Plain text: the token is written as is.
+    Text,
+    /// Inside a JSON string: the token is JSON-escaped.
+    JsonString,
+    /// In place of a bare JSON value: the token is written as a JSON string.
+    JsonValue,
+}
+
+/// The ranges of `text` to replace for `matches`, each with where its token
+/// lands. In JSON tool-call arguments, a match outside a string is part of a bare
+/// number: its range covers the whole number, which is replaced by a JSON string
+/// token so the arguments still parse. `matches` are in ascending order, so the
+/// arguments are scanned once; a range overlapping the one before is dropped.
+fn replacement_ranges(
+    text: &str,
+    matches: Vec<std::ops::Range<usize>>,
+    json_arguments: bool,
+) -> Vec<(std::ops::Range<usize>, TokenPlace)> {
+    let bytes = text.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut scanned = 0;
+    let mut ranges: Vec<(std::ops::Range<usize>, TokenPlace)> = Vec::with_capacity(matches.len());
+    for mut range in matches {
+        if ranges
+            .last()
+            .is_some_and(|(previous, _)| range.start < previous.end)
+        {
+            continue;
+        }
+        let mut place = TokenPlace::Text;
+        if json_arguments {
+            for &byte in &bytes[scanned..range.start.max(scanned)] {
+                if escaped {
+                    escaped = false;
+                } else if in_string && byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = !in_string;
+                }
+            }
+            scanned = scanned.max(range.start);
+            if in_string {
+                place = TokenPlace::JsonString;
+            } else {
+                while range.start > 0 && is_json_number_byte(bytes[range.start - 1]) {
+                    range.start -= 1;
+                }
+                while range.end < bytes.len() && is_json_number_byte(bytes[range.end]) {
+                    range.end += 1;
+                }
+                place = TokenPlace::JsonValue;
+            }
+        }
+        if ranges
+            .last()
+            .is_some_and(|(previous, _)| range.start < previous.end)
+        {
+            continue;
+        }
+        ranges.push((range, place));
+    }
+    ranges
+}
+
+/// The entity name a custom rule's label gives its tokens: the label upper-cased,
+/// without `"` or `\`, so a token never needs escaping in JSON and is restored as
+/// written.
+fn token_entity(label: &str) -> String {
+    label
+        .to_uppercase()
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\'))
+        .collect()
+}
+
+/// Replace each range with its token, last first so earlier offsets stay valid.
+fn splice_tokens(
+    text: &mut String,
+    replacements: Vec<(std::ops::Range<usize>, String)>,
+) {
+    for (range, token) in replacements.into_iter().rev() {
+        text.replace_range(range, &token);
+    }
+}
+
+/// The token for one replaced value, allocated from the whole replaced text so a
+/// pseudonym and its restore value cover exactly what was removed.
+fn replacement_token(
+    value: &str,
+    place: TokenPlace,
+    redact_token: &str,
+    entity: &str,
+    mask_mode: MaskMode,
+    allocator: &mut PseudonymAllocator,
+) -> String {
+    let token = match mask_mode {
+        MaskMode::Redact => redact_token.to_string(),
+        MaskMode::Pseudonymize => allocator.token_for(entity, value),
+    };
+    let json = || serde_json::to_string(&token).unwrap_or_else(|_| format!("\"{token}\""));
+    match place {
+        TokenPlace::Text => token,
+        TokenPlace::JsonValue => json(),
+        TokenPlace::JsonString => {
+            let quoted = json();
+            quoted[1..quoted.len() - 1].to_string()
+        }
+    }
 }
 
 /// Apply all regex rules to a text string.
 ///
-/// Rules are processed sequentially — each rule operates on the output of the previous one
-/// (for mask action). For reject action, processing stops at the first match.
+/// Rules are processed sequentially in [`application_order`] — each rule operates on
+/// the output of the previous one (for mask action). For reject action, processing
+/// stops at the first match.
 fn apply_regex_rules_to_text(
     text: &str,
     rules: &RegexRules,
     allocator: &mut PseudonymAllocator,
 ) -> RegexResult {
+    apply_regex_rules(text, rules, allocator, false)
+}
+
+/// [`apply_regex_rules_to_text`] on a tool call's `arguments`; when they are
+/// JSON, a masked value outside a string is replaced by a quoted token.
+fn apply_regex_rules_to_tool_arguments(
+    arguments: &str,
+    rules: &RegexRules,
+    allocator: &mut PseudonymAllocator,
+) -> RegexResult {
+    let json_arguments = serde_json::from_str::<Value>(arguments).is_ok();
+    apply_regex_rules(arguments, rules, allocator, json_arguments)
+}
+
+fn apply_regex_rules(
+    text: &str,
+    rules: &RegexRules,
+    allocator: &mut PseudonymAllocator,
+    json_arguments: bool,
+) -> RegexResult {
     let mut current = text.to_string();
     let mut any_modified = false;
 
-    for rule in &rules.rules {
+    for (position, rule) in application_order(rules) {
         match rule {
             RegexRule::Builtin { builtin } => {
-                let ranges: Vec<(std::ops::Range<usize>, String)> =
+                let ranges: Vec<std::ops::Range<usize>> =
                     if let Some(regex) = super::definitions::get_compiled_regex(builtin) {
                         regex
                             .find_iter(&current)
-                            .map(|m| (m.range(), m.as_str().to_string()))
+                            .map(|m| m.range())
                             .collect()
                     } else {
-                        warn!("Prompt guard: built-in pattern '{}' not found in definitions — skipping", builtin);
-                        continue;
+                        let issue = rule_issue(rule, position, |_| true).unwrap_or_else(|| rule_name(rule, position));
+                        warn!("Prompt guard: {issue} — refusing");
+                        return RegexResult::Unavailable(issue);
                     };
                 let label = super::definitions::get_pattern_definition(builtin)
                     .map(|d| d.label.as_str())
@@ -790,21 +1078,25 @@ fn apply_regex_rules_to_text(
                         }
                         GuardAction::Mask => {
                             let entity = builtin.to_uppercase();
+                            let redact_token = format!("<{entity}>");
                             // Allocate in reading order, then splice in reverse
                             // so earlier byte offsets stay valid.
-                            let replacements: Vec<(std::ops::Range<usize>, String)> = ranges
-                                .into_iter()
-                                .map(|(range, value)| {
-                                    let token = match rules.mask_mode {
-                                        MaskMode::Redact => format!("<{entity}>"),
-                                        MaskMode::Pseudonymize => allocator.token_for(&entity, &value),
-                                    };
-                                    (range, token)
-                                })
-                                .collect();
-                            for (range, token) in replacements.into_iter().rev() {
-                                current.replace_range(range, &token);
-                            }
+                            let replacements: Vec<(std::ops::Range<usize>, String)> =
+                                replacement_ranges(&current, ranges, json_arguments)
+                                    .into_iter()
+                                    .map(|(range, place)| {
+                                        let token = replacement_token(
+                                            &current[range.clone()],
+                                            place,
+                                            &redact_token,
+                                            &entity,
+                                            rules.mask_mode,
+                                            allocator,
+                                        );
+                                        (range, token)
+                                    })
+                                    .collect();
+                            splice_tokens(&mut current, replacements);
                             any_modified = true;
                         }
                     }
@@ -812,47 +1104,53 @@ fn apply_regex_rules_to_text(
             }
             RegexRule::Pattern { pattern, label } => {
                 if let Some(regex) = get_or_compile_regex(pattern) {
-                    let ranges: Vec<(std::ops::Range<usize>, String)> = regex
+                    let ranges: Vec<std::ops::Range<usize>> = regex
                         .find_iter(&current)
-                        .map(|m| (m.range(), m.as_str().to_string()))
+                        .map(|m| m.range())
                         .collect();
 
                     if !ranges.is_empty() {
                         match rules.action {
                             GuardAction::Reject => {
-                                let rule_name = label
-                                    .as_deref()
-                                    .unwrap_or(pattern);
-                                info!("Prompt guard: custom pattern '{}' matched — rejecting", rule_name);
-                                return RegexResult::Reject(format!("Matched pattern '{rule_name}'"));
+                                let name = rule_name(rule, position);
+                                info!("Prompt guard: {name} matched — rejecting");
+                                return RegexResult::Reject(format!("Matched {name}"));
                             }
                             GuardAction::Mask => {
-                                let redact_token = label
-                                    .as_deref()
-                                    .map(|l| format!("<{}>", l.to_uppercase()))
-                                    .unwrap_or_else(|| "<MASKED>".to_string());
                                 let entity = label
                                     .as_deref()
-                                    .map(|l| l.to_uppercase())
+                                    .map(token_entity)
                                     .unwrap_or_else(|| "CUSTOM".to_string());
+                                let redact_token = if label.is_some() {
+                                    format!("<{entity}>")
+                                } else {
+                                    "<MASKED>".to_string()
+                                };
                                 // Allocate in reading order, then splice in reverse.
-                                let replacements: Vec<(std::ops::Range<usize>, String)> = ranges
-                                    .into_iter()
-                                    .map(|(range, value)| {
-                                        let token = match rules.mask_mode {
-                                            MaskMode::Redact => redact_token.clone(),
-                                            MaskMode::Pseudonymize => allocator.token_for(&entity, &value),
-                                        };
-                                        (range, token)
-                                    })
-                                    .collect();
-                                for (range, token) in replacements.into_iter().rev() {
-                                    current.replace_range(range, &token);
-                                }
+                                let replacements: Vec<(std::ops::Range<usize>, String)> =
+                                    replacement_ranges(&current, ranges, json_arguments)
+                                        .into_iter()
+                                        .map(|(range, place)| {
+                                            let token = replacement_token(
+                                                &current[range.clone()],
+                                                place,
+                                                &redact_token,
+                                                &entity,
+                                                rules.mask_mode,
+                                                allocator,
+                                            );
+                                            (range, token)
+                                        })
+                                        .collect();
+                                splice_tokens(&mut current, replacements);
                                 any_modified = true;
                             }
                         }
                     }
+                } else {
+                    let issue = format!("{} does not compile", rule_name(rule, position));
+                    warn!("Prompt guard: {issue} — refusing");
+                    return RegexResult::Unavailable(issue);
                 }
             }
         }
@@ -874,10 +1172,12 @@ mod tests {
     const TEST_DEFINITIONS: &str = r#"{
         "defined_patterns": [
             {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\\b"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\d(?:[ -]?\\d){13,}|(?-u:\\b)4[0-9]{12}(?-u:\\b)"},
             {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
-            {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "\\b(?:(?:\\+1|1)[-. ]?)?(?:\\([2-9]\\d{2}\\)|[2-9]\\d{2})[-. ]?\\d{3}[-. ]?\\d{4}\\b"},
-            {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"}
+            {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
+            {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
+            {"key": "street_address", "label": "Street Address", "icon": "fa-map-marker-alt", "description": "Address", "regex": "\\d{1,5}\\s\\w.\\s(\\b\\w*\\b\\s){1,2}\\w*.?"},
+            {"key": "broken", "label": "Broken", "icon": "fa-ban", "description": "Does not compile", "regex": "(?!x)y"}
         ]
     }"#;
 
@@ -998,7 +1298,7 @@ mod tests {
             GuardOutcome::Rejected(r) => {
                 assert_eq!(r.status_code, 400);
                 assert_eq!(r.body, "Credentials detected");
-                assert_eq!(r.reason.as_deref(), Some("Matched pattern 'credentials'"));
+                assert_eq!(r.reason.as_deref(), Some("Matched custom pattern 'credentials'"));
             }
             _ => panic!("Expected rejection"),
         }
@@ -1652,6 +1952,82 @@ mod tests {
     }
 
     #[test]
+    fn masking_a_number_in_tool_call_arguments_keeps_them_valid_json() {
+        init_test_definitions();
+        for mask_mode in [MaskMode::Redact, MaskMode::Pseudonymize] {
+            let mut guards = mask_guard(&["credit_card"]);
+            guards[0].regex.mask_mode = mask_mode;
+            let arguments =
+                r#"{"order_id": 12345678901234567, "note": "card 4545 4545 4545 4545", "ids": [45454545454545454]}"#;
+            let mut body = json!({
+                "messages": [
+                    { "role": "assistant", "content": Value::Null, "tool_calls": [
+                        { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                    ] }
+                ]
+            });
+
+            assert!(matches!(apply_request_guards(&mut body, &guards), GuardOutcome::Masked));
+
+            let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .expect("arguments stay a string");
+            let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+            for (field, value) in [("order_id", &parsed["order_id"]), ("ids", &parsed["ids"][0])] {
+                let token = value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{field} is masked as a string: {masked}"));
+                assert!(token.contains("CREDIT_CARD"), "{field}: {masked}");
+            }
+            let note = parsed["note"]
+                .as_str()
+                .expect("note stays a string");
+            assert!(note.starts_with("card ") && note.contains("CREDIT_CARD"), "{masked}");
+            assert!(!masked.contains("4545 4545"), "{masked}");
+        }
+    }
+
+    #[test]
+    fn masking_part_of_a_json_number_in_tool_call_arguments_replaces_the_whole_number() {
+        init_test_definitions();
+        let arguments = r#"{"a": -4545454545454545, "b": 4545454545454545.25, "c": 0.4545454545454545, "e": "x"}"#;
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &mask_guard(&["credit_card"])), GuardOutcome::Masked));
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+        for field in ["a", "b", "c"] {
+            assert_eq!(parsed[field], "<CREDIT_CARD>", "{field}: {masked}");
+        }
+        assert_eq!(parsed["e"], "x", "{masked}");
+    }
+
+    #[test]
+    fn masking_tool_call_arguments_that_are_not_json_leaves_tokens_unquoted() {
+        init_test_definitions();
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": "card 4545454545454545" } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &mask_guard(&["credit_card"])), GuardOutcome::Masked));
+
+        assert_eq!(body["messages"][0]["tool_calls"][0]["function"]["arguments"], "card <CREDIT_CARD>");
+    }
+
+    #[test]
     fn rehydrate_response_restores_tool_call_arguments() {
         let mut map = RehydrationMap::new();
         map.insert("[PERSON_NER_001]".to_string(), "Jane Doe".to_string());
@@ -1692,6 +2068,137 @@ mod tests {
             .unwrap();
         assert!(content.contains("a@b.com"));
         assert!(!content.contains("[EMAIL_NER_001]"));
+    }
+
+    #[test]
+    fn pseudonymizing_numbers_in_tool_call_arguments_restores_each_whole_number() {
+        init_test_definitions();
+        let mut alloc = PseudonymAllocator::default();
+        let guards = pseudonymize_guard(&["credit_card"]);
+        let arguments = r#"{"a": -4545454545454545, "b": 4545454545454545.25, "c": -122.41941550000001, "d": 4545454545454545.12345678901234}"#;
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                ] }
+            ]
+        });
+
+        apply_request_guards_into(&mut body, &guards, &mut alloc);
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+        let map = alloc.rehydration_map();
+        let restored = |field: &str| {
+            let token = parsed[field]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} is a token: {masked}"));
+            map.get(token)
+                .cloned()
+                .unwrap_or_else(|| panic!("{field} token {token} has a restore value"))
+        };
+        assert_ne!(parsed["a"], parsed["b"], "distinct numbers get distinct NER IDs: {masked}");
+        assert_eq!(restored("a"), "-4545454545454545");
+        assert_eq!(restored("b"), "4545454545454545.25");
+        assert_eq!(restored("c"), "-122.41941550000001");
+        assert_eq!(restored("d"), "4545454545454545.12345678901234");
+        assert_eq!(map.len(), 4, "a number holding two matches gets one NER ID, with no orphan: {map:?}");
+    }
+
+    fn custom_mask_guard(
+        pattern: &str,
+        label: &str,
+        mask_mode: MaskMode,
+    ) -> Vec<RequestGuard> {
+        vec![RequestGuard {
+            regex: RegexRules {
+                action: GuardAction::Mask,
+                mask_mode,
+                restore_in_response: mask_mode == MaskMode::Pseudonymize,
+                link_pronouns: false,
+                rules: vec![RegexRule::Pattern {
+                    pattern: pattern.to_string(),
+                    label: Some(label.to_string()),
+                }],
+            },
+            rejection: None,
+        }]
+    }
+
+    #[test]
+    fn a_label_with_quotes_or_backslashes_keeps_tool_call_arguments_valid() {
+        let guards = custom_mask_guard(r"\d{17}", r#"Acct "ID" \x"#, MaskMode::Redact);
+        let arguments = r#"{"order": 12345678901234567, "note": "id 12345678901234567"}"#;
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &guards), GuardOutcome::Masked));
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+        assert_eq!(parsed["order"], "<ACCT ID X>", "{masked}");
+        assert_eq!(parsed["note"], "id <ACCT ID X>", "{masked}");
+    }
+
+    #[test]
+    fn a_pseudonym_from_a_label_with_quotes_is_restored_in_tool_call_arguments() {
+        let mut alloc = PseudonymAllocator::default();
+        let guards = custom_mask_guard(r"\d{17}", r#"Acct "ID""#, MaskMode::Pseudonymize);
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": r#"{"order": 12345678901234567}"# } }
+                ] }
+            ]
+        });
+
+        apply_request_guards_into(&mut body, &guards, &mut alloc);
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string")
+            .to_string();
+        let mut resp = json!({
+            "choices": [
+                { "message": { "content": Value::Null, "tool_calls": [
+                    { "function": { "arguments": masked } }
+                ] } }
+            ]
+        });
+        assert!(rehydrate_response(&mut resp, &alloc.rehydration_map()));
+        let restored = resp["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        assert_eq!(restored, r#"{"order": "12345678901234567"}"#);
+    }
+
+    #[test]
+    fn many_matches_in_one_long_json_number_are_replaced_once() {
+        let digits = "7".repeat(3000);
+        let guards = custom_mask_guard(r"\d{3}", "group", MaskMode::Redact);
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": format!(r#"{{"n": 0.{digits}}}"#) } }
+                ] }
+            ]
+        });
+
+        assert!(matches!(apply_request_guards(&mut body, &guards), GuardOutcome::Masked));
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        assert_eq!(masked, r#"{"n": "<GROUP>"}"#);
     }
 
     #[test]
@@ -1741,5 +2248,301 @@ mod tests {
         assert!(matches!(result, GuardOutcome::Rejected(_)));
         assert!(logs.contains("custom pattern 'credentials' matched"), "{logs}");
         assert!(!logs.contains("hunter2"), "a log holds the matched value: {logs}");
+    }
+
+    #[tokio::test]
+    async fn rejecting_an_unlabelled_custom_pattern_names_it_by_position_not_by_its_regex() {
+        let regex = r"secret-[0-9]{4}";
+        let guards = vec![RequestGuard {
+            regex: RegexRules {
+                action: GuardAction::Reject,
+                mask_mode: MaskMode::Redact,
+                restore_in_response: false,
+                link_pronouns: false,
+                rules: vec![
+                    RegexRule::Pattern {
+                        pattern: "never-matches-here".to_string(),
+                        label: None,
+                    },
+                    RegexRule::Pattern {
+                        pattern: regex.to_string(),
+                        label: None,
+                    },
+                ],
+            },
+            rejection: None,
+        }];
+        let mut body = make_request("Use secret-1234 now");
+
+        let (logs, result) =
+            crate::observability::log_capture::capture_logs(async { apply_request_guards(&mut body, &guards) }).await;
+
+        match result {
+            GuardOutcome::Rejected(r) => assert_eq!(r.reason.as_deref(), Some("Matched custom pattern #2")),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        assert!(logs.contains("custom pattern #2 matched"), "{logs}");
+        assert!(!logs.contains(regex), "a log holds the regex: {logs}");
+    }
+
+    fn mask_guard(builtins: &[&str]) -> Vec<RequestGuard> {
+        vec![RequestGuard {
+            regex: RegexRules {
+                action: GuardAction::Mask,
+                mask_mode: MaskMode::Redact,
+                restore_in_response: false,
+                link_pronouns: false,
+                rules: builtins
+                    .iter()
+                    .map(|b| RegexRule::Builtin { builtin: b.to_string() })
+                    .collect(),
+            },
+            rejection: None,
+        }]
+    }
+
+    #[test]
+    fn a_mask_guard_masks_a_card_and_the_number_written_right_after_it_as_one_card() {
+        init_test_definitions();
+        for (other, text) in
+            [("ssn", "4545 4545 4545 4545 123-45-6789"), ("phone_number", "4545 4545 4545 4545 212-555-1234")]
+        {
+            for rules in [["credit_card", other], [other, "credit_card"]] {
+                let mut body = make_request(text);
+                assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+                assert_eq!(body["messages"][0]["content"], "<CREDIT_CARD>", "{text:?}, rules in order {rules:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_mask_guard_masks_an_international_phone_number_and_the_card_after_it_as_one_card() {
+        init_test_definitions();
+        for phone in ["+1 415 555 0100", "+65 6123 4567"] {
+            for card in ["4545 4545 4545 4545", "4545454545454545"] {
+                for rules in [["phone_number", "credit_card"], ["credit_card", "phone_number"]] {
+                    let mut body = make_request(&format!("{phone} {card}"));
+                    assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+                    assert_eq!(
+                        body["messages"][0]["content"], "+<CREDIT_CARD>",
+                        "{phone} then card {card:?}, rules in order {rules:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_mask_guard_with_credit_card_still_masks_a_phone_number_and_ssn_on_their_own() {
+        init_test_definitions();
+        let mut body = make_request("Call +65 6123 4567, SSN 123-45-6789");
+        let rules = mask_guard(&["phone_number", "ssn", "credit_card"]);
+        assert!(matches!(apply_request_guards(&mut body, &rules), GuardOutcome::Masked));
+        assert_eq!(body["messages"][0]["content"], "Call <PHONE_NUMBER>, SSN <SSN>");
+
+        let mut long_number = make_request("Call +49 1512 3456 7890");
+        assert!(matches!(apply_request_guards(&mut long_number, &rules), GuardOutcome::Masked));
+        assert_eq!(long_number["messages"][0]["content"], "Call +<CREDIT_CARD>");
+    }
+
+    #[test]
+    fn a_mask_guard_masks_a_whole_card_before_street_address_can_take_its_last_group() {
+        init_test_definitions();
+        for rules in [["credit_card", "street_address"], ["street_address", "credit_card"]] {
+            for card in ["4545 4545 4545 4545", "4545454545454545"] {
+                let mut body = make_request(&format!("{card} is my card"));
+                assert!(matches!(apply_request_guards(&mut body, &mask_guard(&rules)), GuardOutcome::Masked));
+                assert_eq!(
+                    body["messages"][0]["content"], "<CREDIT_CARD> is my card",
+                    "card {card:?}, rules in order {rules:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reject_guard_keeps_its_rule_order() {
+        init_test_definitions();
+        for (rules, expected) in
+            [(["ssn", "credit_card"], "US SSN detected"), (["credit_card", "ssn"], "Credit Card detected")]
+        {
+            let guards = vec![RequestGuard {
+                regex: RegexRules {
+                    action: GuardAction::Reject,
+                    mask_mode: MaskMode::Redact,
+                    restore_in_response: false,
+                    link_pronouns: false,
+                    rules: rules
+                        .iter()
+                        .map(|b| RegexRule::Builtin { builtin: b.to_string() })
+                        .collect(),
+                },
+                rejection: None,
+            }];
+            let mut body = make_request("4545 4545 4545 4545 and 123-45-6789");
+            match apply_request_guards(&mut body, &guards) {
+                GuardOutcome::Rejected(rejection) => {
+                    assert_eq!(rejection.reason.as_deref(), Some(expected), "rules in order {rules:?}")
+                }
+                other => panic!("expected a rejection, got {other:?}"),
+            }
+        }
+    }
+
+    // === Unusable rules ===
+
+    fn prompt_guard_with(
+        enabled: bool,
+        request_rule: Option<serde_json::Value>,
+        response_rule: Option<serde_json::Value>,
+    ) -> PromptGuardConfig {
+        let guard = |rule: serde_json::Value| json!({ "regex": { "action": "reject", "rules": [rule] } });
+        serde_json::from_value(json!({
+            "enabled": enabled,
+            "request": request_rule.map(guard).into_iter().collect::<Vec<_>>(),
+            "response": response_rule.map(guard).into_iter().collect::<Vec<_>>(),
+        }))
+        .expect("prompt guard config parses")
+    }
+
+    fn assert_rule_unavailable(
+        config: &PromptGuardConfig,
+        expected_side: GuardSide,
+        expected_issue: &str,
+    ) {
+        let (side, rejection) = unusable_rule_rejection(config).expect("an unusable rule refuses the request");
+        assert_eq!(side, expected_side);
+        assert_eq!(rejection.status_code, 502);
+        let body: Value = serde_json::from_str(&rejection.body).expect("rejection body is JSON");
+        assert_eq!(body["error"]["type"], "guardrail_unavailable");
+        assert_eq!(body["error"]["code"], "prompt_guard_pattern_unavailable");
+        assert_eq!(rejection.categories, vec![RULE_UNAVAILABLE_CATEGORY.to_string()]);
+        assert_eq!(rejection.reason, Some(format!("prompt guard rule unavailable: {expected_issue}")));
+    }
+
+    #[test]
+    fn a_rule_naming_a_builtin_that_did_not_compile_refuses_the_request_on_either_side() {
+        init_test_definitions();
+        let request = prompt_guard_with(true, Some(json!({ "builtin": "broken" })), None);
+        assert_rule_unavailable(
+            &request,
+            GuardSide::Request,
+            "built-in pattern 'broken' did not compile on the request side",
+        );
+        let response = prompt_guard_with(true, None, Some(json!({ "builtin": "broken" })));
+        assert_rule_unavailable(
+            &response,
+            GuardSide::Response,
+            "built-in pattern 'broken' did not compile on the response side",
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_an_unknown_builtin_refuses_the_request_on_either_side() {
+        init_test_definitions();
+        let request = prompt_guard_with(true, Some(json!({ "builtin": "not_a_pattern" })), None);
+        assert_rule_unavailable(
+            &request,
+            GuardSide::Request,
+            "built-in pattern 'not_a_pattern' is not defined on the request side",
+        );
+        let response = prompt_guard_with(true, None, Some(json!({ "builtin": "not_a_pattern" })));
+        assert_rule_unavailable(
+            &response,
+            GuardSide::Response,
+            "built-in pattern 'not_a_pattern' is not defined on the response side",
+        );
+    }
+
+    #[test]
+    fn a_custom_pattern_that_does_not_compile_refuses_the_request_without_naming_its_regex() {
+        init_test_definitions();
+        let request = prompt_guard_with(true, Some(json!({ "pattern": "(?!x)y", "label": "lookahead" })), None);
+        assert_rule_unavailable(
+            &request,
+            GuardSide::Request,
+            "custom pattern 'lookahead' does not compile on the request side",
+        );
+        let response = prompt_guard_with(true, None, Some(json!({ "pattern": "(?!secret)y" })));
+        assert_rule_unavailable(
+            &response,
+            GuardSide::Response,
+            "custom pattern #1 does not compile on the response side",
+        );
+    }
+
+    #[test]
+    fn usable_rules_and_a_disabled_prompt_guard_refuse_nothing() {
+        init_test_definitions();
+        let usable = prompt_guard_with(true, Some(json!({ "builtin": "ssn" })), Some(json!({ "pattern": r"\d+" })));
+        assert!(unusable_rule_rejection(&usable).is_none());
+        assert_eq!(validate_regex_rules(&usable), Ok(()));
+        let disabled = prompt_guard_with(false, Some(json!({ "builtin": "broken" })), None);
+        assert!(unusable_rule_rejection(&disabled).is_none());
+        assert_eq!(validate_regex_rules(&disabled), Ok(()));
+    }
+
+    #[test]
+    fn saving_unusable_rules_is_refused_naming_the_rule() {
+        init_test_definitions();
+        for (config, expected) in [
+            (
+                prompt_guard_with(true, Some(json!({ "builtin": "not_a_pattern" })), None),
+                "Prompt Guard built-in pattern 'not_a_pattern' is not defined on the request side",
+            ),
+            (
+                prompt_guard_with(true, None, Some(json!({ "builtin": "broken" }))),
+                "Prompt Guard built-in pattern 'broken' did not compile on the response side",
+            ),
+            (
+                prompt_guard_with(true, Some(json!({ "pattern": "(?!x)y", "label": "lookahead" })), None),
+                "Prompt Guard custom pattern 'lookahead' does not compile on the request side",
+            ),
+        ] {
+            assert_eq!(validate_regex_rules(&config), Err(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn a_refused_save_does_not_cache_its_custom_pattern() {
+        let pattern = "(?!refused-save-only)y";
+        let config = prompt_guard_with(true, Some(json!({ "pattern": pattern })), None);
+        assert!(validate_regex_rules(&config).is_err());
+        let cached = COMPILED_REGEX_CACHE
+            .lock()
+            .expect("cache lock")
+            .contains_key(pattern);
+        assert!(!cached, "a refused save left its pattern in the regex cache");
+    }
+
+    #[test]
+    fn applying_a_rule_that_cannot_be_evaluated_refuses_with_the_unavailable_rejection() {
+        init_test_definitions();
+        for (rule, issue) in [
+            (RegexRule::Builtin { builtin: "broken".to_string() }, "built-in pattern 'broken' did not compile"),
+            (
+                RegexRule::Builtin {
+                    builtin: "not_a_pattern".to_string(),
+                },
+                "built-in pattern 'not_a_pattern' is not defined",
+            ),
+            (
+                RegexRule::Pattern {
+                    pattern: "(?!x)y".to_string(),
+                    label: None,
+                },
+                "custom pattern #1 does not compile",
+            ),
+        ] {
+            let mut body = make_request("Summarize the release notes");
+            match apply_request_guards(&mut body, &reject_guard(rule)) {
+                GuardOutcome::Rejected(rejection) => {
+                    assert_eq!(rejection.status_code, 502);
+                    assert_eq!(rejection.categories, vec![RULE_UNAVAILABLE_CATEGORY.to_string()]);
+                    assert_eq!(rejection.reason, Some(format!("prompt guard rule unavailable: {issue}")));
+                }
+                other => panic!("expected the unusable rule to be refused, got {other:?}"),
+            }
+        }
     }
 }

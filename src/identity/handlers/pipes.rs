@@ -364,11 +364,6 @@ pub async fn create_pipe(
     if !pipe_allowed(&pipe, tenant_context(&context), resource_scope(&scope)) {
         return Err(AppError::Forbidden(format!("pipe id '{}' is outside this token's permitted namespace", pipe.id)));
     }
-    info!(
-        "📋 Pipe config: {}",
-        serde_json::to_string_pretty(&pipe).unwrap_or_else(|_| "Failed to serialize".to_string())
-    );
-
     let pipe_store = state
         .pipe_store
         .as_ref()

@@ -283,14 +283,14 @@ async fn async_main() -> Result<()> {
         .validate()
         .context("Bootstrap configuration validation failed")?;
 
-    // Initialize prompt guard pattern definitions from config file
-    if let Err(e) = crate::pipes::prompt_guard::init_definitions(
+    // Initialize prompt guard pattern definitions from config file; problems
+    // are reported once logging is up.
+    let prompt_guard_load_error = crate::pipes::prompt_guard::init_definitions(
         &bootstrap_config
             .config_files
             .prompt_guard,
-    ) {
-        warn!("Prompt guard definitions not loaded: {} — built-in patterns will be unavailable", e);
-    }
+    )
+    .err();
 
     let config = load_configuration(&bootstrap_config)
         .await
@@ -308,6 +308,7 @@ async fn async_main() -> Result<()> {
     for warning in &bootstrap_config.load_warnings {
         warn!("{}", warning);
     }
+    crate::pipes::prompt_guard::report_definition_problems(prompt_guard_load_error.as_deref());
 
     // Load resource-limit configuration into the process-global. Placed after
     // logging init so a missing/misconfigured path is visible. A missing or

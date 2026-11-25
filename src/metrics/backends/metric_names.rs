@@ -70,6 +70,9 @@ pub mod prom {
     // Storage
     pub const STORAGE_LOAD_ERRORS_TOTAL: &str = "agent_stream_storage_load_errors_total";
 
+    // Prompt Guard
+    pub const PROMPT_GUARD_PATTERN_ERRORS_TOTAL: &str = "agent_stream_prompt_guard_pattern_errors_total";
+
     // LLM cross-provider failover — only reachable via the live request path
     // (run_failover_if_needed in pipes/executor.rs), which no inline unit test
     // exercises, so these are unreachable (and thus flagged dead_code) in the

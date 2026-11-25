@@ -825,7 +825,20 @@ fn record_front_door_block(
     error_body: &Value,
 ) {
     let error = error_body.to_string();
-    trigger_block_event(state, pipe, stage, code, &error);
+    trigger_block_event(state, pipe, stage, code, &error, &[]);
+    capture_block_record(resolved_pipe, request, None, stage, &error, Vec::new());
+}
+
+/// Write the signed governance `Block` record of a request refused at `stage`,
+/// when the surface records governance.
+fn capture_block_record(
+    resolved_pipe: &PipeConfig,
+    request: &Value,
+    caller_identity: Option<String>,
+    stage: &str,
+    error: &str,
+    categories: Vec<String>,
+) {
     if let Some(gov) = resolved_pipe
         .governance_recording
         .as_ref()
@@ -837,36 +850,88 @@ fn record_front_door_block(
             resolved_pipe.id.clone(),
             resolved_pipe.name.clone(),
             Some(request.clone()),
-            None,
+            caller_identity,
             crate::governance::InteractionOutcome::Blocked {
                 stage: stage.to_string(),
-                reason: Some(error.clone()),
+                reason: Some(error.to_string()),
                 input: None,
                 output: None,
-                categories: Vec::new(),
+                categories,
             },
             gov.export.clone(),
         );
     }
 }
 
+/// The 502 answer to a request refused because the Surface's Prompt Guard has
+/// a rule that cannot be evaluated, `None` for any other error. Records the
+/// block like the buffered path does: a governance `Block` record, a
+/// `pipe.error`, and (with metrics on) the classified rejection.
+fn prompt_guard_unavailable_refusal(
+    state: &PipeHandlerState,
+    pipe: &PipeConfig,
+    resolved_pipe: &PipeConfig,
+    team_ctx: Option<&crate::teams::gate::TeamUsageContext>,
+    e: &crate::pipes::executor::PipeError,
+) -> Option<Response> {
+    let crate::pipes::executor::PipeError::PromptGuardRejected {
+        status_code,
+        body,
+        rejection: Some(meta),
+        ..
+    } = e
+    else {
+        return None;
+    };
+    if meta.source != crate::pipes::executor::PROMPT_GUARD_UNAVAILABLE_SOURCE {
+        return None;
+    }
+    let error_body: Value = serde_json::from_str(body).ok()?;
+    let stage = meta.stage.label();
+    let code = crate::pipes::prompt_guard::RULE_UNAVAILABLE_CATEGORY;
+    let categories = rejection_categories(Some(meta));
+    let member_id = team_ctx.map(|ctx| ctx.member_id.clone());
+    trigger_block_event(state, pipe, stage, code, body, &categories);
+    capture_block_record(resolved_pipe, &Value::Null, member_id.clone(), stage, body, categories.clone());
+    if pipe.enable_metrics {
+        let team_ids = team_ctx
+            .map(|ctx| {
+                ctx.teams
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let pipe_id = pipe.id.clone();
+        tokio::spawn(async move {
+            crate::telemetry::record_rejection(&pipe_id, stage, &categories, member_id.as_deref(), &team_ids).await;
+        });
+    }
+    let status = StatusCode::from_u16(*status_code).unwrap_or(StatusCode::BAD_GATEWAY);
+    Some((status, Json(error_body)).into_response())
+}
+
 /// Fire `pipe`'s `pipe.error` integrations for a request refused at `stage`
-/// with the machine `code`, off the request path.
+/// with the machine `code` and rejection `categories`, off the request path.
 fn trigger_block_event(
     state: &PipeHandlerState,
     pipe: &PipeConfig,
     stage: &str,
     code: &str,
     error: &str,
+    categories: &[String],
 ) {
     if let Some(store) = state
         .notification_store
         .clone()
     {
         let integrations = pipe.integrations.clone();
-        let event = crate::integrations::pipe_integration_triggers::PipeErrorEvent::new(pipe, error.to_string())
+        let mut event = crate::integrations::pipe_integration_triggers::PipeErrorEvent::new(pipe, error.to_string())
             .at_stage(stage)
             .with_code(code);
+        if !categories.is_empty() {
+            event = event.with_categories(categories);
+        }
         tokio::spawn(async move {
             crate::integrations::trigger_pipe_error(&store, &integrations, &event).await;
         });
@@ -3359,6 +3424,11 @@ async fn handle_chat_completions_inner(
                         pipe_name.clone(),
                     );
                 }
+                if let Some(refusal) =
+                    prompt_guard_unavailable_refusal(&state, &_pipe, &resolved_pipe, team_ctx.as_ref(), &e)
+                {
+                    return refusal;
+                }
                 let (status, code) = match &e {
                     crate::pipes::executor::PipeError::RateLimitExceeded(_) => {
                         (StatusCode::TOO_MANY_REQUESTS, "rate_limit_exceeded")
@@ -4198,7 +4268,7 @@ async fn handle_chat_completions_inner(
                     failure_metrics,
                     governance_sink.clone(),
                 );
-                trigger_block_event(&state, &_pipe, refused.stage, refused.code, &refused.body.to_string());
+                trigger_block_event(&state, &_pipe, refused.stage, refused.code, &refused.body.to_string(), &[]);
                 return refused.response;
             }
             let error_details = format!("{:?}", e);
@@ -4833,7 +4903,7 @@ async fn stream_chat_completion(
                     failure_metrics,
                     governance_sink.clone(),
                 );
-                trigger_block_event(state, pipe, refused.stage, refused.code, &refused.body.to_string());
+                trigger_block_event(state, pipe, refused.stage, refused.code, &refused.body.to_string(), &[]);
                 return refused.response;
             }
             error!("[PIPE:{}] Streaming execution failed: {:?}", pipe_id, e);
@@ -5471,7 +5541,7 @@ async fn proxy_api_get(
     // Access control (member enabled, surface→team allow-list) applies to GET
     // polling too; there is no request body, so model checks are inert. A
     // spent budget refuses the poll only when it runs on a platform key.
-    let call_budget = match crate::teams::team_pre_check(
+    let (call_budget, team_ctx) = match crate::teams::team_pre_check(
         resolved
             .team_attribution
             .as_ref(),
@@ -5490,8 +5560,15 @@ async fn proxy_api_get(
             record_front_door_block(state, &resolved, &resolved, &Value::Null, "team_gate", code, &body);
             return (status, Json(body)).into_response();
         }
-        crate::teams::TeamGateDecision::Allow(ctx) => ctx.call_budget,
-        crate::teams::TeamGateDecision::Skip => None,
+        crate::teams::TeamGateDecision::Allow(mut ctx) => {
+            crate::observability::request_context::update(|request| {
+                request
+                    .usage
+                    .set_team_context(&ctx)
+            });
+            (ctx.call_budget.take(), Some(ctx))
+        }
+        crate::teams::TeamGateDecision::Skip => (None, None),
     };
 
     let caller = caller_credentials(
@@ -5532,6 +5609,10 @@ async fn proxy_api_get(
                     &refused.body,
                 );
                 return refused.response;
+            }
+            if let Some(refusal) = prompt_guard_unavailable_refusal(state, &resolved, &resolved, team_ctx.as_ref(), &e)
+            {
+                return refusal;
             }
             let (status, code) = match &e {
                 crate::pipes::executor::PipeError::RateLimitExceeded(_) => {
@@ -5636,7 +5717,7 @@ async fn proxy_file_upload(
 
     // ── Team access gate ──
     // A spent budget refuses the upload only when it runs on a platform key.
-    let call_budget = match crate::teams::team_pre_check(
+    let (call_budget, team_ctx) = match crate::teams::team_pre_check(
         resolved
             .team_attribution
             .as_ref(),
@@ -5655,8 +5736,15 @@ async fn proxy_file_upload(
             record_front_door_block(state, &resolved, &resolved, &Value::Null, "team_gate", code, &body);
             return (status, Json(body)).into_response();
         }
-        crate::teams::TeamGateDecision::Allow(ctx) => ctx.call_budget,
-        crate::teams::TeamGateDecision::Skip => None,
+        crate::teams::TeamGateDecision::Allow(mut ctx) => {
+            crate::observability::request_context::update(|request| {
+                request
+                    .usage
+                    .set_team_context(&ctx)
+            });
+            (ctx.call_budget.take(), Some(ctx))
+        }
+        crate::teams::TeamGateDecision::Skip => (None, None),
     };
 
     let caller = caller_credentials(
@@ -5701,6 +5789,10 @@ async fn proxy_file_upload(
                     &refused.body,
                 );
                 return refused.response;
+            }
+            if let Some(refusal) = prompt_guard_unavailable_refusal(state, &resolved, &resolved, team_ctx.as_ref(), &e)
+            {
+                return refusal;
             }
             let (status, code) = match &e {
                 crate::pipes::executor::PipeError::RateLimitExceeded(_) => {

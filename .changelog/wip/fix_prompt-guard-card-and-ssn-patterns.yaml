@@ -1,0 +1,132 @@
+branch: fix/prompt-guard-card-and-ssn-patterns
+changes:
+  added:
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Report Prompt Guard patterns that cannot be used at startup
+      description: >-
+        Built-in Prompt Guard patterns that do not compile, and a prompt-guard.json that
+        does not load, are now logged at ERROR once logging is up and counted in
+        agent_stream_prompt_guard_pattern_errors_total{pattern, reason}, with reason
+        compile_failed or definitions_missing. The log line names the pattern and why it
+        did not compile, never its regex. Before, the warning was written before logging
+        started and never appeared.
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Classify unusable Prompt Guard rules as their own rejection category
+      description: >-
+        The shipped rejection taxonomy adds the category prompt_guard_unavailable, mapped
+        from source prompt_guard_unavailable and reason prompt_guard_pattern_unavailable,
+        so a refusal caused by a rule that cannot be evaluated is not counted as
+        uncategorized content. A deployed rejection_categories.json replaces the shipped
+        taxonomy whole: copy the category and its mapping from
+        config/examples/rejection_categories.example.json into it, or these refusals stay
+        uncategorized.
+  changed:
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Apply credit_card before a mask guard's other Prompt Guard rules
+      description: >-
+        A mask guard now applies the credit_card built-in before its other rules, which
+        keep their listed order, so no phone_number, ssn or street_address rule takes
+        part of a card first. A phone number, SSN or house number written right next to a
+        card is masked with it as one <CREDIT_CARD>, and an international phone number of
+        14 or more digits on its own is labelled <CREDIT_CARD>. Reject guards keep their
+        listed order. Across separate guards the order still matters: a card mask absorbs
+        an adjacent SSN before a later reject guard sees it, and a phone_number guard
+        listed first leaves part of a card unmasked.
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Refuse more ordinary text in reject guards that name credit_card
+      description: >-
+        Because credit_card now matches any run of 14 or more digits joined by single
+        spaces or dashes, a reject guard that names it refuses text such as dates written
+        next to each other (2026-11-24 2026-11-25), order IDs (ORD-20261124-000123), a
+        phone number followed by more digits (212 555 1234 2026), full-precision decimals
+        in tool-call arguments, runs of 14 or more digits inside alphanumeric IDs, and
+        long digit runs in other scripts, such as a phone number
+        written in Arabic-Indic digits (٠٠٩٧١٥٠١٢٣٤٥٦٧٨), with its rejection or the default
+        403. Put credit_card in a mask guard where such text is expected.
+    - timestamp: '2026-11-24T12:00:00.000Z'
+      title: Refuse saving a Surface whose Prompt Guard rule cannot be evaluated
+      description: >-
+        Saving a Surface or one of its Variants through the Admin API is refused with 400
+        when its enabled Prompt Guard names a built-in pattern that is not loaded or did
+        not compile, or a custom pattern that does not compile. The error names the rule;
+        an unlabelled custom pattern is named by its position, never by its regex.
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Name a matched unlabelled custom Prompt Guard rule by its position
+      description: >-
+        When an unlabelled custom pattern matches in a reject guard, the INFO log line and
+        the rejection reason now name it as custom pattern #N instead of writing its
+        regex, which may be written to catch secrets. A labelled rule's reason reads
+        Matched custom pattern 'label'.
+  fixed:
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Keep tool-call arguments valid JSON when Prompt Guard masks a number
+      description: >-
+        A request mask guard that replaced a bare JSON number in
+        tool_calls[].function.arguments, such as {"order_id": 12345678901234567},
+        produced invalid JSON. When the arguments are JSON and a match is part of a bare
+        number, the whole number, sign and decimals included, is now replaced by the
+        quoted token, so they still parse. With pseudonymize, the NER ID and its restore
+        value cover that whole number, so distinct numbers get distinct IDs. A token from a
+        custom label drops any quote or backslash, so it never needs escaping and is
+        restored as written. A restored number comes back as a JSON string.
+  removed: []
+  security:
+    - timestamp: '2026-11-23T12:00:00.000Z'
+      title: ⭐ Catch card and SSN numbers written with spaces or dashes in Prompt Guard
+      description: >-
+        Affects 1.0.2 and earlier; fixed in the next release. The built-in credit_card
+        pattern matched only digits written together, so 4545 4545 4545 4545 reached the
+        model, and the built-in ssn pattern used look-around the regex engine cannot
+        compile, so it never ran. credit_card now matches any run of 14 or more digits
+        written together or with single spaces or dashes, matched whole and with no
+        checksum, plus 13-digit Visa numbers written together; long IDs, timestamps
+        written as digits, adjacent dates, numbered lists, space-grouped amounts and
+        numeric IDs in tool-call arguments also match. credit_card has no word boundary,
+        so it matches a card in any digit script or mixing scripts, straight after CJK
+        text or a letter, and inside alphanumeric IDs. ssn and ssn_simple accept a space
+        or a dash between groups and match an ASCII-digit SSN straight after CJK or other
+        non-ASCII text, but not straight after an ASCII letter. ssn_simple also matches
+        an SSN holding any non-ASCII digit, including straight after a letter; ssn
+        matches ASCII digits only.
+        No-break spaces, tabs, double spaces, dots and en dashes between
+        digits are not caught. These fixes take effect only once the deployed
+        prompt-guard.json is replaced; see the breaking entry.
+    - timestamp: '2026-11-23T12:00:00.000Z'
+      title: Refuse requests whose Prompt Guard rule cannot be evaluated
+      description: >-
+        Affects 1.0.2 and earlier; fixed in the next release. A rule naming a built-in
+        pattern that was missing or did not compile, or a custom pattern that did not
+        compile, was skipped and the text passed through. A Surface whose enabled Prompt
+        Guard has such a rule, on either side, now refuses every request before any
+        upstream call, including text-to-speech, file upload and GET passthrough
+        requests, with 502 guardrail_unavailable and code
+        prompt_guard_pattern_unavailable, without retrying under a retry_policy. The
+        response cache runs earlier, so a semantic cache embedder still receives the
+        request text and a cache hit is still served. Realtime voice sessions run no
+        Prompt Guard and are not refused.
+    - timestamp: '2026-11-24T16:45:00.000Z'
+      title: Stop logging the whole submitted configuration when a Surface is created
+      description: >-
+        Affects 1.0.2 and earlier; fixed in the next release. Creating a Surface through
+        the Admin API wrote the whole submitted configuration to the INFO log, including
+        custom Prompt Guard regexes and any other values in it, even when the save was
+        then refused. The log now carries only the Surface id and name.
+  breaking:
+    - timestamp: '2026-11-24T13:30:00.000Z'
+      title: Replace prompt-guard.json and fix uncompilable custom Prompt Guard patterns
+      description: >-
+        An upgrade keeps the deployed prompt-guard.json, and the container image does not
+        carry the example file. Until it is replaced with
+        config/examples/prompt-guard.example.json from the release tag, merged with any
+        patterns you added, Surfaces whose rules name ssn answer every request with 502
+        prompt_guard_pattern_unavailable and their saves are refused with 400, and the
+        credit_card, ssn_simple and phone_number fixes do not apply, so spaced cards still
+        pass. Once it is replaced, reject guards that name credit_card also refuse long
+        digit runs in any script; see the changed entry on reject guards. A Surface
+        stored with a custom pattern that does not compile, which was silently skipped
+        before, now answers every request with 502 prompt_guard_pattern_unavailable and
+        refuses saves with 400: correct or remove the pattern. Before upgrading, list the
+        Surfaces through the Admin API and look for "builtin": "ssn" and for custom
+        patterns using syntax the regex engine does not support, for example look-around,
+        atomic groups or backreferences ((?=, (?!, (?<=, (?<!, (?>, \1 or \k<name>). The WARN log line and the 400 error
+        name the rule.
