@@ -905,23 +905,24 @@ fn is_json_number_byte(byte: u8) -> bool {
     byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
 }
 
-/// Replace each matched range with its token, last first so earlier offsets
-/// stay valid. In JSON tool-call arguments, a match outside a string is part of
-/// a bare number: the whole number is replaced by the quoted token, so the
-/// arguments still parse. `replacements` are in ascending order, so the arguments
-/// are scanned once.
-fn splice_tokens(
-    text: &mut String,
-    replacements: Vec<(std::ops::Range<usize>, String)>,
+/// The ranges of `text` to replace for `matches`, each with whether its token is
+/// quoted. In JSON tool-call arguments, a match outside a string is part of a
+/// bare number: its range covers the whole number, which is replaced by a quoted
+/// token so the arguments still parse. `matches` are in ascending order, so the
+/// arguments are scanned once; a range overlapping the one before is dropped.
+fn replacement_ranges(
+    text: &str,
+    matches: Vec<std::ops::Range<usize>>,
     json_arguments: bool,
-) {
+) -> Vec<(std::ops::Range<usize>, bool)> {
     let bytes = text.as_bytes();
     let mut in_string = false;
     let mut escaped = false;
     let mut scanned = 0;
-    let mut spliced: Vec<(std::ops::Range<usize>, String)> = Vec::with_capacity(replacements.len());
-    for (mut range, token) in replacements {
-        let token = if json_arguments {
+    let mut ranges: Vec<(std::ops::Range<usize>, bool)> = Vec::with_capacity(matches.len());
+    for mut range in matches {
+        let mut quoted = false;
+        if json_arguments {
             for &byte in &bytes[scanned..range.start.max(scanned)] {
                 if escaped {
                     escaped = false;
@@ -932,30 +933,55 @@ fn splice_tokens(
                 }
             }
             scanned = scanned.max(range.start);
-            if in_string {
-                token
-            } else {
+            if !in_string {
                 while range.start > 0 && is_json_number_byte(bytes[range.start - 1]) {
                     range.start -= 1;
                 }
                 while range.end < bytes.len() && is_json_number_byte(bytes[range.end]) {
                     range.end += 1;
                 }
-                format!("\"{token}\"")
+                quoted = true;
             }
-        } else {
-            token
-        };
-        if spliced
+        }
+        if ranges
             .last()
             .is_some_and(|(previous, _)| range.start < previous.end)
         {
             continue;
         }
-        spliced.push((range, token));
+        ranges.push((range, quoted));
     }
-    for (range, token) in spliced.into_iter().rev() {
+    ranges
+}
+
+/// Replace each range with its token, last first so earlier offsets stay valid.
+fn splice_tokens(
+    text: &mut String,
+    replacements: Vec<(std::ops::Range<usize>, String)>,
+) {
+    for (range, token) in replacements.into_iter().rev() {
         text.replace_range(range, &token);
+    }
+}
+
+/// The token for one replaced value, allocated from the whole replaced text so a
+/// pseudonym and its restore value cover exactly what was removed.
+fn replacement_token(
+    value: &str,
+    quoted: bool,
+    redact_token: &str,
+    entity: &str,
+    mask_mode: MaskMode,
+    allocator: &mut PseudonymAllocator,
+) -> String {
+    let token = match mask_mode {
+        MaskMode::Redact => redact_token.to_string(),
+        MaskMode::Pseudonymize => allocator.token_for(entity, value),
+    };
+    if quoted {
+        format!("\"{token}\"")
+    } else {
+        token
     }
 }
 
@@ -995,11 +1021,11 @@ fn apply_regex_rules(
     for (position, rule) in application_order(rules) {
         match rule {
             RegexRule::Builtin { builtin } => {
-                let ranges: Vec<(std::ops::Range<usize>, String)> =
+                let ranges: Vec<std::ops::Range<usize>> =
                     if let Some(regex) = super::definitions::get_compiled_regex(builtin) {
                         regex
                             .find_iter(&current)
-                            .map(|m| (m.range(), m.as_str().to_string()))
+                            .map(|m| m.range())
                             .collect()
                     } else {
                         let issue = rule_issue(rule, position, |_| true).unwrap_or_else(|| rule_name(rule, position));
@@ -1018,19 +1044,25 @@ fn apply_regex_rules(
                         }
                         GuardAction::Mask => {
                             let entity = builtin.to_uppercase();
+                            let redact_token = format!("<{entity}>");
                             // Allocate in reading order, then splice in reverse
                             // so earlier byte offsets stay valid.
-                            let replacements: Vec<(std::ops::Range<usize>, String)> = ranges
-                                .into_iter()
-                                .map(|(range, value)| {
-                                    let token = match rules.mask_mode {
-                                        MaskMode::Redact => format!("<{entity}>"),
-                                        MaskMode::Pseudonymize => allocator.token_for(&entity, &value),
-                                    };
-                                    (range, token)
-                                })
-                                .collect();
-                            splice_tokens(&mut current, replacements, json_arguments);
+                            let replacements: Vec<(std::ops::Range<usize>, String)> =
+                                replacement_ranges(&current, ranges, json_arguments)
+                                    .into_iter()
+                                    .map(|(range, quoted)| {
+                                        let token = replacement_token(
+                                            &current[range.clone()],
+                                            quoted,
+                                            &redact_token,
+                                            &entity,
+                                            rules.mask_mode,
+                                            allocator,
+                                        );
+                                        (range, token)
+                                    })
+                                    .collect();
+                            splice_tokens(&mut current, replacements);
                             any_modified = true;
                         }
                     }
@@ -1038,9 +1070,9 @@ fn apply_regex_rules(
             }
             RegexRule::Pattern { pattern, label } => {
                 if let Some(regex) = get_or_compile_regex(pattern) {
-                    let ranges: Vec<(std::ops::Range<usize>, String)> = regex
+                    let ranges: Vec<std::ops::Range<usize>> = regex
                         .find_iter(&current)
-                        .map(|m| (m.range(), m.as_str().to_string()))
+                        .map(|m| m.range())
                         .collect();
 
                     if !ranges.is_empty() {
@@ -1060,17 +1092,22 @@ fn apply_regex_rules(
                                     .map(|l| l.to_uppercase())
                                     .unwrap_or_else(|| "CUSTOM".to_string());
                                 // Allocate in reading order, then splice in reverse.
-                                let replacements: Vec<(std::ops::Range<usize>, String)> = ranges
-                                    .into_iter()
-                                    .map(|(range, value)| {
-                                        let token = match rules.mask_mode {
-                                            MaskMode::Redact => redact_token.clone(),
-                                            MaskMode::Pseudonymize => allocator.token_for(&entity, &value),
-                                        };
-                                        (range, token)
-                                    })
-                                    .collect();
-                                splice_tokens(&mut current, replacements, json_arguments);
+                                let replacements: Vec<(std::ops::Range<usize>, String)> =
+                                    replacement_ranges(&current, ranges, json_arguments)
+                                        .into_iter()
+                                        .map(|(range, quoted)| {
+                                            let token = replacement_token(
+                                                &current[range.clone()],
+                                                quoted,
+                                                &redact_token,
+                                                &entity,
+                                                rules.mask_mode,
+                                                allocator,
+                                            );
+                                            (range, token)
+                                        })
+                                        .collect();
+                                splice_tokens(&mut current, replacements);
                                 any_modified = true;
                             }
                         }
@@ -1996,6 +2033,40 @@ mod tests {
             .unwrap();
         assert!(content.contains("a@b.com"));
         assert!(!content.contains("[EMAIL_NER_001]"));
+    }
+
+    #[test]
+    fn pseudonymizing_numbers_in_tool_call_arguments_restores_each_whole_number() {
+        init_test_definitions();
+        let mut alloc = PseudonymAllocator::default();
+        let guards = pseudonymize_guard(&["credit_card"]);
+        let arguments = r#"{"a": -4545454545454545, "b": 4545454545454545.25}"#;
+        let mut body = json!({
+            "messages": [
+                { "role": "assistant", "content": Value::Null, "tool_calls": [
+                    { "type": "function", "function": { "name": "lookup", "arguments": arguments } }
+                ] }
+            ]
+        });
+
+        apply_request_guards_into(&mut body, &guards, &mut alloc);
+
+        let masked = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        let parsed: Value = serde_json::from_str(masked).unwrap_or_else(|e| panic!("{masked}: {e}"));
+        let map = alloc.rehydration_map();
+        let restored = |field: &str| {
+            let token = parsed[field]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} is a token: {masked}"));
+            map.get(token)
+                .cloned()
+                .unwrap_or_else(|| panic!("{field} token {token} has a restore value"))
+        };
+        assert_ne!(parsed["a"], parsed["b"], "distinct numbers get distinct NER IDs: {masked}");
+        assert_eq!(restored("a"), "-4545454545454545");
+        assert_eq!(restored("b"), "4545454545454545.25");
     }
 
     #[test]

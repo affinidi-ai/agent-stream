@@ -62,7 +62,8 @@ changes:
         tool_calls[].function.arguments, such as {"order_id": 12345678901234567},
         produced invalid JSON. When the arguments are JSON and a match is part of a bare
         number, the whole number, sign and decimals included, is now replaced by the
-        quoted token, so they still parse.
+        quoted token, so they still parse. With pseudonymize, the NER ID and its restore
+        value cover that whole number, so distinct numbers get distinct IDs.
   removed: []
   security:
     - timestamp: '2026-11-23T12:00:00.000Z'
