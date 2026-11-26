@@ -1,0 +1,17 @@
+branch: chore/codeql-weekly
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-19T00:00:00Z'
+      title: Scan main with CodeQL every week instead of on every PR
+      description: >-
+        CodeQL now scans Rust, JavaScript/TypeScript, Python and GitHub Actions
+        workflows once a week (Mondays 02:00 UTC) against main, through
+        pipeline-rust's reusable CodeQL workflow, and can be started on demand
+        from the Actions tab. It no longer runs on pull requests, so the slow
+        Rust analysis adds no time to PR CI. This replaces CodeQL default setup,
+        which must stay disabled.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []
