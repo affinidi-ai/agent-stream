@@ -7,16 +7,16 @@ use axum::{
     routing::{delete, get, post, put},
 };
 
-use super::{handlers, store::LlmProviderCatalog};
+use super::{handlers, refresh::CatalogRefresher, store::LlmProviderCatalog};
 use crate::auth_manager::middleware::RbacGuard;
 use crate::rbac::Feature;
 
 /// Create the LLM provider catalog API router.
 ///
-/// `refresh_url` is the published master-catalog location for the "Refresh
-/// Builtin Models" flow (`llm_catalog.refresh_url` in agent-stream.json); `None`
+/// `refresh_url` is the published catalog manifest for the "Refresh Builtin
+/// Models" flow (`llm_catalog.refresh_url` in agent-stream.json); `None`
 /// disables that action. `allow_insecure_source` (`llm_catalog.allow_insecure_source`)
-/// lets the download reach a plain http or private-network mirror.
+/// lets the downloads reach a plain http or private-network mirror.
 ///
 /// Every route needs `llm_catalog.edit`, reads included: the catalog prices
 /// every call no surface prices itself, so it moves every budget on the
@@ -30,12 +30,10 @@ pub fn create_llm_providers_router(
 ) -> Router {
     // Treat an absent or blank URL identically: the refresh action is
     // unavailable, so the dashboard hides the button rather than letting it fail.
-    let refresh_url = refresh_url.filter(|u| !u.trim().is_empty());
-    let state = handlers::LlmCatalogState {
-        catalog,
-        refresh_url,
-        allow_insecure_source,
-    };
+    let refresher = refresh_url
+        .filter(|u| !u.trim().is_empty())
+        .map(|url| Arc::new(CatalogRefresher::new(url, allow_insecure_source, &catalog)));
+    let state = handlers::LlmCatalogState { catalog, refresher };
     Router::new()
         .route("/api/v1/llm-providers", get(handlers::list_providers))
         .route("/api/v1/llm-providers", post(handlers::create_provider))
@@ -43,6 +41,7 @@ pub fn create_llm_providers_router(
         .route("/api/v1/llm-providers/custom", put(handlers::put_custom))
         .route("/api/v1/llm-providers/refresh", post(handlers::refresh_builtin).get(handlers::refresh_status))
         .route("/api/v1/llm-providers/refresh/rollback", post(handlers::rollback_builtin))
+        .route("/api/v1/llm-providers/refresh/reset", post(handlers::reset_refresh_sequence))
         .route("/api/v1/llm-providers/{enum_value}", get(handlers::get_provider))
         .route("/api/v1/llm-providers/{enum_value}", put(handlers::update_provider))
         .route("/api/v1/llm-providers/{enum_value}", delete(handlers::delete_provider))
@@ -172,6 +171,129 @@ mod tests {
             .status()
     }
 
+    async fn call(
+        app: &Router,
+        method: Method,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    type AuditEvent = std::collections::HashMap<String, String>;
+
+    /// The `security_audit` events logged on this thread while `run` runs.
+    async fn security_audit_events<T>(run: impl std::future::Future<Output = T>) -> (T, Vec<AuditEvent>) {
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+        struct Fields(AuditEvent);
+        impl Visit for Fields {
+            fn record_debug(
+                &mut self,
+                field: &Field,
+                value: &dyn std::fmt::Debug,
+            ) {
+                self.0
+                    .insert(field.name().into(), format!("{value:?}"));
+            }
+            fn record_str(
+                &mut self,
+                field: &Field,
+                value: &str,
+            ) {
+                self.0
+                    .insert(field.name().into(), value.into());
+            }
+        }
+        struct Capture(Arc<Mutex<Vec<AuditEvent>>>);
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: Context<'_, S>,
+            ) {
+                if event.metadata().target() == "security_audit" {
+                    let mut fields = Fields(AuditEvent::new());
+                    event.record(&mut fields);
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .push(fields.0);
+                }
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(Capture(events.clone())));
+        let output = run.await;
+        let captured = std::mem::take(&mut *events.lock().unwrap());
+        (output, captured)
+    }
+
+    #[tokio::test]
+    async fn an_administrator_resets_the_refresh_sequence() {
+        let (app, catalog, _temp) = app(UserRole::Administrator, None).await;
+        let reset = "/api/v1/llm-providers/refresh/reset";
+
+        let ((status, body), events) =
+            security_audit_events(call(&app, Method::POST, reset, json!({ "publication_sequence": 3 }))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["outcome"], "refused");
+        assert_eq!(events[0]["actor_id"], "user-1");
+
+        std::fs::write(
+            catalog.refresh_state_path(),
+            json!({
+                "manifest": {
+                    "schema_version": 1,
+                    "publication_sequence": 5,
+                    "version_id": "agent-stream:1.0.3",
+                    "version": "1.0.3",
+                    "catalogue_url": "https://well.example/llm/v1/catalogues/1.0.3.json",
+                    "sha256": "a".repeat(64),
+                    "size_bytes": 1024,
+                    "published_at": "2026-11-19T00:00:00Z"
+                },
+                "seen_version_ids": ["agent-stream:1.0.3"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (status, body) = call(&app, Method::POST, reset, json!({ "publication_sequence": 5 })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let ((status, body), events) =
+            security_audit_events(call(&app, Method::POST, reset, json!({ "publication_sequence": 3 }))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({ "previous_sequence": 5, "publication_sequence": 3 }));
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "llm_catalog_sequence_reset");
+        assert_eq!(events[0]["outcome"], "reset");
+        assert_eq!(events[0]["actor_id"], "user-1");
+        assert_eq!(events[0]["previous_sequence"], "5");
+        assert_eq!(events[0]["publication_sequence"], "3");
+    }
+
     fn catalog_price(catalog: &LlmProviderCatalog) -> Option<f64> {
         catalog
             .resolve_model_pricing("openai", "gpt-4o", None)
@@ -181,12 +303,17 @@ mod tests {
     fn every_catalog_route() -> Vec<(Method, &'static str, Option<Value>)> {
         vec![
             (Method::GET, "/api/v1/llm-providers", None),
-            (Method::POST, "/api/v1/llm-providers", Some(json!({ "enum_value": "other", "name": "Other" }))),
+            (
+                Method::POST,
+                "/api/v1/llm-providers",
+                Some(json!({ "enum_value": "other", "name": "Other", "models": [] })),
+            ),
             (Method::GET, "/api/v1/llm-providers/custom", None),
             (Method::PUT, "/api/v1/llm-providers/custom", Some(json!({ "providers": [] }))),
             (Method::GET, "/api/v1/llm-providers/refresh", None),
             (Method::POST, "/api/v1/llm-providers/refresh", None),
             (Method::POST, "/api/v1/llm-providers/refresh/rollback", None),
+            (Method::POST, "/api/v1/llm-providers/refresh/reset", Some(json!({ "publication_sequence": 1 }))),
             (Method::GET, "/api/v1/llm-providers/openai", None),
             (Method::PUT, "/api/v1/llm-providers/openai", Some(openai(json!(0.0)))),
             (Method::DELETE, "/api/v1/llm-providers/openai", None),

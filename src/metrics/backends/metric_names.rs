@@ -67,6 +67,10 @@ pub mod prom {
     pub const AFFINIDI_TERMS_CACHE_AGE_SECONDS: &str = "agent_stream_affinidi_terms_cache_age_seconds";
     pub const AFFINIDI_TERMS_PUBLICATION_SEQUENCE: &str = "agent_stream_affinidi_terms_publication_sequence";
 
+    // Built-in LLM catalog refresh
+    pub const LLM_CATALOG_REFRESH_TOTAL: &str = "agent_stream_llm_catalog_refresh_total";
+    pub const LLM_CATALOG_PUBLICATION_SEQUENCE: &str = "agent_stream_llm_catalog_publication_sequence";
+
     // Storage
     pub const STORAGE_LOAD_ERRORS_TOTAL: &str = "agent_stream_storage_load_errors_total";
 

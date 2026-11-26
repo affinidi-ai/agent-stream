@@ -1271,6 +1271,15 @@ pub struct RoutingTarget {
     pub llm: Option<crate::pipes::judge_jury::LLMTarget>,
 }
 
+impl RoutingTarget {
+    /// The Variant alias this target routes to; a blank alias counts as unset.
+    pub fn variant_alias(&self) -> Option<&String> {
+        self.variant
+            .as_ref()
+            .filter(|a| !a.trim().is_empty())
+    }
+}
+
 impl RoutingRule {
     /// Validate a routing rule against the surface's known variant aliases.
     pub fn validate(
@@ -1297,13 +1306,7 @@ impl RoutingRule {
                 }
             }
         }
-        match (
-            self.target
-                .variant
-                .as_ref()
-                .filter(|a| !a.trim().is_empty()),
-            &self.target.llm,
-        ) {
+        match (self.target.variant_alias(), &self.target.llm) {
             (Some(alias), _) => {
                 if !variant_aliases
                     .iter()

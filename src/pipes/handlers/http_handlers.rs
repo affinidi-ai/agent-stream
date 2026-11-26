@@ -717,11 +717,7 @@ pub(crate) fn resolve_route_decision(
     if pipe.routing_enabled
         && let Some(target) = select_routing_target(&pipe.routing_rules, headers, payload)
     {
-        match target
-            .variant
-            .as_ref()
-            .filter(|a| !a.trim().is_empty())
-        {
+        match target.variant_alias() {
             Some(alias) => {
                 debug!(route_variant = %alias, "Routing rule matched → variant");
                 return RouteDecision {

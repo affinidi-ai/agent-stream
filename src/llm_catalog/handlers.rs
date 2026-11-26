@@ -1,44 +1,63 @@
 //! API handlers for LLM provider catalog CRUD operations.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use tracing::info;
 
+use super::refresh::{
+    CatalogRefresher, RefreshFailure, RefreshFailureKind, RefreshOutcome, reset_sequence, rollback_catalog,
+};
 use super::store::{CatalogError, LlmProviderCatalog};
+use crate::auth_manager::middleware::AuthGuardOk;
 
 #[derive(Clone)]
 pub struct LlmCatalogState {
     pub catalog: Arc<LlmProviderCatalog>,
-    /// URL of the published master catalog for the "Refresh Builtin Models"
-    /// flow (`llm_catalog.refresh_url` in agent-stream.json). `None` disables
-    /// the refresh action.
-    pub refresh_url: Option<String>,
-    /// `llm_catalog.allow_insecure_source`: the source may be plain http or on
-    /// a private network. Off, the download also refuses to connect to any
-    /// address that is not public, so a DNS answer cannot steer it inside.
-    pub allow_insecure_source: bool,
+    /// Refresh from the manifest at `llm_catalog.refresh_url` for the "Refresh
+    /// Builtin Models" flow. `None` disables the refresh action.
+    pub(crate) refresher: Option<Arc<CatalogRefresher>>,
 }
 
-/// The largest catalog the refresh accepts. The published catalog is a few
-/// hundred kilobytes; anything near this size is not a catalog.
-const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
+const STORAGE_ERROR: &str = "The LLM catalog could not be read or written. See the server log.";
 
+/// A storage failure names files on the appliance, so its detail goes to the
+/// log and the caller gets [`STORAGE_ERROR`].
 fn catalog_error_response(err: CatalogError) -> axum::response::Response {
     let status = match err {
-        CatalogError::Duplicate(_) => StatusCode::CONFLICT,
+        CatalogError::Duplicate(_) | CatalogError::Conflict(_) => StatusCode::CONFLICT,
         CatalogError::Validation(_) => StatusCode::BAD_REQUEST,
         CatalogError::NotFound(_) => StatusCode::NOT_FOUND,
-        CatalogError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        CatalogError::Io(_) => {
+            tracing::error!(error = %err, "LLM catalog storage failure");
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": STORAGE_ERROR })))
+                .into_response();
+        }
     };
     (status, Json(serde_json::json!({ "error": err.to_string() }))).into_response()
+}
+
+/// A refusal caused by what the refresh source served (or what its host
+/// resolves to) is a bad gateway; one caused by the stored catalog is a
+/// conflict. A storage failure is already logged with its detail by
+/// [`CatalogRefresher::refresh`].
+fn refresh_failure_response(failure: RefreshFailure) -> axum::response::Response {
+    let (status, message) = match failure.kind {
+        RefreshFailureKind::Storage => (StatusCode::INTERNAL_SERVER_ERROR, STORAGE_ERROR.to_string()),
+        RefreshFailureKind::Conflict => (StatusCode::CONFLICT, failure.message),
+        RefreshFailureKind::Transport
+        | RefreshFailureKind::Validation
+        | RefreshFailureKind::Rollback
+        | RefreshFailureKind::HashMismatch => (StatusCode::BAD_GATEWAY, failure.message),
+    };
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 /// GET /api/v1/llm-providers
@@ -169,18 +188,17 @@ pub async fn put_custom(
 /// `llm_catalog.refresh_url`), so the dashboard only shows the button when a
 /// click can succeed.
 pub async fn refresh_status(State(state): State<LlmCatalogState>) -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({ "available": state.refresh_url.is_some() }))).into_response()
+    (StatusCode::OK, Json(serde_json::json!({ "available": state.refresher.is_some() }))).into_response()
 }
 
 /// POST /api/v1/llm-providers/refresh
 ///
-/// Download the published master `llm.json` from the configured
-/// `llm_catalog.refresh_url`, validate it against the catalog schema, and swap
-/// it into storage — keeping the previous file as `llm.json.bak` and forcing a
-/// reload of the in-memory catalog. A bad download or invalid catalog leaves
-/// the existing catalog untouched.
+/// Read the manifest at `llm_catalog.refresh_url`, download the catalog it
+/// names, check it against the manifest, and merge its model data into the
+/// built-in catalog, keeping the previous file as `llm.json.bak`. A refused
+/// publication or a failed download leaves the catalog untouched.
 pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoResponse {
-    let Some(url) = state.refresh_url.clone() else {
+    let Some(refresher) = state.refresher.clone() else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -190,100 +208,168 @@ pub async fn refresh_builtin(State(state): State<LlmCatalogState>) -> impl IntoR
             .into_response();
     };
 
-    // Defense-in-depth even though the URL was validated at startup: reject
-    // non-http(s) schemes and cloud-metadata targets.
-    if let Err(reason) = crate::url_validation::validate_service_endpoint_url(&url).await {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("Refresh URL rejected: {}", reason) })),
-        )
-            .into_response();
-    }
-
-    // By default every resolved address is re-checked at connection time, so a
-    // public host name cannot be answered with a private address. An operator
-    // who opted into an internal mirror gets the plain client.
-    let timeout = Duration::from_secs(30);
-    let client = if state.allow_insecure_source {
-        crate::http_client::with_timeout(timeout)
-    } else {
-        crate::http_client::with_strict_validating_resolver(timeout)
-    };
-    let client = match client {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("failed to build HTTP client: {}", e) })),
-            )
-                .into_response();
-        }
-    };
-
-    let safe_url = crate::url_validation::redact_url_for_logging(&url);
-
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("failed to fetch catalog from {}: {}", safe_url, e) })),
-            )
-                .into_response();
-        }
-    };
-    if !resp.status().is_success() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": format!("catalog source returned HTTP {}", resp.status()) })),
-        )
-            .into_response();
-    }
-    let body = match crate::http_client::read_capped(resp, MAX_CATALOG_BYTES).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response();
-        }
-    };
-    let doc: Value = match serde_json::from_slice(&body) {
-        Ok(d) => d,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("downloaded catalog is not valid JSON: {}", e) })),
-            )
-                .into_response();
-        }
-    };
-
-    match state
-        .catalog
-        .refresh_builtin(doc)
+    match refresher
+        .refresh(&state.catalog)
         .await
     {
-        Ok(count) => {
-            info!(providers = count, source = %safe_url, "Built-in LLM catalog refreshed");
-            (StatusCode::OK, Json(serde_json::json!({ "providers": count, "source": url, "backup": true })))
-                .into_response()
-        }
-        Err(e) => catalog_error_response(e),
+        Ok(RefreshOutcome::Updated { manifest, refresh }) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "outcome": "updated",
+                "providers": refresh.providers,
+                "added": refresh.added,
+                "skipped": refresh.skipped,
+                "version": manifest.version,
+                "publication_sequence": manifest.publication_sequence,
+                "backup": true,
+            })),
+        )
+            .into_response(),
+        Ok(RefreshOutcome::Unchanged { manifest }) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "outcome": "unchanged",
+                "version": manifest.version,
+                "publication_sequence": manifest.publication_sequence,
+            })),
+        )
+            .into_response(),
+        Err(failure) => refresh_failure_response(failure),
     }
 }
 
 /// POST /api/v1/llm-providers/refresh/rollback
 ///
 /// Restore the previous built-in catalog from `llm.json.bak` (the recovery path
-/// if a refreshed catalog is problematic) and reload the in-memory catalog.
+/// if a refreshed catalog is problematic) and reload the in-memory catalog. The
+/// next refresh installs the accepted publication again, but no older one.
 pub async fn rollback_builtin(State(state): State<LlmCatalogState>) -> impl IntoResponse {
-    match state
-        .catalog
-        .rollback_builtin()
-        .await
-    {
+    match rollback_catalog(&state.catalog).await {
         Ok(count) => {
             info!(providers = count, "Built-in LLM catalog rolled back from llm.json.bak");
             (StatusCode::OK, Json(serde_json::json!({ "providers": count, "restored": true }))).into_response()
         }
         Err(e) => catalog_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ResetSequenceRequest {
+    publication_sequence: u64,
+}
+
+/// POST /api/v1/llm-providers/refresh/reset
+///
+/// Lower the accepted publication sequence for an appliance a wrong or hostile
+/// publication pinned, so the next refresh accepts a new publication from
+/// `publication_sequence` up. Publications already seen stay refused. Every
+/// attempt, refused or not, is a `security_audit` event with the caller.
+pub async fn reset_refresh_sequence(
+    State(state): State<LlmCatalogState>,
+    caller: Option<Extension<AuthGuardOk>>,
+    Json(request): Json<ResetSequenceRequest>,
+) -> impl IntoResponse {
+    let actor_id = caller
+        .as_ref()
+        .map(|Extension(AuthGuardOk(user_id))| user_id.as_str())
+        .unwrap_or("unknown");
+    match reset_sequence(&state.catalog, request.publication_sequence).await {
+        Ok(previous) => {
+            tracing::warn!(
+                target: "security_audit",
+                event = "llm_catalog_sequence_reset",
+                outcome = "reset",
+                actor_id,
+                previous_sequence = previous,
+                publication_sequence = request.publication_sequence,
+                "Built-in LLM catalog refresh sequence reset"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "previous_sequence": previous,
+                    "publication_sequence": request.publication_sequence,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "security_audit",
+                event = "llm_catalog_sequence_reset",
+                outcome = "refused",
+                actor_id,
+                publication_sequence = request.publication_sequence,
+                reason = %e,
+                "Built-in LLM catalog refresh sequence reset refused"
+            );
+            catalog_error_response(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn body(response: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn refresh_refusals_from_the_source_are_bad_gateway() {
+        for kind in [
+            RefreshFailureKind::Transport,
+            RefreshFailureKind::Validation,
+            RefreshFailureKind::Rollback,
+            RefreshFailureKind::HashMismatch,
+        ] {
+            let response = refresh_failure_response(RefreshFailure {
+                kind,
+                message: "upstream detail".to_string(),
+            });
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{kind:?}");
+            assert_eq!(body(response).await["error"], "upstream detail", "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_caused_by_the_stored_catalog_is_a_conflict() {
+        let refresh = refresh_failure_response(RefreshFailure {
+            kind: RefreshFailureKind::Conflict,
+            message: "the built-in LLM catalog changed during the refresh; try again".to_string(),
+        });
+        assert_eq!(refresh.status(), StatusCode::CONFLICT);
+        assert_eq!(body(refresh).await["error"], "the built-in LLM catalog changed during the refresh; try again");
+
+        let crud = catalog_error_response(CatalogError::Conflict("custom_llm.json is not valid JSON".to_string()));
+        assert_eq!(crud.status(), StatusCode::CONFLICT);
+        assert_eq!(body(crud).await["error"], "custom_llm.json is not valid JSON");
+    }
+
+    #[tokio::test]
+    async fn storage_failures_do_not_name_files() {
+        let refresh = refresh_failure_response(RefreshFailure {
+            kind: RefreshFailureKind::Storage,
+            message: "failed to read /data/_storage/llm_catalog_refresh.json: denied".to_string(),
+        });
+        assert_eq!(refresh.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body(refresh).await["error"], STORAGE_ERROR);
+
+        let crud = catalog_error_response(CatalogError::Io(
+            "failed to write LLM catalog /data/_storage/llm.json: denied".to_string(),
+        ));
+        assert_eq!(crud.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body(crud).await["error"], STORAGE_ERROR);
+    }
+
+    #[tokio::test]
+    async fn other_catalog_errors_keep_their_message() {
+        let response = catalog_error_response(CatalogError::NotFound("openai".to_string()));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(response).await["error"], CatalogError::NotFound("openai".to_string()).to_string());
     }
 }

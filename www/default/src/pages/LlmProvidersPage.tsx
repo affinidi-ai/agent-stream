@@ -8,6 +8,7 @@ import { Badge } from '../components/shared/Badge';
 import type { LlmProviderSummary } from './EditLlmProviderPage/types';
 import ProviderTable from './LlmProvidersPage/ProviderTable';
 import CustomCatalogTab from './LlmProvidersPage/CustomCatalogTab';
+import { refreshMessage, type RefreshResponse } from './LlmProvidersPage/refreshMessage';
 
 const PAGE = 'llm-providers';
 
@@ -117,7 +118,10 @@ const LlmProvidersPage: React.FC = () => {
   const handleRefresh = async () => {
     if (
       !window.confirm(
-        'Refresh the built-in models from the published catalog?\n\nThis overwrites the current built-in llm.json.'
+        'Refresh the built-in models from the published catalog?\n\n' +
+          'Models, endpoints and prices of built-in providers are replaced, including changes you made to them. ' +
+          'Base URLs and API key settings stay as they are. New providers are added disabled. ' +
+          'Keep your own models and prices on the Custom tab.'
       )
     ) {
       return;
@@ -125,11 +129,9 @@ const LlmProvidersPage: React.FC = () => {
     setRefreshing(true);
     setRefreshMsg(null);
     try {
-      const res = await apiClient.post<{ providers: number }>('/llm-providers/refresh');
-      setRefreshMsg({
-        type: 'success',
-        text: `Built-in models refreshed — ${res.data.providers} providers loaded.`,
-      });
+      const res = await apiClient.post<RefreshResponse>('/llm-providers/refresh');
+      setRefreshMsg({ type: 'success', text: refreshMessage(res.data) });
+      if (res.data.outcome === 'unchanged') return;
       setCanRollback(true);
       await loadProviders();
     } catch (e) {

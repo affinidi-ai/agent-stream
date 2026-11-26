@@ -1,0 +1,118 @@
+branch: feat/llm-catalogue-refresh
+changes:
+  added:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Count built-in catalog refreshes by result and track the accepted sequence
+      description: >-
+        agent_stream_llm_catalog_refresh_total counts each Refresh Builtin Models attempt by result
+        (updated, unchanged, transport_failure, validation_failure, rollback_rejection, hash_mismatch,
+        storage_failure, conflict), and agent_stream_llm_catalog_publication_sequence reports the
+        accepted publication, so operators can see refreshes that were refused and why.
+    - timestamp: '2026-11-19T22:00:00.000Z'
+      title: Reset the accepted catalog publication sequence through the API
+      description: >-
+        POST /api/v1/llm-providers/refresh/reset lowers the accepted publication sequence, so an
+        appliance pinned by a wrong or hostile publication accepts a new one without editing
+        llm_catalog_refresh.json by hand. Every version_id already seen stays refused, so the reset
+        cannot install an earlier publication again. Every attempt, refused or not, is logged as a
+        security_audit event llm_catalog_sequence_reset with the caller.
+  changed:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Refresh only models, endpoints and prices of built-in providers
+      description: >-
+        Refresh Builtin Models now merges the published catalog instead of replacing llm.json. A stored
+        provider takes only models, endpoints, endpoint_parameters and description from the download;
+        its name, enabled flag, base URL, API schema and version prefix, API key settings,
+        requires_forward_caller_token and each model's enabled switch stay as stored. Other changes an
+        administrator made to models and prices of a built-in provider are replaced; keep those in the
+        custom catalog. A provider missing from the download is kept, and one new in the download is
+        added with each of its models disabled after its base URL passes the public-address check. A
+        download is refused when a provider has no models array, a new provider lists no models, or ids
+        differ only in case. A new provider whose id matches any custom_llm.json entry is skipped and
+        named in the response.
+    - timestamp: '2026-11-19T09:00:00.000Z'
+      title: Install a published catalog only when its manifest checks out
+      description: >-
+        A refresh reads the manifest, downloads at most size_bytes of the catalog, and installs it only
+        when its size and SHA-256 match and the publication is newer than the accepted one, not changed
+        under the same sequence, not reusing a version_id and not more than 1,000,000 past the accepted
+        sequence. The accepted publication and the SHA-256 of the installed llm.json are kept in
+        llm_catalog_refresh.json; the same publication reports unchanged, and is installed again after a
+        rollback or when llm.json no longer matches. A not-modified answer to a request that sent no
+        ETag is refused. If the record cannot be saved, nothing changes.
+    - timestamp: '2026-11-19T14:00:00.000Z'
+      title: Answer 502 for source faults and 409 for local conflicts on catalog refresh
+      description: >-
+        POST /api/v1/llm-providers/refresh now answers 502 instead of 400 when the catalog source causes
+        the refusal, and 409 when the stored catalog does (llm.json not valid after the merge, a change
+        during the refresh, an unreadable custom_llm.json); 400 remains for a missing
+        llm_catalog.refresh_url. Hash mismatches and rollback refusals are logged at error. Errors no
+        longer include the manifest or catalog URL or the address a source host resolves to, and a
+        storage failure on any LLM provider route returns a fixed message and logs the file path.
+  fixed:
+    - timestamp: '2026-11-19T16:00:00.000Z'
+      title: Keep the built-in LLM catalog readable through a refresh or a crash
+      description: >-
+        llm.json is now written to a temporary file, flushed to disk and renamed into place, and
+        llm.json.bak is a copy, so a refresh no longer leaves a moment with no built-in catalog, during
+        which costs were 0 and the model gate was off. A write whose directory cannot be synced to disk
+        fails instead of reporting success. The runtime keeps the last catalog it read while
+        llm.json cannot be read. A refresh no longer undoes an administrator edit made while it ran,
+        refreshes and rollbacks run one at a time, and base URL checks of added providers no longer
+        block other catalog edits.
+    - timestamp: '2026-11-19T18:00:00.000Z'
+      title: Refuse a new built-in provider whose id differs only in case
+      description: >-
+        POST /api/v1/llm-providers now refuses an enum_value a built-in provider already uses in any
+        case, so two providers whose ids differ only in case can no longer be created.
+  removed: []
+  security:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Stop a refreshed catalog from redirecting provider API keys
+      description: >-
+        Affected: 1.0.0 to 1.0.2. Fixed: 1.0.3. A refreshed catalog could change a built-in provider's
+        default_base_url, so every provider key was sent to a host the published file named, without the
+        private-address check a custom provider gets. The refresh now keeps the stored connection and key
+        settings and installs only a catalog whose manifest checks out. Upgrading does not undo what an
+        earlier refresh wrote: compare llm.json with the shipped seed and correct built-in base URLs that
+        differ, endpoint paths that do not start with a single '/', and providers not in the seed,
+        especially any whose id matches a custom provider, as described in
+        docs/PROVIDERS_AND_CREDENTIALS.md. The appliance logs a startup warning for the last two cases.
+    - timestamp: '2026-11-19T12:00:00.000Z'
+      title: Stop a refreshed catalog from taking over providers or endpoint hosts
+      description: >-
+        Affected: 1.0.0 to 1.0.2. Fixed: 1.0.3. A refresh could add a provider whose id matched a custom
+        provider, which then sent that provider's key to the publisher's base URL. It could also set an
+        endpoint path to a full URL, choosing the host that receives a provider's key, and a provider it
+        added was callable at once. A refresh now skips a new provider whose id matches any custom entry,
+        refuses one while custom_llm.json cannot be read, and a custom provider save refuses an id a
+        refresh added while the save was checking its base URL. A refresh also refuses an endpoint path that does not start
+        with a single '/', refuses a new provider that lists no models, and adds new providers with each
+        model disabled; a later publication cannot turn those models back on, even by omitting them
+        or sending an empty models array, since a disabled model is kept across refreshes. Until an
+        administrator saves an added provider with enabled true, a Surface naming any of its models is
+        refused, whether the provider lists the model or not and even if the model's own switch was
+        turned on. POST /api/v1/llm-providers applies the same guards as a refresh: it refuses a
+        provider without a models array or with an endpoint path that does not start with a single '/'. A Surface save now checks disabled models on failover, load-balancing
+        and inline routing targets and on each enabled Variant, not only on the primary model, Judge,
+        Jury and Decider, so a disabled model can no longer be saved as a backup target. Failover and
+        load-balancing targets are checked even when that block is turned off, since per-request
+        routing can still select them, and a routing rule with a blank Variant is checked as the
+        inline target it routes to.
+  breaking:
+    - timestamp: '2026-11-19T05:41:50.000Z'
+      title: Point llm_catalog.refresh_url at a catalog manifest, not a catalog file
+      description: >-
+        llm_catalog.refresh_url must now name a manifest with schema_version 1, publication_sequence,
+        version_id, version, catalogue_url (same host as refresh_url), sha256, size_bytes and
+        published_at. A refresh_url that still names a catalog file fails its refresh with the catalog
+        unchanged. Migration: publish a manifest next to the catalog file and set refresh_url to the
+        manifest, as described in docs/PROVIDERS_AND_CREDENTIALS.md. tools/model_sync/publish-builtin-catalog.js
+        writes the manifest when given --catalogue-url, --sequence and --version.
+    - timestamp: '2026-11-19T21:00:00.000Z'
+      title: Return the refresh outcome from POST /api/v1/llm-providers/refresh
+      description: >-
+        A successful refresh now answers {outcome, version, publication_sequence} and, when outcome is
+        updated, providers, added, skipped and backup. The source field is removed, and an unchanged
+        outcome has no providers or backup. Migration: read outcome instead of source, and read
+        providers only when outcome is updated.

@@ -13,7 +13,7 @@ published.
 | Script | Purpose |
 | ------ | ------- |
 | `refresh-catalog-data.js` | Rebuild catalog **data** — visit each provider, discover models, enrich pricing/context, emit a candidate + review diff. |
-| `publish-builtin-catalog.js` | **Validate + normalize** a catalog into the publishable master file (also usable as a pre-publish check). |
+| `publish-builtin-catalog.js` | **Validate + normalize** a catalog into the publishable master file and write the manifest appliances read (also usable as a pre-publish check). |
 
 The two are coupled: `refresh-catalog-data.js` runs `publish-builtin-catalog.js`
 as its final validation step, so keep them in the same folder.
@@ -94,6 +94,10 @@ node tools/model_sync/publish-builtin-catalog.js --check
 
 # Validate and write the normalized master file.
 node tools/model_sync/publish-builtin-catalog.js --source dist/llm.json --out dist/llm.json
+
+# Also write the manifest (dist/current.json) for publication 42.
+node tools/model_sync/publish-builtin-catalog.js --source dist/llm.json --out dist/llm.json \
+  --catalogue-url https://models.example.com/llm/1.0.3-42.json --sequence 42 --version 1.0.3
 ```
 
 | Flag | Default | Meaning |
@@ -101,28 +105,49 @@ node tools/model_sync/publish-builtin-catalog.js --source dist/llm.json --out di
 | `--source <path>` | `config/examples/llm.example.json` | Catalog to validate. |
 | `--out <path>` | `dist/llm.json` | Normalized output (ignored with `--check`). |
 | `--check` | off | Validate only; write nothing. |
+| `--catalogue-url <url>` | — | https URL the catalog will be served from, on the same host and port as `refresh_url`, no credentials. Setting it writes the manifest. |
+| `--sequence <n>` | — | `publication_sequence`. Higher than the last publication's, and at most 1,000,000 above it. |
+| `--version <v>` | — | Release the catalog comes from, shown to administrators. |
+| `--version-id <id>` | `<version>:<sequence>` | Publication id. Never reuse one; appliances refuse it. |
+| `--manifest-out <path>` | `current.json` next to `--out` | Manifest output. |
+
+The manifest carries the SHA-256 and byte size of the catalog as written, so
+publish that exact file, unchanged, at `--catalogue-url`.
 
 Validation enforces the JSON schema **plus** the semantic rules a schema can't
 express: at least one provider, each provider has a unique `enum_value` and a
 `name`, each model has a `name` + `value`, each endpoint a `name` + `path`.
+Like the appliance's refresh, it also requires a `models` array on every
+provider and an endpoint `path` starting with a single `/`; a full URL there
+would choose the host that receives the provider's key. A provider with
+`models: []` only warns: appliances that do not have that provider yet refuse
+the refresh.
 
 ---
 
 ## 3. Publish + how appliances consume it
 
-1. Publish the resulting `llm.json` to a URL (e.g. a CDN / object store).
-2. Point each appliance at it by setting `llm_catalog.refresh_url` in
+Appliances read a manifest at `llm_catalog.refresh_url`, never the catalog
+directly. The manifest names the catalog's URL, SHA-256 and size.
+
+1. Upload `dist/llm.json` to `--catalogue-url` (e.g. a CDN / object store). Use
+   a new path per publication, so a manifest never points at changed bytes.
+2. Upload `dist/current.json` to the manifest URL, on the same host and port.
+   Upload the catalog first, so an appliance never reads a manifest whose
+   catalog is missing.
+3. Point each appliance at the manifest by setting `llm_catalog.refresh_url` in
    `agent-stream.json`:
 
    ```json
-   "llm_catalog": { "refresh_url": "https://models.example.com/llm.json" }
+   "llm_catalog": { "refresh_url": "https://models.example.com/llm/current.json" }
    ```
 
-3. On the appliance's **Models** page, click **Refresh Builtin Models**. The
-   backend downloads the file, re-validates it against the same schema, moves the
-   current `llm.json` aside to `llm.json.bak`, installs the new one, and
-   hot-reloads — with automatic rollback if anything fails. (The button is hidden
-   when `refresh_url` is unset.)
+4. On the appliance's **Models** page, click **Refresh Builtin Models**. The
+   backend downloads the manifest, checks it, downloads the catalog, verifies
+   its size and SHA-256, re-validates it against the same schema, and merges it
+   into the built-in catalog, keeping the previous file as `llm.json.bak`. (The
+   button is hidden when `refresh_url` is unset.) The full rules are in
+   [`docs/PROVIDERS_AND_CREDENTIALS.md`](../../docs/PROVIDERS_AND_CREDENTIALS.md#refreshing-the-built-in-catalog).
 
 ---
 
@@ -136,5 +161,9 @@ node tools/model_sync/refresh-catalog-data.js
 
 # 2. Review dist/llm.json and the printed diff (added / pruned / unpriced).
 
-# 3. Publish dist/llm.json to the location referenced by llm_catalog.refresh_url.
+# 3. Write the manifest for the next publication.
+node tools/model_sync/publish-builtin-catalog.js --source dist/llm.json --out dist/llm.json \
+  --catalogue-url https://models.example.com/llm/1.0.3-42.json --sequence 42 --version 1.0.3
+
+# 4. Upload dist/llm.json to the catalogue URL, then dist/current.json to llm_catalog.refresh_url.
 ```

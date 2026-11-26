@@ -129,6 +129,8 @@ capabilities, parameters and request profile. The catalog feeds:
 | --- | --- |
 | `llm.json` in `[storage_paths] llm_configuration` | The built-in catalog. Seeded once from `config_files.llm` (the example is [`config/examples/llm.example.json`](../config/examples/llm.example.json)); the storage copy is authoritative and never overwritten by the seed. |
 | `custom_llm.json` beside it | Operator-defined providers, merged after the built-in ones. Never seeded. |
+| `llm.json.bak` beside it | The built-in catalog before the last refresh. Written by a refresh, restored by a rollback. |
+| `llm_catalog_refresh.json` beside it | The refresh record: the accepted publication, its `ETag`, every `version_id` seen and the SHA-256 of the installed `llm.json`. Removing it resets rollback protection; see [Refreshing the built-in catalog](#refreshing-the-built-in-catalog). |
 
 `LlmProviderCatalog` reads both from disk through a cache keyed on the two
 files' modification times, so a manual edit or a catalog write takes effect on
@@ -140,13 +142,18 @@ Both files are checked against the embedded schema
 [`config/schemas/llm_catalog.schema.json`](../config/schemas/llm_catalog.schema.json)
 on every write through the API, and so is a single provider sent on its own
 (`POST /api/v1/llm-providers` and `PUT /api/v1/llm-providers/{enum_value}`).
+`POST` refuses an `enum_value` a built-in provider already uses, compared
+case-insensitively, a provider without a `models` array, and an
+`endpoints[].path` that does not start with a single `/`.
 
 A provider's `default_base_url` is dialled with its provider key attached. On create,
 update and custom save, a new or changed `default_base_url` must pass the
 [strict outbound policy](INTEGRATIONS.md#strict-outbound-policy) (`check_base_url`,
 `validate_resolved_webhook_url`); a URL it refuses gets `400`. The URL already stored
 for the same provider passes, so built-in Ollama on `localhost` and a self-hosted
-provider written to disk keep working; a built-in refresh is not checked. A URL that
+provider written to disk keep working. A built-in refresh never changes a stored
+provider's `default_base_url`, and a provider new in the download must pass the same
+check ([Refreshing the built-in catalog](#refreshing-the-built-in-catalog)). A URL that
 passed the check is marked `default_base_url_public` (set by the server, never taken
 from the request body), and the DNS check every outbound service client uses
 (`validate_service_endpoint_addresses` in
@@ -161,8 +168,8 @@ space (100.64/10) or the benchmarking range (198.18/15), fails every request unt
 
 Refresh is on demand only; nothing polls for a new catalog.
 
-- `llm_catalog.refresh_url` in `agent-stream.json` names a published
-  `llm.json`. Absent or blank, the action is unavailable and
+- `llm_catalog.refresh_url` in `agent-stream.json` names a published catalog
+  manifest. Absent or blank, the action is unavailable and
   `GET /api/v1/llm-providers/refresh` reports so, letting the dashboard hide
   the button.
 - The URL is validated at startup (`LlmCatalogConfig::validate` in
@@ -173,17 +180,184 @@ Refresh is on demand only; nothing polls for a new catalog.
   is refused either way. Startup does not resolve the host; a name that resolves
   to such an address is refused by the refresh. A
   refused URL fails loading `agent-stream.json` (`NetworkConfig::load_from_file`).
-- `POST /api/v1/llm-providers/refresh` checks the URL again
-  (`validate_service_endpoint_url`: http or https, no loopback, link-local or
-  cloud metadata host or resolved address)
-  and downloads it with a 30-second timeout, no redirects and an 8 MiB cap.
-  Unless `allow_insecure_source` is set, the download goes through
+- `POST /api/v1/llm-providers/refresh`
+  ([`src/llm_catalog/refresh.rs`](../src/llm_catalog/refresh.rs)) checks each
+  URL again before downloading it (`validate_service_endpoint_url`: http or
+  https, no loopback, link-local or cloud metadata host or resolved address).
+  Unless `allow_insecure_source` is set, both downloads go through
   `http_client::with_strict_validating_resolver`, which re-checks every
   resolved address at connect time against the
-  [strict outbound policy](INTEGRATIONS.md#strict-outbound-policy). The document is validated against the schema and swapped
-  in, keeping the previous file as `llm.json.bak`. A failed download or an
-  invalid document leaves the catalog untouched.
-- `POST /api/v1/llm-providers/refresh/rollback` restores `llm.json.bak`.
+  [strict outbound policy](INTEGRATIONS.md#strict-outbound-policy). Neither
+  follows a redirect. With `allow_insecure_source`, the address is checked
+  only before each request, not at connect time, and `HTTP_PROXY` /
+  `HTTPS_PROXY` are honoured. Over plain http the refresh also loses its
+  integrity check: the `sha256` and `size_bytes` come from a manifest on the
+  same host and channel, so anyone on the network path can serve a catalog of
+  their own, or a manifest with a high `publication_sequence` that refuses
+  every later publication until the sequence is reset. Use it only for a
+  mirror on a network you trust.
+  1. It downloads the manifest (10-second timeout, 64 KiB cap), sending the
+     stored `ETag` as `If-None-Match`. A `304` reports `unchanged` while
+     `llm.json` still matches; if `llm.json` changed during the refresh, the
+     refresh answers `conflict` and the next one installs the publication
+     again. The `ETag` is not sent while the record is marked rolled back or
+     `llm.json` no longer matches the SHA-256 recorded when the publication
+     was installed, and a `304` to a request without it is refused
+     (`validation_failure`). The recorded SHA-256 is that of the file the
+     refresh wrote, so an edit landing just after the install is not taken
+     for the publication.
+  2. It checks the manifest fields:
+
+     | Field | Rule |
+     | --- | --- |
+     | `schema_version` | `1` |
+     | `publication_sequence` | Positive. Lower than the accepted one, or equal with any other field changed: refused. More than 1,000,000 above the accepted one, or above 2^32 for a first publication: refused. Equal and unchanged: `unchanged`, unless the record is marked rolled back or `llm.json` no longer matches the installed SHA-256; then the publication installs again. |
+     | `version_id` | Not empty. One already used by another publication: refused. |
+     | `version` | Not empty. The release the catalog comes from, shown to the administrator. |
+     | `catalogue_url` | https (http only with `allow_insecure_source`), same host and port as `refresh_url`, no credentials |
+     | `sha256` | 64 lowercase hex characters |
+     | `size_bytes` | 1 to 8 MiB |
+     | `published_at` | RFC 3339 timestamp |
+
+  3. It downloads `catalogue_url` (30-second timeout), reading no more than
+     `size_bytes`, and refuses it unless its length equals `size_bytes` and
+     its SHA-256 equals `sha256`. A longer catalog is a `hash_mismatch`, not a
+     `transport_failure`.
+  4. It records the publication in `llm_catalog_refresh.json` next to
+     `llm.json`, marked rolled back, so a crash before step 6 installs it
+     again on the next refresh.
+  5. It validates the catalog against the schema (at least one provider,
+     a `models` array on every provider, `enum_value`s unique ignoring case)
+     and merges it into `llm.json`, copying the previous
+     file to `llm.json.bak`. The new `llm.json` is written to a temporary
+     file, flushed to disk and renamed into place, so the runtime never sees
+     a partial catalog:
+     - A provider already stored takes only `models`, `endpoints`,
+       `endpoint_parameters` and `description` from the download. A field the
+       download omits is removed; a provider without `models` is refused, so
+       a download cannot strip a provider's models and prices. If `llm.json`
+       holds two providers whose `enum_value`s differ only in case, the
+       refresh is refused until one is removed. Everything else stays as stored, including
+       `name`, `enabled`, `default_base_url`, `api_version_prefix`,
+       `api_schema`, the `api_key_*` fields and
+       `requires_forward_caller_token`, so a published file cannot change
+       where or how a provider key is sent. Administrator changes to models
+       and prices of a built-in provider are replaced, apart from each
+       model's `enabled` switch; keep them in the custom
+       catalog, which a refresh never touches.
+     - Each model keeps the `enabled` switch of the stored model with the
+       same `value`, so a refresh never turns on a model that was turned off
+       and never turns off one an administrator has. A model new to a
+       provider stored with `enabled: false` is added with `enabled: false`.
+       A stored model with `enabled: false` is kept even when the download
+       omits it or sends `models: []`, since the model gate allows a model
+       the catalog does not list.
+     - A provider only in the download is added with `enabled: false`, and
+       each of its models too, after its `default_base_url` passes the
+       public-address check a new provider gets. Its models stay off across
+       later refreshes until an administrator enables them. It is also marked
+       `added_by_refresh`, and while it carries that marker a Surface naming
+       any of its models is refused, listed or not, even one whose own
+       `enabled` switch was turned on. The save checks
+       every target that can receive traffic: the primary model, an enabled
+       Judge, juror, Decider router, candidate or merger, every failover or
+       load-balancing target whether or not that block is turned on (a
+       request can still route to one), and an inline routing target,
+       including one whose rule names a blank Variant, on the base and on
+       each enabled Variant. Saving the provider
+       with `enabled: true` approves it and clears the marker; from then on an
+       unlisted model is allowed as for any other provider, and each listed
+       model still needs its own `enabled` switch. The server sets the marker,
+       never the request body. One that lists no models is refused.
+     - A provider only in the download whose `enum_value` matches any entry
+       of `custom_llm.json` (ignoring case, valid or not) is skipped with a
+       warning and named in `skipped`. While `custom_llm.json` exists but
+       cannot be read or parsed, a download that adds providers is refused
+       with `409`.
+     - A provider only in `llm.json` is kept.
+  6. It completes the record: the accepted manifest, its `ETag`, every
+     `version_id` seen and the SHA-256 of the installed `llm.json`, no longer
+     marked rolled back. A later edit of `llm.json`, by hand or through the
+     API, or a restore from outside makes the next refresh install the
+     publication again. If this write fails, the
+     catalog stays installed, a warning is logged, and the next refresh
+     installs the publication again.
+
+  The record is written the same way as `llm.json`. An unreadable record
+  refuses every refresh until it is fixed or removed, and is logged at
+  `error` at startup. Removing the record resets rollback protection: the
+  next refresh accepts any publication, older ones included. Restore a
+  known-good copy from backup, or remove it only after confirming the
+  current publication at the source. To recover from a wrong
+  `publication_sequence`, use the reset route below instead. A refreshed catalog (`llm.json.bak` present) with no
+  accepted publication on record logs a warning, since any publication is
+  then accepted. If the record cannot be written in step 4, the refresh
+  fails with `storage_failure` and nothing changes. If step 5 fails, the
+  record is put back as it was. While `llm.json` cannot be read, the runtime
+  keeps the last catalog it read.
+
+  Any refusal or failed download leaves the catalog and the record
+  untouched. One refresh or rollback runs at a time; a rollback waits for a
+  running refresh. Each attempt counts in
+  `agent_stream_llm_catalog_refresh_total` by `result` (`updated`,
+  `unchanged`, `transport_failure`, `validation_failure`,
+  `rollback_rejection`, `hash_mismatch`, `storage_failure`, `conflict`);
+  `agent_stream_llm_catalog_publication_sequence` is the accepted sequence.
+  A refusal caused by what the source served, or by what its host resolves
+  to, answers `502` with the reason; `hash_mismatch` and `rollback_rejection`
+  are logged at `error`, the rest at `warn`. A source refused by the address
+  policy answers a fixed message; the host and address go only to the log.
+  A refusal caused by the stored catalog (`conflict`: `llm.json` not valid
+  after the merge, for example two ids that differ only in case; the catalog
+  changed during the refresh; an unreadable `custom_llm.json`) answers `409`
+  with the reason. A `storage_failure` answers `500` with a fixed message and
+  logs the file and cause. No error names the manifest or catalog URL, so a
+  credential in its query string stays out of the response and the log.
+  Without `refresh_url` the refresh answers `400`.
+
+  A successful refresh answers `200` with the catalog `version` and
+  `publication_sequence`, and `outcome`:
+
+  | `outcome` | Other fields |
+  | --- | --- |
+  | `updated` | `providers` (built-in providers after the merge), `added` (providers added disabled), `skipped` (ids skipped for matching a custom provider), `backup` (`true`) |
+  | `unchanged` | None |
+
+  Upgrading from 1.0.2 or earlier: a refresh on those versions replaced
+  `llm.json` whole, so it could have changed where a built-in provider's key
+  is sent, and later refreshes keep what it wrote. Before sending traffic,
+  compare `llm.json` with the shipped seed
+  ([`config/examples/llm.example.json`](../config/examples/llm.example.json))
+  and correct:
+  - a built-in provider's `default_base_url` that differs from the seed;
+  - an `endpoints[].path` that does not start with a single `/` (it is used
+    as a full URL);
+  - a built-in provider not in the seed that you did not add yourself,
+    including any whose `enum_value` matches a provider in `custom_llm.json`
+    (it hides the custom one), and its enabled models.
+
+  At startup the appliance logs a warning for each built-in provider with a
+  non-relative endpoint path or an `enum_value` that matches a custom
+  provider.
+- `POST /api/v1/llm-providers/refresh/rollback` restores `llm.json.bak`. It
+  keeps the accepted publication in `llm_catalog_refresh.json`, so a later
+  refresh still refuses an older one, but marks it rolled back and drops its
+  `ETag`, so the next refresh downloads and installs the accepted publication
+  again instead of reporting `unchanged`. It does so whether or not
+  `refresh_url` is set. If the record cannot be read or updated, the rollback
+  fails and the catalog stays as it was.
+- `POST /api/v1/llm-providers/refresh/reset` with
+  `{"publication_sequence": N}` recovers an appliance that a wrong or hostile
+  publication pinned to a high sequence. N must be positive and lower than
+  the accepted sequence. The next refresh then accepts a publication with a
+  sequence of N or more, within the same 1,000,000 step. Every `version_id`
+  already seen stays refused, the pinned one included, so the reset cannot
+  install an earlier publication again; the publisher issues a new one. The
+  catalog itself is unchanged. The answer is
+  `{"previous_sequence", "publication_sequence"}`; `404` when no publication
+  was accepted, `400` for an N out of range. Every attempt, refused or not,
+  is logged as a `security_audit` event `llm_catalog_sequence_reset` with
+  the caller ([OBSERVABILITY.md](OBSERVABILITY.md)).
 
 ### Routes and permissions
 
@@ -207,6 +381,7 @@ and the dashboard shows the **Models** page only to holders of
 | `GET /api/v1/llm-providers/refresh` | Whether refresh is configured | `llm_catalog.edit` |
 | `POST /api/v1/llm-providers/refresh` | Refresh from `refresh_url` | `llm_catalog.edit` |
 | `POST /api/v1/llm-providers/refresh/rollback` | Restore the backup | `llm_catalog.edit` |
+| `POST /api/v1/llm-providers/refresh/reset` | Lower the accepted publication sequence | `llm_catalog.edit` |
 
 Every write checks each model's and endpoint's `cost_per_1k_input` and
 `cost_per_1k_output` (`validate_catalog_prices` in

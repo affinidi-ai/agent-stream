@@ -400,6 +400,26 @@ lazy_static! {
         counter
     };
 
+    pub static ref LLM_CATALOG_REFRESH: IntCounterVec = {
+        let opts = Opts::new(
+            names::LLM_CATALOG_REFRESH_TOTAL,
+            "Built-in LLM catalog refresh attempts by result",
+        );
+        let counter = IntCounterVec::new(opts, &["result"]).unwrap();
+        REGISTRY.register(Box::new(counter.clone())).unwrap();
+        counter
+    };
+
+    pub static ref LLM_CATALOG_PUBLICATION_SEQUENCE: Gauge = {
+        let opts = Opts::new(
+            names::LLM_CATALOG_PUBLICATION_SEQUENCE,
+            "Publication sequence of the last accepted built-in LLM catalog",
+        );
+        let gauge = Gauge::with_opts(opts).unwrap();
+        REGISTRY.register(Box::new(gauge.clone())).unwrap();
+        gauge
+    };
+
     pub static ref AFFINIDI_TERMS_REFRESH_DURATION_SECONDS: Histogram = {
         let opts = HistogramOpts::new(
             names::AFFINIDI_TERMS_REFRESH_DURATION_SECONDS,
