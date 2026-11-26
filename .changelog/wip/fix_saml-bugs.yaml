@@ -46,8 +46,12 @@ changes:
         landed after the request was authorised against the live user, so a stale Edit User
         page, a quick approve or an API client could let a deleted user sign in again
         without the approval checks. Such an update is now refused with 409 and changes
-        nothing. The Edit User page also sends only the fields the administrator changed,
-        nothing when nothing changed, and nothing at all when the user did not load.
+        nothing: its role, status and profile fields are written in one step, so a delete
+        landing between them can no longer get names or an email written back onto the
+        kept record. A user's own profile edit that finishes after their delete now
+        answers 404 and leaves the record as the delete left it. The Edit User page also
+        sends only the fields the administrator changed, nothing when nothing changed, and
+        nothing at all when the user did not load.
     - timestamp: '2026-11-26T09:00:01.000Z'
       title: Answer a concurrent delete of a passkey user with removed, not 500
       description: >-

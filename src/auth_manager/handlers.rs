@@ -333,11 +333,19 @@ pub async fn update_user(
             .await;
     }
 
+    let profile = crate::auth::storage::ProfileChanges {
+        first_name: req.first_name.clone(),
+        last_name: req.last_name.clone(),
+        email: req.email.clone(),
+        department: req.department.clone(),
+        job_title: req.job_title.clone(),
+    };
     storage
         .update_user(
             &user_id,
             req.role.clone(),
             req.status.clone(),
+            profile,
             user_before
                 .deleted_at
                 .is_some(),
@@ -356,27 +364,6 @@ pub async fn update_user(
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update user: {}", e))
             }
         })?;
-
-    // Update profile fields if provided
-    if req.first_name.is_some()
-        || req.last_name.is_some()
-        || req.email.is_some()
-        || req.department.is_some()
-        || req.job_title.is_some()
-    {
-        storage
-            .update_profile(
-                &user_id,
-                req.first_name.clone(),
-                req.last_name.clone(),
-                req.email.clone(),
-                req.department.clone(),
-                req.job_title.clone(),
-                None, // avatar_path not updated here
-            )
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update profile: {}", e)))?;
-    }
 
     // Load updated user data
     let user_data = storage
@@ -590,18 +577,20 @@ pub async fn update_profile(
     Extension(user_id): Extension<String>,
     Json(req): Json<UpdateProfileRequest>,
 ) -> Result<Json<User>, (StatusCode, String)> {
-    storage
-        .update_profile(
-            &user_id,
-            req.first_name.clone(),
-            req.last_name.clone(),
-            req.email.clone(),
-            req.department.clone(),
-            req.job_title.clone(),
-            None, // avatar_path handled separately via upload endpoint
-        )
+    let profile = crate::auth::storage::ProfileChanges {
+        first_name: req.first_name,
+        last_name: req.last_name,
+        email: req.email,
+        department: req.department,
+        job_title: req.job_title,
+    };
+    let written = storage
+        .update_profile(&user_id, profile)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update profile: {}", e)))?;
+    if !written {
+        return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
+    }
 
     let user_data = storage
         .load_user_by_id(&user_id)

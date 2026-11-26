@@ -354,15 +354,17 @@ success message says the record was kept if the outcome is `kept`.
   [`ACCESS_TOKENS.md`](ACCESS_TOKENS.md)), and the uploaded avatar image files are removed
   (the shared default avatar never is). A file that cannot be removed is logged and does not
   stop the delete. An avatar upload or SAML avatar fetch that finishes after the delete is not
-  linked to the record, and its file is removed. The `user.deleted` integration event fires
-  once, and the delete is logged on the `audit` target as `user.deleted` with its `outcome`
+  linked to the record, and its file is removed. The user's own profile edit that finishes
+  after the delete answers `404` and leaves the record as the delete left it. The
+  `user.deleted` integration event fires once, and the delete is logged on the `audit` target as `user.deleted` with its `outcome`
   and the number of tokens revoked; deleting a kept record again changes nothing.
 - **User limit:** a kept record does not count toward the `users` limit. Approving it again
   gives it a seat, so that approval answers `403` when the limit is reached. The seat is
   counted and taken under the user lock, so two approvals racing for the last seat admit one.
 - **Signing in again:** an administrator sets the status back to `approved`. An update
   that was authorised against the live user and finds the record kept by a delete that
-  landed in between is refused with `409` and changes nothing, so a racing or repeated
+  landed in between is refused with `409` and changes nothing: the role, status and profile
+  fields of one update are written together, so a racing or repeated
   `approved` cannot restore it without the approval checks. The Edit User page sends only
   the fields the administrator changed, so saving a page opened before the delete does not
   approve the kept record unless the status was changed on it. The next
