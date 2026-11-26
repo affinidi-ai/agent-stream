@@ -19,6 +19,7 @@ jest.mock('../../utils/toaster', () => ({
 }));
 
 const mockGet = apiClient.get as jest.Mock;
+const mockPut = apiClient.put as jest.Mock;
 const mockDelete = apiClient.delete as jest.Mock;
 
 const SAML_USER = {
@@ -51,6 +52,47 @@ const renderPage = async (userId: string) => {
   );
   await screen.findByDisplayValue(userId === 'kept-1' ? 'kept-1' : 'sam');
 };
+
+describe('EditUserPage save', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockPut.mockResolvedValue({ data: SAML_USER });
+  });
+
+  it('sends only the fields the administrator changed, so a stale status never re-approves', async () => {
+    mockGet.mockResolvedValue({ data: SAML_USER });
+
+    await renderPage('saml-1');
+    fireEvent.change(screen.getByPlaceholderText('Enter first name'), {
+      target: { value: 'Sam' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await screen.findByText('settings');
+
+    expect(mockPut).toHaveBeenCalledWith('/users/saml-1', { first_name: 'Sam' });
+  });
+
+  it('sends the status when the administrator changes it', async () => {
+    mockGet.mockResolvedValue({ data: SAML_USER });
+
+    await renderPage('saml-1');
+    fireEvent.click(screen.getByLabelText(/Cannot sign in/));
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await screen.findByText('settings');
+
+    expect(mockPut).toHaveBeenCalledWith('/users/saml-1', { status: 'disabled' });
+  });
+
+  it('sends nothing when nothing changed', async () => {
+    mockGet.mockResolvedValue({ data: SAML_USER });
+
+    await renderPage('saml-1');
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await screen.findByText('settings');
+
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+});
 
 describe('EditUserPage delete', () => {
   beforeEach(() => {

@@ -486,17 +486,24 @@ impl PasskeyStorage {
     /// SAML is not removed: the record is scrubbed of profile data and kept
     /// `Disabled` under the provider account, so the next sign-in is refused
     /// instead of creating a new approved user. Deleting a kept record again
-    /// changes nothing. The uploaded avatar files are removed after the record
-    /// changed, and a failure to remove one is logged, never returned.
+    /// changes nothing, and a record that is already gone, such as one a
+    /// concurrent delete removed, reports `Removed` without a change. The
+    /// uploaded avatar files are removed after the record changed, and a
+    /// failure to remove one is logged, never returned.
     pub async fn delete_user(
         &self,
         user_id: &str,
     ) -> Result<DeleteResult> {
         let _user_write_guard = self.user_write_guard().await;
-        let mut user_data = self
+        let Some(mut user_data) = self
             .load_user_by_id(user_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
+        else {
+            return Ok(DeleteResult {
+                outcome: DeleteOutcome::Removed,
+                changed: false,
+            });
+        };
 
         if user_data.deleted_at.is_some() {
             return Ok(DeleteResult {
@@ -841,15 +848,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_of_a_missing_user_is_an_error() {
+    async fn a_record_that_is_already_gone_reports_removed_without_a_change() {
         let temp_dir = tempdir().unwrap();
         let storage = storage_in(temp_dir.path()).await;
 
-        assert!(
+        assert_eq!(
             storage
                 .delete_user("nobody")
                 .await
-                .is_err()
+                .unwrap(),
+            DeleteResult {
+                outcome: DeleteOutcome::Removed,
+                changed: false
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_deletes_of_a_passkey_user_both_report_removed_and_one_changes_it() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&user("plain"))
+            .await
+            .unwrap();
+
+        let (a, b) = tokio::join!(storage.delete_user("plain"), storage.delete_user("plain"));
+        let (a, b) = (a.unwrap(), b.unwrap());
+
+        assert_eq!((a.outcome, b.outcome), (DeleteOutcome::Removed, DeleteOutcome::Removed));
+        assert_eq!(
+            [a.changed, b.changed]
+                .iter()
+                .filter(|changed| **changed)
+                .count(),
+            1
         );
     }
 
@@ -966,10 +999,19 @@ mod tests {
             .unwrap();
 
         assert!(
-            storage
+            !storage
                 .delete_user("alice")
                 .await
-                .is_err()
+                .unwrap()
+                .changed
+        );
+        assert!(
+            storage
+                .load_user_by_id("id-1")
+                .await
+                .unwrap()
+                .is_some(),
+            "a username matched no id, so nothing was deleted"
         );
         storage
             .delete_user("id-1")

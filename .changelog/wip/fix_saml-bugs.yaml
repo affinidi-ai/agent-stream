@@ -19,12 +19,14 @@ changes:
     - timestamp: '2026-11-25T17:40:00.000Z'
       title: Report stored Surfaces whose Prompt Guard rules cannot be evaluated
       description: >-
-        At startup, and within one refresh interval when a Surface changes on disk, every
-        enabled Prompt Guard rule of a stored Surface or Variant that cannot be evaluated is
-        logged at ERROR naming the Surface, the rule and its side, and counted in the new
-        agent_stream_prompt_guard_unusable_rules_total metric (labels side and reason). Such
-        Surfaces refuse every request with 502, so administrators now see them before
-        callers do. An unlabelled custom pattern is named by its position, never its regex.
+        At startup, and, when cache_refresh_interval_secs is above 0, within one refresh
+        interval of a Surface changing on disk, every enabled Prompt
+        Guard rule of a stored Surface or enabled Variant that cannot be evaluated is logged
+        at ERROR naming the Surface, the rule and its side, and counted in the new
+        agent_stream_prompt_guard_unusable_rules_total metric (labels side and reason).
+        Requests those rules guard are refused with 502, so administrators now see them
+        before callers do. An unlabelled custom pattern is named by its position, never its
+        regex.
   changed:
     - timestamp: '2026-11-25T11:25:02.000Z'
       title: Word user delete by sign-in method and mark deleted users on the Users page
@@ -35,7 +37,20 @@ changes:
         SAML wording, and the Edit User page shows a success message after delete. Kept records
         show a DELETED badge, can be filtered with a Deleted status choice, and offer no delete
         button.
-  fixed: []
+  fixed:
+    - timestamp: '2026-11-26T09:00:00.000Z'
+      title: Stop a stale Edit User page from approving a user deleted meanwhile
+      description: >-
+        The Edit User page sent the whole form on save, including the status it loaded, so
+        saving a page opened before another administrator deleted the user approved the
+        kept record again. It now sends only the fields the administrator changed, and
+        nothing when nothing changed.
+    - timestamp: '2026-11-26T09:00:01.000Z'
+      title: Answer a repeated delete of a removed user with removed, not an error
+      description: >-
+        When two deletes of a passkey user ran at once, the second answered 500 because the
+        record was already gone. It now answers 200 with outcome removed and sends no second
+        user.deleted event, like a repeated delete of a kept record.
   removed: []
   security:
     - timestamp: '2026-11-25T12:30:00.000Z'
@@ -43,9 +58,17 @@ changes:
       description: >-
         Affects 1.0.2 and earlier; fixed in the next release. The OLD_STATE and NEW_STATE of
         user events sent the stored user record to integrations, including the user's passkey
-        credentials and the OpenID Connect or SAML account of users who were never deleted,
-        which the user API hides. They now hold the user as the user API returns it: no
-        passkeys, the sign-in method, and the provider account only on a deleted user's kept
-        record. An integration that read oidc or saml_id from a live user's state no longer
-        receives them.
-  breaking: []
+        credentials and the OpenID Connect or SAML account, which the user API shows only to
+        readers of users while configuring a user integration needs only integrations.edit.
+        They now hold the user as the user API returns it, without passkeys or the provider
+        account. See the breaking entry for the migration.
+  breaking:
+    - timestamp: '2026-11-26T09:00:02.000Z'
+      title: Drop passkeys, oidc and saml_id from user event OLD_STATE and NEW_STATE
+      description: >-
+        The OLD_STATE and NEW_STATE values of the user.created, user.approved,
+        user.updated, user.deleted, user.login and user.accessed integration events no longer
+        contain passkeys, oidc or saml_id, including on the user.approved event for a deleted
+        user's kept record, and now contain sign_in_method (and deleted_at on a kept record).
+        An integration that read the provider account from them must identify the user by
+        USER_ID or user_id instead, and read sign_in_method to tell how the user signs in.

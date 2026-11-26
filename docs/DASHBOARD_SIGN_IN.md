@@ -318,7 +318,9 @@ user's (`403`, no reason shown; `user_disabled` in the OIDC log).
 The endpoint answers `200` with `{"outcome": "removed"}` for a user who signs in with a
 passkey, and `{"outcome": "kept"}` for a kept record. The `user.deleted` event fires only
 for the call that changed the record, decided while the user lock is held, so two concurrent
-deletes fire it once and a repeat delete of a kept record answers `kept` without firing it. The
+deletes fire it once and a repeat delete of a kept record answers `kept` without firing it. A
+delete that finds a passkey user's record already removed by a concurrent delete answers
+`removed` without firing it. The
 event's `OUTCOME` value is `removed` or `kept` (see
 [`INTEGRATIONS.md`](INTEGRATIONS.md#gateway-and-user-events)).
 
@@ -358,7 +360,9 @@ success message says the record was kept if the outcome is `kept`.
 - **User limit:** a kept record does not count toward the `users` limit. Approving it again
   gives it a seat, so that approval answers `403` when the limit is reached. The seat is
   counted and taken under the user lock, so two approvals racing for the last seat admit one.
-- **Signing in again:** an administrator sets the status back to `approved`. The next
+- **Signing in again:** an administrator sets the status back to `approved`. The Edit User
+  page sends only the fields the administrator changed, so saving a page opened before the
+  delete does not approve the kept record unless the status was changed on it. The next
   sign-in is the same user, with the role set from the claim or attribute mapping again. A
   role in the kept record is not used. Approving fires `user.approved` (without the welcome
   notification) as well as `user.updated`, so an integration that offboarded the person on

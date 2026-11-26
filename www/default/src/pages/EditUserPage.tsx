@@ -46,6 +46,13 @@ interface UserForm {
   job_title: string;
 }
 
+const changedFields = (loaded: UserForm, edited: UserForm): Partial<UserForm> =>
+  Object.fromEntries(
+    (Object.keys(edited) as (keyof UserForm)[])
+      .filter(key => edited[key] !== loaded[key])
+      .map(key => [key, edited[key]])
+  );
+
 const EditUserPage: React.FC = () => {
   const navigate = useNavigate();
   const { userId } = useParams<{ userId: string }>();
@@ -53,6 +60,7 @@ const EditUserPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [loadedForm, setLoadedForm] = useState<UserForm | null>(null);
   const [form, setForm] = useState<UserForm>({
     role: 'user',
     status: 'new',
@@ -71,7 +79,7 @@ const EditUserPage: React.FC = () => {
       setLoading(true);
       const response = await apiClient.get(`/users/${userId}`);
       setUser(response.data);
-      setForm({
+      const loaded: UserForm = {
         role: response.data.role,
         status: response.data.status,
         first_name: response.data.first_name || '',
@@ -79,7 +87,9 @@ const EditUserPage: React.FC = () => {
         email: response.data.email || '',
         department: response.data.department || '',
         job_title: response.data.job_title || '',
-      });
+      };
+      setLoadedForm(loaded);
+      setForm(loaded);
       setCreated(response.data.created_at);
       setUpdated(response.data.updated_at);
     } catch (error: any) {
@@ -96,7 +106,10 @@ const EditUserPage: React.FC = () => {
 
       try {
         setSaving(true);
-        await apiClient.put(`/users/${userId}`, form);
+        const changes = loadedForm ? changedFields(loadedForm, form) : form;
+        if (Object.keys(changes).length > 0) {
+          await apiClient.put(`/users/${userId}`, changes);
+        }
         navigate('/settings?tab=users');
       } catch (error: any) {
         setError(error.message || 'Failed to update user');
@@ -104,7 +117,7 @@ const EditUserPage: React.FC = () => {
         setSaving(false);
       }
     },
-    [form, navigate, userId]
+    [form, loadedForm, navigate, userId]
   );
 
   useEffect(() => {

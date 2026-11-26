@@ -68,10 +68,11 @@ pub async fn trigger_user_accessed(
 }
 
 /// The values of a user event. `OLD_STATE` and `NEW_STATE` hold the user as
-/// the user API returns it, so passkeys and the provider account of a user who
-/// was not deleted never reach an integration; a state the event does not
-/// have is empty. `OUTCOME` is `removed` or `kept` on user.deleted and empty
-/// on every other event.
+/// the user API returns it, without the provider account (`oidc`, `saml_id`),
+/// which the API shows only to readers of users and which configuring an
+/// integration does not require; passkeys never reach an integration either. A
+/// state the event does not have is empty. `OUTCOME` is `removed` or `kept` on
+/// user.deleted and empty on every other event.
 fn user_event_values(
     event_type: &str,
     user: &UserData,
@@ -80,8 +81,13 @@ fn user_event_values(
     outcome: Option<DeleteOutcome>,
 ) -> HashMap<String, String> {
     let state = |user: Option<&UserData>| {
-        user.and_then(|user| serde_json::to_string(&User::from(user.clone())).ok())
-            .unwrap_or_default()
+        user.and_then(|user| {
+            let mut view = User::from(user.clone());
+            view.oidc = None;
+            view.saml_id = None;
+            serde_json::to_string(&view).ok()
+        })
+        .unwrap_or_default()
     };
     HashMap::from([
         ("OLD_STATE".to_string(), state(old_state)),
@@ -310,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn a_user_state_leaves_out_passkeys_and_a_live_users_provider_account() {
+    fn a_user_state_leaves_out_passkeys_and_the_provider_account() {
         let values = user_event_values("user.deleted", &user(), Some(&user()), None, Some(DeleteOutcome::Kept));
         let old = state(&values, "OLD_STATE");
 
@@ -321,12 +327,21 @@ mod tests {
     }
 
     #[test]
-    fn an_approved_again_kept_record_still_names_its_provider_account() {
-        let mut approved = user();
-        approved.username = approved.user_id.clone();
+    fn a_kept_or_approved_again_record_never_sends_its_provider_account() {
+        let mut kept = user();
+        kept.saml_id = Some("saml-account".to_string());
+        kept.deleted_at = Some(chrono::Utc::now());
+        let mut approved_again = kept.clone();
+        approved_again.deleted_at = None;
+        approved_again.username = approved_again.user_id.clone();
 
-        let values = user_event_values("user.approved", &approved, None, Some(&approved), None);
+        for record in [&kept, &approved_again] {
+            let values = user_event_values("user.approved", record, None, Some(record), None);
+            let new = state(&values, "NEW_STATE");
 
-        assert_eq!(state(&values, "NEW_STATE")["oidc"]["subject"], "sub-1");
+            assert!(new.get("oidc").is_none(), "{new}");
+            assert!(new.get("saml_id").is_none(), "{new}");
+            assert_eq!(new["user_id"], "u-1");
+        }
     }
 }

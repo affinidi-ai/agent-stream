@@ -181,7 +181,9 @@ buttons, empty states, list/table, page shell) and a new-page recipe, see
     the Users status filter (`users-status-filter`) has a `Deleted` choice, and it has no
     delete button (`users-delete-button-<user_id>`, `users-modal-delete-button`,
     `edit-user-delete-button`). The Edit User page shows the provider account and the deleted
-    notice with test ids `edit-user-kept-account` and `edit-user-deleted-notice`.
+    notice with test ids `edit-user-kept-account` and `edit-user-deleted-notice`, and its save
+    sends only the fields the administrator changed (nothing when nothing changed), so a page
+    opened before a delete cannot approve the kept record by resending the status it loaded.
 
 ## Surface builder
 

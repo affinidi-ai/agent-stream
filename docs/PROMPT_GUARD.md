@@ -244,15 +244,16 @@ compile. Prompt Guard fails closed on such a rule:
   is logged at `ERROR` and counted in `agent_stream_prompt_guard_pattern_errors_total`
   ([OBSERVABILITY.md](OBSERVABILITY.md)).
 - Stored Surfaces are checked too, so an unusable rule shows up before callers get `502`.
-  Once the Surface store has loaded at startup, every rule of every stored Surface and its
-  Variants is checked, and each rule that cannot be evaluated is logged at `ERROR` naming
-  the Surface, the Variant when the rule is in its override, the rule and its side; an
-  unlabelled custom pattern is named by its position, never by its regex. A disabled
-  Prompt Guard is not checked. With `cache_refresh_interval_secs` above `0`, a Surface
-  changed on disk, such as a hand-edited `_storage/` file or a save on another node, is
-  checked the same way within one refresh interval. Each rule found is counted in
-  `agent_stream_prompt_guard_unusable_rules_total`. Requests keep failing closed with
-  `502` until the rule is fixed.
+  Once the Surface store has loaded at startup, on an Active or a Standby node, every rule
+  of every stored Surface and its enabled Variants is checked, and each rule
+  that cannot be evaluated is logged at `ERROR` naming the Surface, the Variant when the
+  rule is in its override, the rule and its side; an unlabelled custom pattern is named by
+  its position, never by its regex. A disabled Prompt Guard or Variant is not checked,
+  since no request reaches its rules. With `cache_refresh_interval_secs` above `0`, a
+  Surface changed on disk, such as a hand-edited `_storage/` file or a save on another
+  node, is checked the same way within one refresh interval. Each rule found is counted in
+  `agent_stream_prompt_guard_unusable_rules_total`. Requests those rules guard keep failing
+  closed with `502` until the rule is fixed.
 
 ## Model-backed detection
 

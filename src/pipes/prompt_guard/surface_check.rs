@@ -26,6 +26,7 @@ fn unusable_rules(
     let variants = surface
         .variants
         .iter()
+        .filter(|variant| variant.enabled)
         .filter_map(|variant| {
             variant
                 .overrides
@@ -44,7 +45,7 @@ fn unusable_rules(
 }
 
 /// Log one `ERROR` for each enabled Prompt Guard regex rule of `surface` or of
-/// one of its Variants that cannot be evaluated, naming the Surface and the
+/// one of its enabled Variants that cannot be evaluated, naming the Surface and the
 /// rule, and count it in `agent_stream_prompt_guard_unusable_rules_total`.
 /// Requests that rule guards are refused with `502`. Returns how many were
 /// found.
@@ -185,6 +186,15 @@ mod tests {
         assert_eq!(found[0].1.reason, "custom_pattern_invalid");
         assert_eq!(found[0].1.description, "custom pattern #2 does not compile on the request side");
         assert!(!format!("{found:?}").contains("secret-token"));
+    }
+
+    #[test]
+    fn a_disabled_variant_is_not_reported_because_no_request_reaches_it() {
+        let mut variant =
+            with_variant(surface(None), "canary", guard(true, json!([{ "builtin": "broken" }]), json!([])));
+        variant.variants[0].enabled = false;
+
+        assert_eq!(found(&variant), Vec::new());
     }
 
     #[test]
