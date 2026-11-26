@@ -1,0 +1,11 @@
+branch: docs/saml-display-name-guidance
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-23T12:40:49.000Z'
+      title: Advise mapping SAML group IDs or app roles, not group display names
+      description: The SAML role_mapping docs now say to map group object IDs or app-role values rather than group display names, which are not unique, since any one mapped value grants its role.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

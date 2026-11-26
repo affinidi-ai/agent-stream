@@ -917,7 +917,7 @@ pub(super) fn assertion_attributes(assertion: &Assertion) -> SamlAttributes {
 
 /// The first value of each attribute in the first attribute statement. An
 /// attribute with no first value is left out, and a name repeated in the
-/// statement takes its last occurrence.
+/// statement takes its last occurrence that has a value.
 fn first_statement_values(statements: &[AttributeStatement]) -> HashMap<String, String> {
     statements
         .first()
@@ -1081,6 +1081,19 @@ mod tests {
                 .get("id")
                 .map(String::as_str),
             Some("two")
+        );
+    }
+
+    #[test]
+    fn a_repeated_name_whose_last_occurrence_has_no_value_keeps_the_earlier_value() {
+        let mut repeated = statement(&[("id", &["one"]), ("id", &["two"])]);
+        repeated.attributes[1].values[0].value = None;
+        let identity = first_statement_values(&[repeated]);
+        assert_eq!(
+            identity
+                .get("id")
+                .map(String::as_str),
+            Some("one")
         );
     }
 
