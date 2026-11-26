@@ -70,12 +70,67 @@ pub struct UserData {
 }
 
 /// What deleting a user did to the record: `Removed` when it is gone,
-/// `Disabled` when it is kept, scrubbed and refused at sign-in.
+/// `Kept` when it stays disabled, scrubbed and refused at sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeleteOutcome {
     Removed,
-    Disabled,
+    Kept,
+}
+
+impl DeleteOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::Kept => "kept",
+        }
+    }
+}
+
+/// How a user signs in to the dashboard. A user with an OpenID provider or
+/// SAML account is kept, not removed, when deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignInMethod {
+    Passkey,
+    Oidc,
+    Saml,
+}
+
+/// An update authorised against a user who was not deleted found the record
+/// kept by a delete that landed in between, so it was refused rather than
+/// applied to, or used to restore, the kept record.
+#[derive(Debug, thiserror::Error)]
+#[error("the user was deleted while this update was being made")]
+pub struct DeletedDuringUpdate;
+
+/// Profile fields an update sets. A field left `None` keeps its stored value.
+#[derive(Debug, Default, Clone)]
+pub struct ProfileChanges {
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub email: Option<String>,
+    pub department: Option<String>,
+    pub job_title: Option<String>,
+}
+
+impl ProfileChanges {
+    fn apply_to(
+        self,
+        user_data: &mut UserData,
+    ) {
+        for (field, value) in [
+            (&mut user_data.first_name, self.first_name),
+            (&mut user_data.last_name, self.last_name),
+            (&mut user_data.email, self.email),
+            (&mut user_data.department, self.department),
+            (&mut user_data.job_title, self.job_title),
+        ] {
+            if value.is_some() {
+                *field = value;
+            }
+        }
+    }
 }
 
 /// The result of a delete: the outcome, and whether this call changed the
@@ -108,6 +163,18 @@ fn avatar_file_name(avatar_path: Option<&str>) -> Option<std::ffi::OsString> {
 impl StorableEntity for UserData {
     fn id(&self) -> &str {
         &self.user_id
+    }
+}
+
+impl UserData {
+    pub fn sign_in_method(&self) -> SignInMethod {
+        if self.oidc.is_some() {
+            SignInMethod::Oidc
+        } else if self.saml_id.is_some() {
+            SignInMethod::Saml
+        } else {
+            SignInMethod::Passkey
+        }
     }
 }
 
@@ -243,14 +310,21 @@ impl PasskeyStorage {
         Ok(user_data)
     }
 
-    /// Update a user's role and status by id. Approving a kept record gives
-    /// it a seat back, so the user limit is checked against the count taken
-    /// under the same guard that every other creator holds.
+    /// Update a user's role, status and profile by id, in one write under the
+    /// user write guard, so a delete lands either before or after all of it.
+    /// Approving a kept record gives it a seat back, so the user limit is
+    /// checked against the count taken under the same guard that every other
+    /// creator holds. `authorised_kept` says whether the caller authorised the
+    /// update against a kept record: when it did not, and a delete has kept the
+    /// record since, the update is refused with [`DeletedDuringUpdate`] so it
+    /// can neither restore nor change it.
     pub async fn update_user(
         &self,
         user_id: &str,
         role: Option<UserRole>,
         status: Option<UserStatus>,
+        profile: ProfileChanges,
+        authorised_kept: bool,
         limits: &crate::config::LimitsConfig,
     ) -> Result<()> {
         let _user_write_guard = self.user_write_guard().await;
@@ -258,6 +332,9 @@ impl PasskeyStorage {
             .load_user_by_id(user_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
+        if user_data.deleted_at.is_some() && !authorised_kept {
+            return Err(anyhow::Error::new(DeletedDuringUpdate));
+        }
 
         if let Some(new_status) = status {
             if new_status == UserStatus::Approved && user_data.deleted_at.is_some() {
@@ -275,6 +352,7 @@ impl PasskeyStorage {
         if let Some(new_role) = role {
             user_data.role = new_role;
         }
+        profile.apply_to(&mut user_data);
         user_data.updated_at = chrono::Utc::now();
 
         self.save_user(&user_data)
@@ -361,45 +439,27 @@ impl PasskeyStorage {
         Ok(None)
     }
 
-    /// Update user profile information
+    /// Update the profile of a user who has not been deleted. Returns whether
+    /// it was written: when a delete landed first, the record stays as the
+    /// delete left it.
     pub async fn update_profile(
         &self,
         user_id: &str,
-        first_name: Option<String>,
-        last_name: Option<String>,
-        email: Option<String>,
-        department: Option<String>,
-        job_title: Option<String>,
-        avatar_path: Option<String>,
-    ) -> Result<()> {
+        profile: ProfileChanges,
+    ) -> Result<bool> {
         let _user_write_guard = self.user_write_guard().await;
-        let mut user_data = self
+        let Some(mut user_data) = self
             .load_user_by_id(user_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
-
-        if let Some(fn_val) = first_name {
-            user_data.first_name = Some(fn_val);
-        }
-        if let Some(ln_val) = last_name {
-            user_data.last_name = Some(ln_val);
-        }
-        if let Some(email_val) = email {
-            user_data.email = Some(email_val);
-        }
-        if let Some(dept_val) = department {
-            user_data.department = Some(dept_val);
-        }
-        if let Some(job_val) = job_title {
-            user_data.job_title = Some(job_val);
-        }
-        if let Some(avatar_val) = avatar_path {
-            user_data.avatar_path = Some(avatar_val);
-        }
+            .filter(|user| user.deleted_at.is_none())
+        else {
+            return Ok(false);
+        };
+        profile.apply_to(&mut user_data);
         user_data.updated_at = chrono::Utc::now();
-
         self.save_user(&user_data)
-            .await
+            .await?;
+        Ok(true)
     }
 
     /// Check if user is approved to sign in
@@ -455,28 +515,35 @@ impl PasskeyStorage {
     /// SAML is not removed: the record is scrubbed of profile data and kept
     /// `Disabled` under the provider account, so the next sign-in is refused
     /// instead of creating a new approved user. Deleting a kept record again
-    /// changes nothing. The uploaded avatar files are removed after the record
-    /// changed, and a failure to remove one is logged, never returned.
+    /// changes nothing, and a record that is already gone, such as one a
+    /// concurrent delete removed, reports `Removed` without a change. The
+    /// uploaded avatar files are removed after the record changed, and a
+    /// failure to remove one is logged, never returned.
     pub async fn delete_user(
         &self,
         user_id: &str,
     ) -> Result<DeleteResult> {
         let _user_write_guard = self.user_write_guard().await;
-        let mut user_data = self
+        let Some(mut user_data) = self
             .load_user_by_id(user_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
+        else {
+            return Ok(DeleteResult {
+                outcome: DeleteOutcome::Removed,
+                changed: false,
+            });
+        };
 
         if user_data.deleted_at.is_some() {
             return Ok(DeleteResult {
-                outcome: DeleteOutcome::Disabled,
+                outcome: DeleteOutcome::Kept,
                 changed: false,
             });
         }
 
         let avatar_path = user_data.avatar_path.clone();
 
-        let outcome = if user_data.oidc.is_none() && user_data.saml_id.is_none() {
+        let outcome = if user_data.sign_in_method() == SignInMethod::Passkey {
             self.storage
                 .delete(&user_data.user_id)
                 .await?;
@@ -499,7 +566,7 @@ impl PasskeyStorage {
             self.save_user(&user_data)
                 .await?;
             tracing::info!(user_id = %user_data.user_id, "Disabled the record of a deleted federated user");
-            DeleteOutcome::Disabled
+            DeleteOutcome::Kept
         };
 
         self.remove_avatar_files(&user_data.user_id, avatar_path.as_deref())
@@ -617,7 +684,10 @@ impl ReloadOnPromotion for PasskeyStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeleteOutcome, DeleteResult, OidcIdentity, PasskeyStorage, UserData, UserRole, UserStatus};
+    use super::{
+        DeleteOutcome, DeleteResult, DeletedDuringUpdate, OidcIdentity, PasskeyStorage, ProfileChanges, SignInMethod,
+        UserData, UserRole, UserStatus,
+    };
     use crate::config::{LimitDefinition, LimitExceeded, LimitsConfig};
     use crate::server::mode::ReloadOnPromotion;
     use tempfile::tempdir;
@@ -720,7 +790,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_reports_disabled_for_a_kept_record_and_again_for_a_repeat() {
+    async fn delete_reports_kept_for_a_kept_record_and_again_for_a_repeat() {
         let temp_dir = tempdir().unwrap();
         let storage = storage_in(temp_dir.path()).await;
         storage
@@ -737,11 +807,33 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(first.outcome, DeleteOutcome::Disabled);
+        assert_eq!(first.outcome, DeleteOutcome::Kept);
         assert!(first.changed);
-        assert_eq!(repeat.outcome, DeleteOutcome::Disabled);
+        assert_eq!(repeat.outcome, DeleteOutcome::Kept);
         assert!(!repeat.changed);
-        assert_eq!(serde_json::to_string(&first.outcome).unwrap(), "\"disabled\"");
+        assert_eq!(serde_json::to_string(&first.outcome).unwrap(), "\"kept\"");
+    }
+
+    #[test]
+    fn an_outcome_name_matches_its_json_value() {
+        for outcome in [DeleteOutcome::Removed, DeleteOutcome::Kept] {
+            assert_eq!(serde_json::to_string(&outcome).unwrap(), format!("\"{}\"", outcome.as_str()));
+        }
+    }
+
+    #[test]
+    fn the_sign_in_method_follows_the_provider_account_the_user_has() {
+        let mut saml = user("saml-1");
+        saml.saml_id = Some("saml-account".to_string());
+        let mut both = oidc_user("both");
+        both.saml_id = Some("saml-account".to_string());
+
+        assert_eq!(user("plain").sign_in_method(), SignInMethod::Passkey);
+        assert_eq!(saml.sign_in_method(), SignInMethod::Saml);
+        assert_eq!(oidc_user("oidc-1").sign_in_method(), SignInMethod::Oidc);
+        assert_eq!(both.sign_in_method(), SignInMethod::Oidc);
+        assert_eq!(serde_json::to_string(&SignInMethod::Passkey).unwrap(), "\"passkey\"");
+        assert_eq!(serde_json::to_string(&SignInMethod::Saml).unwrap(), "\"saml\"");
     }
 
     #[tokio::test]
@@ -781,20 +873,46 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(a.outcome, DeleteOutcome::Disabled);
-        assert_eq!(b.outcome, DeleteOutcome::Disabled);
+        assert_eq!(a.outcome, DeleteOutcome::Kept);
+        assert_eq!(b.outcome, DeleteOutcome::Kept);
     }
 
     #[tokio::test]
-    async fn delete_of_a_missing_user_is_an_error() {
+    async fn a_record_that_is_already_gone_reports_removed_without_a_change() {
         let temp_dir = tempdir().unwrap();
         let storage = storage_in(temp_dir.path()).await;
 
-        assert!(
+        assert_eq!(
             storage
                 .delete_user("nobody")
                 .await
-                .is_err()
+                .unwrap(),
+            DeleteResult {
+                outcome: DeleteOutcome::Removed,
+                changed: false
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_deletes_of_a_passkey_user_both_report_removed_and_one_changes_it() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&user("plain"))
+            .await
+            .unwrap();
+
+        let (a, b) = tokio::join!(storage.delete_user("plain"), storage.delete_user("plain"));
+        let (a, b) = (a.unwrap(), b.unwrap());
+
+        assert_eq!((a.outcome, b.outcome), (DeleteOutcome::Removed, DeleteOutcome::Removed));
+        assert_eq!(
+            [a.changed, b.changed]
+                .iter()
+                .filter(|changed| **changed)
+                .count(),
+            1
         );
     }
 
@@ -865,11 +983,29 @@ mod tests {
             .await
             .unwrap();
 
-        storage
+        let first = storage
+            .delete_user("saml-user")
+            .await
+            .unwrap();
+        let repeat = storage
             .delete_user("saml-user")
             .await
             .unwrap();
 
+        assert_eq!(
+            first,
+            DeleteResult {
+                outcome: DeleteOutcome::Kept,
+                changed: true
+            }
+        );
+        assert_eq!(
+            repeat,
+            DeleteResult {
+                outcome: DeleteOutcome::Kept,
+                changed: false
+            }
+        );
         let kept = storage
             .load_user_by_saml_id("saml-1")
             .await
@@ -893,10 +1029,19 @@ mod tests {
             .unwrap();
 
         assert!(
-            storage
+            !storage
                 .delete_user("alice")
                 .await
-                .is_err()
+                .unwrap()
+                .changed
+        );
+        assert!(
+            storage
+                .load_user_by_id("id-1")
+                .await
+                .unwrap()
+                .is_some(),
+            "a username matched no id, so nothing was deleted"
         );
         storage
             .delete_user("id-1")
@@ -1116,26 +1261,212 @@ mod tests {
             .await;
         let role_update = tokio::time::timeout(
             wait,
-            storage.update_user("oidc-1", None, Some(UserStatus::Approved), &LimitsConfig::default()),
+            storage.update_user(
+                "oidc-1",
+                None,
+                Some(UserStatus::Approved),
+                ProfileChanges::default(),
+                false,
+                &LimitsConfig::default(),
+            ),
         )
         .await;
-        let profile_update = tokio::time::timeout(
-            wait,
-            storage.update_profile("oidc-1", Some("X".to_string()), None, None, None, None, None),
-        )
-        .await;
+        let profile_update = tokio::time::timeout(wait, storage.update_profile("oidc-1", first_name("X"))).await;
         drop(guard);
 
         assert!(role_update.is_err(), "update_user must wait for the guard");
         assert!(profile_update.is_err(), "update_profile must wait for the guard");
         storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &LimitsConfig::default())
+            .update_user(
+                "oidc-1",
+                None,
+                Some(UserStatus::Approved),
+                ProfileChanges::default(),
+                false,
+                &LimitsConfig::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .update_profile("oidc-1", first_name("X"))
+                .await
+                .unwrap()
+        );
+    }
+
+    fn first_name(name: &str) -> ProfileChanges {
+        ProfileChanges {
+            first_name: Some(name.to_string()),
+            ..ProfileChanges::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_update_writes_role_status_and_profile_together_and_keeps_unset_fields() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+
+        storage
+            .update_user(
+                "oidc-1",
+                Some(UserRole::PowerUser),
+                Some(UserStatus::Disabled),
+                ProfileChanges {
+                    last_name: Some("Lovelace".to_string()),
+                    job_title: Some("Engineer".to_string()),
+                    ..ProfileChanges::default()
+                },
+                false,
+                &LimitsConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        let stored = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((stored.role, stored.status), (UserRole::PowerUser, UserStatus::Disabled));
+        assert_eq!(stored.last_name.as_deref(), Some("Lovelace"));
+        assert_eq!(stored.job_title.as_deref(), Some("Engineer"));
+        assert_eq!(stored.first_name.as_deref(), Some("Ada"));
+        assert_eq!(stored.email.as_deref(), Some("a@example.com"));
+        assert_eq!(stored.department.as_deref(), Some("Ops"));
+    }
+
+    #[tokio::test]
+    async fn an_update_authorised_against_a_live_user_is_refused_once_a_delete_kept_the_record() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
             .await
             .unwrap();
         storage
-            .update_profile("oidc-1", Some("X".to_string()), None, None, None, None, None)
+            .delete_user("oidc-1")
             .await
             .unwrap();
+        let scrubbed = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        for (role, status, profile) in [
+            (None, Some(UserStatus::Approved), ProfileChanges::default()),
+            (Some(UserRole::PowerUser), None, ProfileChanges::default()),
+            (
+                None,
+                None,
+                ProfileChanges {
+                    email: Some("back@example.com".to_string()),
+                    department: Some("Ops".to_string()),
+                    ..first_name("Ada")
+                },
+            ),
+        ] {
+            let refused = storage
+                .update_user("oidc-1", role, status, profile, false, &LimitsConfig::default())
+                .await
+                .unwrap_err();
+            assert!(
+                refused
+                    .downcast_ref::<DeletedDuringUpdate>()
+                    .is_some(),
+                "{refused:?}"
+            );
+        }
+
+        let kept = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.status, UserStatus::Disabled);
+        assert_eq!(kept.role, UserRole::User);
+        assert!(kept.deleted_at.is_some());
+        assert_eq!(kept.first_name, None);
+        assert_eq!(kept.email, None);
+        assert_eq!(kept.department, None);
+        assert_eq!(kept.updated_at, scrubbed.updated_at);
+    }
+
+    #[tokio::test]
+    async fn a_profile_update_leaves_a_deleted_users_record_as_the_delete_left_it() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+        storage
+            .save_user(&user("plain"))
+            .await
+            .unwrap();
+        for id in ["oidc-1", "plain"] {
+            storage
+                .delete_user(id)
+                .await
+                .unwrap();
+        }
+        let scrubbed = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        for id in ["oidc-1", "plain"] {
+            let written = storage
+                .update_profile(id, first_name("Ada"))
+                .await
+                .unwrap();
+            assert!(!written, "{id}");
+        }
+
+        let kept = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.first_name, None);
+        assert_eq!(kept.updated_at, scrubbed.updated_at);
+        assert!(
+            storage
+                .load_user_by_id("plain")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_update_writes_a_live_users_record() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+
+        let written = storage
+            .update_profile("oidc-1", first_name("Grace"))
+            .await
+            .unwrap();
+
+        assert!(written);
+        let stored = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.first_name.as_deref(), Some("Grace"));
+        assert_eq!(stored.email.as_deref(), Some("a@example.com"));
     }
 
     #[tokio::test]
@@ -1152,7 +1483,14 @@ mod tests {
             .unwrap();
 
         storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &LimitsConfig::default())
+            .update_user(
+                "oidc-1",
+                None,
+                Some(UserStatus::Approved),
+                ProfileChanges::default(),
+                true,
+                &LimitsConfig::default(),
+            )
             .await
             .unwrap();
 
@@ -1246,7 +1584,7 @@ mod tests {
         let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
 
         let refused = storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &users_limit(1))
+            .update_user("oidc-1", None, Some(UserStatus::Approved), ProfileChanges::default(), true, &users_limit(1))
             .await
             .unwrap_err();
 
@@ -1271,7 +1609,7 @@ mod tests {
         let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
 
         storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &users_limit(2))
+            .update_user("oidc-1", None, Some(UserStatus::Approved), ProfileChanges::default(), true, &users_limit(2))
             .await
             .unwrap();
 
@@ -1290,13 +1628,63 @@ mod tests {
         let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
 
         storage
-            .update_user("oidc-1", Some(UserRole::PowerUser), Some(UserStatus::Disabled), &users_limit(1))
+            .update_user(
+                "oidc-1",
+                Some(UserRole::PowerUser),
+                Some(UserStatus::Disabled),
+                ProfileChanges::default(),
+                true,
+                &users_limit(1),
+            )
             .await
             .unwrap();
         storage
-            .update_user("plain", None, Some(UserStatus::Approved), &users_limit(1))
+            .update_user("plain", None, Some(UserStatus::Approved), ProfileChanges::default(), false, &users_limit(1))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_approvals_of_kept_records_fill_only_the_one_remaining_seat() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
+        let mut second = oidc_user("oidc-2");
+        second.oidc = Some(OidcIdentity {
+            issuer: "https://idp.example.com".to_string(),
+            subject: "sub-2".to_string(),
+        });
+        storage
+            .save_user(&second)
+            .await
+            .unwrap();
+        storage
+            .delete_user("oidc-2")
+            .await
+            .unwrap();
+        let limits = users_limit(2);
+
+        let (first, other) = tokio::join!(
+            storage.update_user("oidc-1", None, Some(UserStatus::Approved), ProfileChanges::default(), true, &limits),
+            storage.update_user("oidc-2", None, Some(UserStatus::Approved), ProfileChanges::default(), true, &limits)
+        );
+
+        let refused: Vec<anyhow::Error> = [first, other]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0]
+                .downcast_ref::<LimitExceeded>()
+                .is_some()
+        );
+        assert_eq!(
+            storage
+                .count_toward_user_limit()
+                .await
+                .unwrap(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1313,7 +1701,14 @@ mod tests {
         }
 
         storage
-            .update_user("second", Some(UserRole::PowerUser), Some(UserStatus::Approved), &LimitsConfig::default())
+            .update_user(
+                "second",
+                Some(UserRole::PowerUser),
+                Some(UserStatus::Approved),
+                ProfileChanges::default(),
+                false,
+                &LimitsConfig::default(),
+            )
             .await
             .unwrap();
 
@@ -1531,6 +1926,61 @@ mod tests {
             .unwrap();
         assert_eq!(plain.avatar_path.as_deref(), Some("avatars/plain.png"));
         assert!(kept.avatar_path.is_none());
+    }
+
+    async fn save_avatar_as_the_upload_and_saml_sign_in_do(
+        storage: &PasskeyStorage,
+        dir: &std::path::Path,
+        user_id: &str,
+    ) {
+        let relative = format!("avatars/{user_id}.png");
+        write_avatar(dir, &format!("{user_id}.png")).await;
+        if !storage
+            .set_avatar_if_approved(user_id, relative.clone())
+            .await
+            .unwrap()
+        {
+            storage
+                .remove_uploaded_avatar(user_id, &relative)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_user_has_no_avatar_file_or_link_whichever_of_delete_and_avatar_save_runs_first() {
+        for avatar_saved_first in [true, false] {
+            let temp_dir = tempdir().unwrap();
+            let storage = storage_in(temp_dir.path()).await;
+            storage
+                .save_user(&oidc_user("oidc-1"))
+                .await
+                .unwrap();
+
+            if avatar_saved_first {
+                save_avatar_as_the_upload_and_saml_sign_in_do(&storage, temp_dir.path(), "oidc-1").await;
+            }
+            storage
+                .delete_user("oidc-1")
+                .await
+                .unwrap();
+            if !avatar_saved_first {
+                save_avatar_as_the_upload_and_saml_sign_in_do(&storage, temp_dir.path(), "oidc-1").await;
+            }
+
+            let kept = storage
+                .load_user_by_id("oidc-1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(kept.avatar_path.is_none(), "avatar saved first: {avatar_saved_first}");
+            assert!(
+                !temp_dir
+                    .path()
+                    .join("avatars/oidc-1.png")
+                    .exists(),
+                "avatar saved first: {avatar_saved_first}"
+            );
+        }
     }
 
     #[tokio::test]

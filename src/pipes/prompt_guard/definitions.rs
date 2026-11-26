@@ -301,6 +301,27 @@ pub fn init_definitions_from_str(json: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Pattern definitions for unit tests: the shipped patterns plus `broken`,
+/// whose regex does not compile. Definitions load once per process, so every
+/// test module loads this same set.
+#[cfg(test)]
+const TEST_DEFINITIONS: &str = r#"{
+        "defined_patterns": [
+            {"key": "ssn", "label": "US SSN", "icon": "fa-id-card", "description": "SSN", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"},
+            {"key": "credit_card", "label": "Credit Card", "icon": "fa-credit-card", "description": "CC", "regex": "\\d(?:[ -]?\\d){13,}|(?-u:\\b)4[0-9]{12}(?-u:\\b)"},
+            {"key": "email", "label": "Email", "icon": "fa-envelope", "description": "Email", "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"},
+            {"key": "phone_number", "label": "Phone", "icon": "fa-phone", "description": "Phone", "regex": "(?:\\+\\d{1,3}[-. ]?(?:\\d[-. ]?){6,12}\\d)|(?:\\([2-9]\\d{2}\\)[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b(?:1[-. ]?)?[2-9]\\d{2}[-. ]?\\d{3}[-. ]?\\d{4}\\b)|(?:\\b0[45]\\d{2}[-. ]?\\d{3}[-. ]?\\d{3}\\b)"},
+            {"key": "ip_address", "label": "IP Address", "icon": "fa-network-wired", "description": "IP", "regex": "\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b"},
+            {"key": "street_address", "label": "Street Address", "icon": "fa-map-marker-alt", "description": "Address", "regex": "\\d{1,5}\\s\\w.\\s(\\b\\w*\\b\\s){1,2}\\w*.?"},
+            {"key": "broken", "label": "Broken", "icon": "fa-ban", "description": "Does not compile", "regex": "(?!x)y"}
+        ]
+    }"#;
+
+#[cfg(test)]
+pub(crate) fn init_test_definitions() {
+    let _ = init_definitions_from_str(TEST_DEFINITIONS);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

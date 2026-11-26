@@ -166,6 +166,17 @@ async fn appliance_reports_builtin_pattern_as_unusable(
     assert_eq!(count, 1.0, "expected built-in pattern {builtin:?} to be reported as unusable once\n{metrics}");
 }
 
+#[then(expr = "the appliance reports a Prompt Guard rule of a stored Surface as unusable")]
+async fn appliance_reports_stored_surface_rule_as_unusable(world: &mut SurfaceWorld) {
+    let metrics = scrape_prometheus_metrics(world).await;
+    let count = metric_value(
+        &metrics,
+        "agent_stream_prompt_guard_unusable_rules_total",
+        &[("side", "request"), ("reason", "compile_failed")],
+    );
+    assert_eq!(count, 1.0, "expected one stored Surface rule to be reported as unusable at startup\n{metrics}");
+}
+
 #[then(expr = "the request is refused because a Prompt Guard rule is unavailable")]
 fn request_is_refused_because_prompt_guard_rule_is_unavailable(world: &mut SurfaceWorld) {
     let response = world

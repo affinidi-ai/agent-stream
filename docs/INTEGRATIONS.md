@@ -484,22 +484,32 @@ its values are `RECORD_ID`, `SURFACE_ID`, `SURFACE_NAME`, `CONTENT_HASH`, `PREV_
 
 `user.approved` fires when a new user is approved with a role other than administrator, and
 when an administrator approves a deleted user's kept record again, together with `user.updated`
-in both cases. The event for a kept record carries the user id and the provider account (`oidc`
-or `saml_id` in `NEW_STATE`); `USERNAME` is the user id and `USER_EMAIL` is empty until the
-user's next sign-in.
+in both cases. The event for a kept record carries the user id and `sign_in_method` in
+`NEW_STATE`, never the provider account; `USERNAME` is the user id and `USER_EMAIL` is empty
+until the user's next sign-in.
 
 A trigger configuration is `{"integration_integrations": [{"integration_id", "event_types",
 "variables"}]}`, stored under the integration triggers directory (`gateways/{id}/`,
 `users/`). An event is delivered to an integration that is active, in the resource's own
 category or `general`, listed in the configuration, and whose `event_types` include the event
-or are empty. `variables` adds custom values. Saving refuses with `400` an integration that
+or are empty. `variables` adds custom values; an event value of the same name replaces a
+custom value, so do not name a custom variable after an event value such as `OUTCOME`. Saving refuses with `400` an integration that
 does not exist, that the resource cannot reference (a user configuration takes only
 integrations without a tenant; a gateway's takes its own tenant's or untenanted ones), that
 is outside the caller's token scope, or that is an `audit` integration.
 
 Gateway values: `GATEWAY_ID`, `GATEWAY_NAME`, `GATEWAY_DESCRIPTION`, `GATEWAY_DID`,
 `GATEWAY_TYPE`, `GATEWAY_STATUS`, and `GATEWAY_OLD_STATUS` on a status change. User values:
-`USER_ID`, `USERNAME`, `USER_EMAIL`, `USER_ROLE`, `USER_STATUS`.
+`USER_ID`, `USERNAME`, `USER_EMAIL`, `USER_ROLE`, `USER_STATUS`, and `OUTCOME`: on
+`user.deleted`, `removed` when the record is gone and `kept` when an OIDC or SAML user's record
+is kept disabled (see [`DASHBOARD_SIGN_IN.md`](DASHBOARD_SIGN_IN.md#deleting-an-oidc-or-saml-user));
+empty on every other user event. The dashboard's generated samples leave `OUTCOME` out, since
+they serve every event of the category. A user event's `OLD_STATE` and `NEW_STATE` hold the user
+as the user API returns it, without the passkeys and without the provider account (`oidc`,
+`saml_id`): the user API shows that account only to readers of users, and configuring a user
+integration needs only `integrations.edit`. `sign_in_method` says how the user signs in, and
+`USER_ID` identifies the record. `USERNAME` and `username` can still be the OIDC `sub` or the
+SAML user ID when another user held the asserted username at sign-in.
 
 ### Connection Point invitations
 

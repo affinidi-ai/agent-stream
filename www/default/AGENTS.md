@@ -62,7 +62,9 @@ buttons, empty states, list/table, page shell) and a new-page recipe, see
     Template**), the Email subject and body, and the Slack message text from the
     backend runtime-variable catalogue (`GET /integrations/runtime-variables`:
     the general variables plus the category's own), so a sample only uses
-    variables that category can substitute. Every sample leads with
+    variables that category can substitute. A category variable only some of its
+    events fill (`EVENT_SPECIFIC_VARIABLES`: `OUTCOME`, filled on `user.deleted`)
+    is left out, since the sample serves every event. Every sample leads with
     `appliance_id: ${APPLIANCE_ID}` (a general variable the backend fills on
     every delivery and never takes from event or caller values: the **Appliance
     ID** set in Settings › System Settings (`appliance_id`,
@@ -163,12 +165,28 @@ buttons, empty states, list/table, page shell) and a new-page recipe, see
     toast with DOM APIs for this reason. Where a view must build an HTML string
     (`dangerouslySetInnerHTML`, the log viewers), every interpolated value that is
     not a constant goes through `escapeHtml` (`utils/escapeHtml.ts`).
-15. The wording that says what deleting a user does (the delete button title, the success
-    toast, the "Deleted:" and "Provider account:" headings and the label of a kept user's
-    provider account, and the notice on the Edit User page) comes from `utils/userDelete.ts`, never inline, so every
-    place that deletes a user says the same thing. The OIDC notice during the delete confirm step is the `confirmNotice` of `DeleteButton`, shown only for a user with `has_oidc_account` (the shorter text in the Users table). `DeleteButton` keeps its `role="status"` region (test id `delete-confirm-notice`) mounted and fills it only while confirming. Success toasts, including the Notifications reject toast, follow the `outcome` the delete returns and come from `utils/userDelete.ts`. The Edit User page shows the provider
-    account and the deleted notice for a disabled user bound to one, with test ids
-    `edit-user-kept-account` and `edit-user-deleted-notice`.
+15. The wording that says what deleting a user does (the delete button title, the confirm
+    notice, the success toast, the `DELETED` badge, the "Deleted:" and "Provider account:"
+    headings and the label of a kept user's provider account, and the notice on the Edit User
+    page) comes from `utils/userDelete.ts`, never inline, so every place that deletes a user
+    says the same thing. The wording follows the user's `sign_in_method`: an `oidc` or `saml`
+    user gets a title and a confirm notice that say the record is kept disabled and what
+    approving it again does, and a `passkey` user gets no OpenID Connect or SAML wording. The
+    notice is the `confirmNotice` of `DeleteButton` (the shorter text in the Users table);
+    `DeleteButton` keeps its `role="status"` region (test id `delete-confirm-notice`) mounted
+    and fills it only while confirming. Success toasts, including the Edit User page toast
+    after delete and the Notifications reject toast, follow the `outcome` the delete returns
+    (`removed` or `kept`). A kept record is one with `deleted_at`: it shows the `DELETED` badge
+    (`users-deleted-badge-<user_id>`, `users-modal-deleted-badge`, `edit-user-deleted-badge`),
+    the Users status filter (`users-status-filter`) has a `Deleted` choice, and it has no
+    delete button (`users-delete-button-<user_id>`, `users-modal-delete-button`,
+    `edit-user-delete-button`). The Edit User page shows the provider account and the deleted
+    notice with test ids `edit-user-kept-account` and `edit-user-deleted-notice`, and its save
+    (`edit-user-save-button`) sends only the fields the administrator changed (nothing when
+    nothing changed, and Save stays disabled until the user has loaded), so a page opened
+    before a delete cannot approve the kept record by resending the status it loaded. The
+    page encodes the route's user id in every API path and shows the delete button only for
+    the user it loaded.
 
 ## Surface builder
 

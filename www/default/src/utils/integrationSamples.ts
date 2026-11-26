@@ -35,6 +35,9 @@ const SUMMARY_KEYS: Record<string, string> = {
   MESSAGE_ID: 'message_id',
 };
 
+/** Category variables only some of the category's events fill, so a sample every event uses leaves them out. */
+const EVENT_SPECIFIC_VARIABLES = new Set(['OUTCOME']);
+
 const placeholder = (name: string): string => `\${${name}}`;
 
 function categoryVariables(
@@ -55,7 +58,9 @@ export function buildIntegrationSamples(
     category === GENERAL_CATEGORY
       ? { label: '', variables: [] }
       : categoryVariables(catalogue, category);
-  const specific = own.variables.filter(v => !generalByName.has(v.name));
+  const specific = own.variables.filter(
+    v => !generalByName.has(v.name) && !EVENT_SPECIFIC_VARIABLES.has(v.name)
+  );
   const summary = SUMMARY_VARIABLES.flatMap(name => generalByName.get(name) ?? []);
   const state = ['OLD_STATE', 'NEW_STATE'].flatMap(n => generalByName.get(n) ?? []);
   const has = (name: string) => generalByName.has(name);

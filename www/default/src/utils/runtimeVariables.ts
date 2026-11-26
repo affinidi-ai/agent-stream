@@ -280,6 +280,14 @@ function getFallbackRuntimeVariables(): RuntimeVariablesResponse {
             category: 'user',
           },
           {
+            name: 'OUTCOME',
+            label: 'Delete Outcome',
+            description:
+              "On user.deleted: removed, or kept when the user's OpenID Connect or SAML record is kept disabled; empty on other user events",
+            example: '$OUTCOME',
+            category: 'user',
+          },
+          {
             name: 'TIMESTAMP',
             label: 'Timestamp',
             description: 'Current timestamp in ISO 8601 format',

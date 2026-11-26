@@ -310,6 +310,15 @@ fn get_user_variables() -> RuntimeVariableCategory {
                 example: "$EVENT_TYPE".to_string(),
                 category: "user".to_string(),
             },
+            RuntimeVariable {
+                name: "OUTCOME".to_string(),
+                label: "Delete Outcome".to_string(),
+                description:
+                    "On user.deleted: removed, or kept when the user's OpenID Connect or SAML record is kept disabled; empty on other user events"
+                        .to_string(),
+                example: "$OUTCOME".to_string(),
+                category: "user".to_string(),
+            },
         ],
     }
 }
@@ -1123,6 +1132,16 @@ mod tests {
         assert!(names.contains(&"USER_ID".to_string()));
         assert!(names.contains(&"USERNAME".to_string()));
         assert!(names.contains(&"USER_EMAIL".to_string()));
+    }
+
+    #[test]
+    fn a_user_template_can_use_the_delete_outcome() {
+        let mut values = HashMap::new();
+        values.insert("OUTCOME".to_string(), "kept".to_string());
+
+        assert!(validate_template_variables("${OUTCOME}", "user").is_empty());
+        assert_eq!(substitute_variables("Record ${OUTCOME}", Some("user"), &values), "Record kept");
+        assert_eq!(validate_template_variables("${OUTCOME}", "gateway"), vec!["OUTCOME".to_string()]);
     }
 
     #[test]

@@ -45,6 +45,7 @@ Feature: LLM Surface Prompt Guard
     Then the request is refused because a Prompt Guard rule is unavailable
     And provider "bravo" received no chat completion requests
     And the appliance reports Prompt Guard built-in pattern "ssn" as unusable
+    And the appliance reports a Prompt Guard rule of a stored Surface as unusable
 
   Scenario Outline: Prompt Guard refuses a <operation> request before provider invocation when its built-in pattern cannot be used
     Given the operator can use the Admin API

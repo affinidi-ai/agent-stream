@@ -864,7 +864,7 @@ async fn deleting_an_oidc_user_again_reports_the_kept_outcome_without_error() {
         .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["outcome"], "disabled");
+    assert_eq!(body["outcome"], "kept");
 }
 
 #[tokio::test]
@@ -927,7 +927,7 @@ async fn a_deleted_user_is_refused_at_the_next_sign_in_and_not_created_again() {
     let response = flow.member_sign_in().await;
 
     assert_eq!(deleted, StatusCode::OK);
-    assert_eq!(body["outcome"], "disabled");
+    assert_eq!(body["outcome"], "kept");
     assert!(
         !flow
             .session_is_live(&elsewhere)

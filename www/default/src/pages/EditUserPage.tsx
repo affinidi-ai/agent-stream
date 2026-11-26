@@ -3,10 +3,15 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { apiClient } from '../api';
 import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
+import { showToast } from '../utils/toaster';
 import {
+  type DeleteOutcome,
+  type SignInMethod,
+  DELETED_BADGE,
   DELETED_USER_NOTICE,
-  DELETE_USER_TITLE,
+  deleteButtonTitle,
   deleteConfirmNotice,
+  deleteSuccessMessage,
   isDeletedKeptUser,
   keptAccountLabel,
 } from '../utils/userDelete';
@@ -27,7 +32,8 @@ interface User {
   avatar_path?: string;
   oidc?: { issuer: string; subject: string };
   saml_id?: string;
-  has_oidc_account?: boolean;
+  sign_in_method?: SignInMethod;
+  deleted_at?: string;
 }
 
 interface UserForm {
@@ -40,13 +46,22 @@ interface UserForm {
   job_title: string;
 }
 
+const changedFields = (loaded: UserForm, edited: UserForm): Partial<UserForm> =>
+  Object.fromEntries(
+    (Object.keys(edited) as (keyof UserForm)[])
+      .filter(key => edited[key] !== loaded[key])
+      .map(key => [key, edited[key]])
+  );
+
 const EditUserPage: React.FC = () => {
   const navigate = useNavigate();
   const { userId } = useParams<{ userId: string }>();
+  const userPath = `/users/${encodeURIComponent(userId ?? '')}`;
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [loadedForm, setLoadedForm] = useState<UserForm | null>(null);
   const [form, setForm] = useState<UserForm>({
     role: 'user',
     status: 'new',
@@ -63,9 +78,9 @@ const EditUserPage: React.FC = () => {
   const fetchUser = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await apiClient.get(`/users/${userId}`);
+      const response = await apiClient.get(userPath);
       setUser(response.data);
-      setForm({
+      const loaded: UserForm = {
         role: response.data.role,
         status: response.data.status,
         first_name: response.data.first_name || '',
@@ -73,7 +88,9 @@ const EditUserPage: React.FC = () => {
         email: response.data.email || '',
         department: response.data.department || '',
         job_title: response.data.job_title || '',
-      });
+      };
+      setLoadedForm(loaded);
+      setForm(loaded);
       setCreated(response.data.created_at);
       setUpdated(response.data.updated_at);
     } catch (error: any) {
@@ -81,16 +98,22 @@ const EditUserPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userPath]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
       setError('');
+      if (!loadedForm) {
+        return;
+      }
 
       try {
         setSaving(true);
-        await apiClient.put(`/users/${userId}`, form);
+        const changes = changedFields(loadedForm, form);
+        if (Object.keys(changes).length > 0) {
+          await apiClient.put(userPath, changes);
+        }
         navigate('/settings?tab=users');
       } catch (error: any) {
         setError(error.message || 'Failed to update user');
@@ -98,7 +121,7 @@ const EditUserPage: React.FC = () => {
         setSaving(false);
       }
     },
-    [form, navigate, userId]
+    [form, loadedForm, navigate, userPath]
   );
 
   useEffect(() => {
@@ -127,7 +150,8 @@ const EditUserPage: React.FC = () => {
   const handleDelete = async () => {
     try {
       setSaving(true);
-      await apiClient.delete(`/users/${userId}`);
+      const { data } = await apiClient.delete<{ outcome?: DeleteOutcome }>(userPath);
+      showToast('success', deleteSuccessMessage(data?.outcome, user ?? {}));
       navigate('/settings?tab=users');
     } catch (error: any) {
       setError(error.message || 'Failed to delete user');
@@ -162,6 +186,11 @@ const EditUserPage: React.FC = () => {
         <div className="card-header py-3 d-flex justify-content-between align-items-center">
           <h6 className="m-0 font-weight-bold text-primary">
             <i className="fas fa-user-edit"></i> Edit User: {user?.username || userId}
+            {user && isDeletedKeptUser(user) && (
+              <span className="badge text-bg-dark ms-2" data-testid="edit-user-deleted-badge">
+                {DELETED_BADGE}
+              </span>
+            )}
           </h6>
         </div>
         <div className="card-body">
@@ -357,7 +386,12 @@ const EditUserPage: React.FC = () => {
             </div>
 
             <div className="d-flex gap-2">
-              <button type="submit" className="btn btn-primary" disabled={saving}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={saving || !loadedForm}
+                data-testid="edit-user-save-button"
+              >
                 {saving ? (
                   <>
                     <span
@@ -373,17 +407,22 @@ const EditUserPage: React.FC = () => {
                   </>
                 )}
               </button>
-              {form.role !== 'administrator' && !user?.is_primary && (
-                <DeleteButton
-                  onDelete={handleDelete}
-                  disabled={saving}
-                  variant="danger"
-                  title={DELETE_USER_TITLE}
-                  confirmNotice={user ? deleteConfirmNotice(user) : undefined}
-                >
-                  Delete User
-                </DeleteButton>
-              )}
+              {user &&
+                user.user_id === userId &&
+                form.role !== 'administrator' &&
+                !user.is_primary &&
+                !isDeletedKeptUser(user) && (
+                  <DeleteButton
+                    onDelete={handleDelete}
+                    disabled={saving}
+                    variant="danger"
+                    title={deleteButtonTitle(user)}
+                    confirmNotice={deleteConfirmNotice(user)}
+                    data-testid="edit-user-delete-button"
+                  >
+                    Delete User
+                  </DeleteButton>
+                )}
               <button
                 type="button"
                 className="btn btn-secondary"

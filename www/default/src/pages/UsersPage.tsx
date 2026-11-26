@@ -5,9 +5,11 @@ import { formatDateTime } from '../utils/stringUtils';
 import { DeleteButton } from '../components/shared/DeleteButton';
 import {
   type DeleteOutcome,
+  type SignInMethod,
+  deleteButtonTitle,
   deleteConfirmNotice,
   deleteSuccessMessage,
-  DELETE_USER_TITLE,
+  DELETED_BADGE,
   isDeletedKeptUser,
   KEPT_ACCOUNT_HEADING,
   keptAccountDetail,
@@ -45,8 +47,17 @@ interface User {
   avatar_path?: string;
   oidc?: { issuer: string; subject: string };
   saml_id?: string;
-  has_oidc_account?: boolean;
+  sign_in_method?: SignInMethod;
+  deleted_at?: string;
 }
+
+type StatusFilter = 'all' | User['status'] | 'deleted';
+
+const matchesStatusFilter = (user: User, filter: StatusFilter): boolean => {
+  if (filter === 'all') return true;
+  if (filter === 'deleted') return isDeletedKeptUser(user);
+  return user.status === filter;
+};
 
 const UsersPage: React.FC = () => {
   const navigate = useNavigate();
@@ -61,7 +72,7 @@ const UsersPage: React.FC = () => {
   const [roleFilter, setRoleFilter] = useState<'all' | 'administrator' | 'poweruser' | 'user'>(
     'all'
   );
-  const [statusFilter, setStatusFilter] = useState<'all' | 'new' | 'approved' | 'disabled'>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -134,7 +145,7 @@ const UsersPage: React.FC = () => {
         if (!matchesSearch) return false;
       }
       if (roleFilter !== 'all' && user.role !== roleFilter) return false;
-      if (statusFilter !== 'all' && user.status !== statusFilter) return false;
+      if (!matchesStatusFilter(user, statusFilter)) return false;
       return true;
     });
   }, [users, searchTerm, roleFilter, statusFilter]);
@@ -162,7 +173,8 @@ const UsersPage: React.FC = () => {
           <select
             className="form-control dropdown-styling"
             value={statusFilter}
-            onChange={e => setStatusFilter(e.target.value as any)}
+            onChange={e => setStatusFilter(e.target.value as StatusFilter)}
+            data-testid="users-status-filter"
             style={{
               width: '160px',
               display: 'inline-block',
@@ -173,6 +185,7 @@ const UsersPage: React.FC = () => {
             <option value="new">New</option>
             <option value="approved">Approved</option>
             <option value="disabled">Disabled</option>
+            <option value="deleted">Deleted</option>
           </select>
         </div>
         <div>
@@ -308,6 +321,14 @@ const UsersPage: React.FC = () => {
                               NEEDS APPROVAL
                             </span>
                           )}
+                          {isDeletedKeptUser(user) && (
+                            <span
+                              className="badge text-bg-dark ms-2"
+                              data-testid={`users-deleted-badge-${user.user_id}`}
+                            >
+                              {DELETED_BADGE}
+                            </span>
+                          )}
                           {currentUserId && user.user_id === currentUserId && (
                             <span
                               className="badge text-bg-info ms-2"
@@ -372,12 +393,14 @@ const UsersPage: React.FC = () => {
                           )}
                           {hasPermission('users.delete') &&
                             user.role !== 'administrator' &&
-                            !user.is_primary && (
+                            !user.is_primary &&
+                            !isDeletedKeptUser(user) && (
                               <DeleteButton
                                 onDelete={() => handleDelete(user)}
                                 className="btn-sm"
-                                title={DELETE_USER_TITLE}
+                                title={deleteButtonTitle(user)}
                                 confirmNotice={deleteConfirmNotice(user, true)}
+                                data-testid={`users-delete-button-${user.user_id}`}
                               />
                             )}
                         </td>
@@ -460,6 +483,14 @@ const UsersPage: React.FC = () => {
                       >
                         {selectedUser.status.toUpperCase()}
                       </span>
+                      {isDeletedKeptUser(selectedUser) && (
+                        <span
+                          className="badge text-bg-dark ms-2"
+                          data-testid="users-modal-deleted-badge"
+                        >
+                          {DELETED_BADGE}
+                        </span>
+                      )}
                     </div>
                     {keptAccountLabel(selectedUser) && (
                       <div className="mb-2" data-testid="users-modal-kept-account">
@@ -522,19 +553,22 @@ const UsersPage: React.FC = () => {
                 >
                   Close
                 </button>
-                {hasPermission('users.delete') && selectedUser.role !== 'administrator' && (
-                  <DeleteButton
-                    onDelete={() => {
-                      handleDelete(selectedUser);
-                      setSelectedUser(null);
-                    }}
-                    variant="danger"
-                    title={DELETE_USER_TITLE}
-                    confirmNotice={deleteConfirmNotice(selectedUser)}
-                  >
-                    Delete User
-                  </DeleteButton>
-                )}
+                {hasPermission('users.delete') &&
+                  selectedUser.role !== 'administrator' &&
+                  !isDeletedKeptUser(selectedUser) && (
+                    <DeleteButton
+                      onDelete={() => {
+                        handleDelete(selectedUser);
+                        setSelectedUser(null);
+                      }}
+                      variant="danger"
+                      title={deleteButtonTitle(selectedUser)}
+                      confirmNotice={deleteConfirmNotice(selectedUser)}
+                      data-testid="users-modal-delete-button"
+                    >
+                      Delete User
+                    </DeleteButton>
+                  )}
                 {hasPermission('users.edit') && (
                   <button
                     type="button"

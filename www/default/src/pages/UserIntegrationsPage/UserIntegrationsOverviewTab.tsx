@@ -58,7 +58,7 @@ const UserIntegrationsOverviewTab: React.FC = () => {
                 <li>
                   <strong>User Deleted (user.deleted):</strong> Triggered when a user is deleted. A
                   user who signs in through OpenID Connect or SAML is kept as a disabled record
-                  instead of being removed
+                  instead of being removed. The OUTCOME variable is removed or kept
                 </li>
                 <li>
                   <strong>User Login (user.login):</strong> Triggered when a user successfully logs

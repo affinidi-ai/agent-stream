@@ -124,6 +124,27 @@ describe('buildIntegrationSamples', () => {
     expect(email.body.match(/\$\{EVENT_TYPE\}/g)).toHaveLength(1);
   });
 
+  it('leaves out OUTCOME, which only user.deleted fills, so other user events get no placeholder', () => {
+    const withOutcome: RuntimeVariablesResponse = {
+      categories: CATALOGUE.categories.map(c =>
+        c.category === 'user'
+          ? category('user', 'User Management', [
+              ['USER_ID', 'User ID'],
+              ['USERNAME', 'Username'],
+              ['USER_EMAIL', 'User Email'],
+              ['EVENT_TYPE', 'Event Type'],
+              ['OUTCOME', 'Delete Outcome'],
+            ])
+          : c
+      ),
+    };
+
+    const samples = buildIntegrationSamples(withOutcome, 'user');
+
+    expect(placeholders(samples)).not.toContain('OUTCOME');
+    expect(samples).toEqual(buildIntegrationSamples(CATALOGUE, 'user'));
+  });
+
   it('writes readable Email and Slack messages with labelled fields', () => {
     const { email, slack } = buildIntegrationSamples(CATALOGUE, 'connection_point');
     expect(email.subject).toBe('${EVENT_TYPE} on ${SERVER_NAME}');

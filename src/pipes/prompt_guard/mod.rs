@@ -58,6 +58,7 @@ mod external;
 mod filter;
 mod pii_cache;
 mod stream_rehydrate;
+mod surface_check;
 
 pub mod detector_stats;
 pub mod llm_pii;
@@ -67,3 +68,4 @@ pub use definitions::*;
 pub use external::*;
 pub use filter::*;
 pub use stream_rehydrate::StreamRehydrator;
+pub use surface_check::{report_unusable_rules, report_unusable_rules_in_store};
