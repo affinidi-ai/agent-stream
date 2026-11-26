@@ -83,6 +83,41 @@ describe('EditUserPage save', () => {
     expect(mockPut).toHaveBeenCalledWith('/users/saml-1', { status: 'disabled' });
   });
 
+  it('sends nothing, and offers no save, when the user did not load', async () => {
+    mockGet.mockRejectedValue(new Error('Failed to load user'));
+    render(
+      <MemoryRouter initialEntries={['/users/saml-1']}>
+        <Routes>
+          <Route path="/users/:userId" element={<EditUserPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await screen.findByText('Failed to load user');
+
+    const save = screen.getByTestId('edit-user-save-button');
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+
+    expect(mockPut).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('edit-user-delete-button')).not.toBeInTheDocument();
+  });
+
+  it('encodes the user id, so a crafted id cannot reach another API path', async () => {
+    mockGet.mockResolvedValue({ data: { ...SAML_USER, user_id: 'other' } });
+    render(
+      <MemoryRouter initialEntries={['/users/..%2Fpipes%2Fp-1']}>
+        <Routes>
+          <Route path="/users/:userId" element={<EditUserPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await screen.findByDisplayValue('sam');
+
+    expect(mockGet).toHaveBeenCalledWith('/users/..%2Fpipes%2Fp-1');
+    expect(screen.queryByTestId('edit-user-delete-button')).not.toBeInTheDocument();
+  });
+
   it('sends nothing when nothing changed', async () => {
     mockGet.mockResolvedValue({ data: SAML_USER });
 

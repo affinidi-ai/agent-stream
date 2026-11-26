@@ -871,7 +871,7 @@ mod tests {
         let storage = storage(&temp).await;
         let (_, bob) = two_users(&storage).await;
         storage
-            .update_user(&bob.user_id, None, Some(UserStatus::Disabled), &crate::config::LimitsConfig::default())
+            .update_user(&bob.user_id, None, Some(UserStatus::Disabled), false, &crate::config::LimitsConfig::default())
             .await
             .unwrap();
 
@@ -893,7 +893,7 @@ mod tests {
         let storage = storage(&temp).await;
         let (_, bob) = two_users(&storage).await;
         storage
-            .update_user(&bob.user_id, None, Some(UserStatus::Disabled), &crate::config::LimitsConfig::default())
+            .update_user(&bob.user_id, None, Some(UserStatus::Disabled), false, &crate::config::LimitsConfig::default())
             .await
             .unwrap();
 
@@ -957,7 +957,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .update_user(&bob.user_id, None, Some(UserStatus::Approved), &crate::config::LimitsConfig::default())
+            .update_user(&bob.user_id, None, Some(UserStatus::Approved), true, &crate::config::LimitsConfig::default())
             .await
             .unwrap();
 

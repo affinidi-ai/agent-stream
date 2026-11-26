@@ -508,7 +508,8 @@ they serve every event of the category. A user event's `OLD_STATE` and `NEW_STAT
 as the user API returns it, without the passkeys and without the provider account (`oidc`,
 `saml_id`): the user API shows that account only to readers of users, and configuring a user
 integration needs only `integrations.edit`. `sign_in_method` says how the user signs in, and
-`USER_ID` identifies the record.
+`USER_ID` identifies the record. `USERNAME` and `username` can still be the OIDC `sub` or the
+SAML user ID when another user held the asserted username at sign-in.
 
 ### Connection Point invitations
 

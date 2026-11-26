@@ -334,11 +334,27 @@ pub async fn update_user(
     }
 
     storage
-        .update_user(&user_id, req.role.clone(), req.status.clone(), crate::config::global_limits())
+        .update_user(
+            &user_id,
+            req.role.clone(),
+            req.status.clone(),
+            user_before
+                .deleted_at
+                .is_some(),
+            crate::config::global_limits(),
+        )
         .await
-        .map_err(|e| match e.downcast_ref::<crate::config::LimitExceeded>() {
-            Some(limit) => (StatusCode::FORBIDDEN, limit.message()),
-            None => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update user: {}", e)),
+        .map_err(|e| {
+            if let Some(limit) = e.downcast_ref::<crate::config::LimitExceeded>() {
+                (StatusCode::FORBIDDEN, limit.message())
+            } else if e
+                .downcast_ref::<crate::auth::storage::DeletedDuringUpdate>()
+                .is_some()
+            {
+                (StatusCode::CONFLICT, "User was deleted while it was being updated; reload and try again".to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update user: {}", e))
+            }
         })?;
 
     // Update profile fields if provided
@@ -525,6 +541,7 @@ pub async fn delete_user(
         caller_user_id = %caller_user_id,
         caller_username = %caller.username,
         target_user_id = %user_id,
+        outcome = deleted.outcome.as_str(),
         already_deleted = !deleted.changed,
         revoked_tokens,
         "User deleted by {}",

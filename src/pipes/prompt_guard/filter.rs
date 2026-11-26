@@ -611,14 +611,16 @@ impl GuardSide {
 
 /// How a rule is named in logs, errors and rejection reasons. An unlabelled
 /// custom pattern is named by its 1-based position in its guard, never by its
-/// regex, which may be written to catch secrets.
+/// regex, which may be written to catch secrets. The key and label come from
+/// stored configuration, so control characters are escaped and cannot forge a
+/// log line.
 fn rule_name(
     rule: &RegexRule,
     position: usize,
 ) -> String {
     match rule {
-        RegexRule::Builtin { builtin } => format!("built-in pattern '{builtin}'"),
-        RegexRule::Pattern { label: Some(label), .. } => format!("custom pattern '{label}'"),
+        RegexRule::Builtin { builtin } => format!("built-in pattern '{}'", builtin.escape_debug()),
+        RegexRule::Pattern { label: Some(label), .. } => format!("custom pattern '{}'", label.escape_debug()),
         RegexRule::Pattern { label: None, .. } => format!("custom pattern #{position}"),
     }
 }

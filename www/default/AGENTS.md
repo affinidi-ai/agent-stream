@@ -182,8 +182,11 @@ buttons, empty states, list/table, page shell) and a new-page recipe, see
     delete button (`users-delete-button-<user_id>`, `users-modal-delete-button`,
     `edit-user-delete-button`). The Edit User page shows the provider account and the deleted
     notice with test ids `edit-user-kept-account` and `edit-user-deleted-notice`, and its save
-    sends only the fields the administrator changed (nothing when nothing changed), so a page
-    opened before a delete cannot approve the kept record by resending the status it loaded.
+    (`edit-user-save-button`) sends only the fields the administrator changed (nothing when
+    nothing changed, and Save stays disabled until the user has loaded), so a page opened
+    before a delete cannot approve the kept record by resending the status it loaded. The
+    page encodes the route's user id in every API path and shows the delete button only for
+    the user it loaded.
 
 ## Surface builder
 

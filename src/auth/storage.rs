@@ -97,6 +97,13 @@ pub enum SignInMethod {
     Saml,
 }
 
+/// An update authorised against a user who was not deleted found the record
+/// kept by a delete that landed in between, so it was refused rather than
+/// applied to, or used to restore, the kept record.
+#[derive(Debug, thiserror::Error)]
+#[error("the user was deleted while this update was being made")]
+pub struct DeletedDuringUpdate;
+
 /// The result of a delete: the outcome, and whether this call changed the
 /// record. A delete of a record that is already kept changes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,12 +283,16 @@ impl PasskeyStorage {
 
     /// Update a user's role and status by id. Approving a kept record gives
     /// it a seat back, so the user limit is checked against the count taken
-    /// under the same guard that every other creator holds.
+    /// under the same guard that every other creator holds. `authorised_kept`
+    /// says whether the caller authorised the update against a kept record: when
+    /// it did not, and a delete has kept the record since, the update is refused
+    /// with [`DeletedDuringUpdate`] so it can neither restore nor change it.
     pub async fn update_user(
         &self,
         user_id: &str,
         role: Option<UserRole>,
         status: Option<UserStatus>,
+        authorised_kept: bool,
         limits: &crate::config::LimitsConfig,
     ) -> Result<()> {
         let _user_write_guard = self.user_write_guard().await;
@@ -289,6 +300,9 @@ impl PasskeyStorage {
             .load_user_by_id(user_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
+        if user_data.deleted_at.is_some() && !authorised_kept {
+            return Err(anyhow::Error::new(DeletedDuringUpdate));
+        }
 
         if let Some(new_status) = status {
             if new_status == UserStatus::Approved && user_data.deleted_at.is_some() {
@@ -656,7 +670,8 @@ impl ReloadOnPromotion for PasskeyStorage {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeleteOutcome, DeleteResult, OidcIdentity, PasskeyStorage, SignInMethod, UserData, UserRole, UserStatus,
+        DeleteOutcome, DeleteResult, DeletedDuringUpdate, OidcIdentity, PasskeyStorage, SignInMethod, UserData,
+        UserRole, UserStatus,
     };
     use crate::config::{LimitDefinition, LimitExceeded, LimitsConfig};
     use crate::server::mode::ReloadOnPromotion;
@@ -1231,7 +1246,7 @@ mod tests {
             .await;
         let role_update = tokio::time::timeout(
             wait,
-            storage.update_user("oidc-1", None, Some(UserStatus::Approved), &LimitsConfig::default()),
+            storage.update_user("oidc-1", None, Some(UserStatus::Approved), false, &LimitsConfig::default()),
         )
         .await;
         let profile_update = tokio::time::timeout(
@@ -1244,13 +1259,49 @@ mod tests {
         assert!(role_update.is_err(), "update_user must wait for the guard");
         assert!(profile_update.is_err(), "update_profile must wait for the guard");
         storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &LimitsConfig::default())
+            .update_user("oidc-1", None, Some(UserStatus::Approved), false, &LimitsConfig::default())
             .await
             .unwrap();
         storage
             .update_profile("oidc-1", Some("X".to_string()), None, None, None, None, None)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_update_authorised_against_a_live_user_is_refused_once_a_delete_kept_the_record() {
+        let temp_dir = tempdir().unwrap();
+        let storage = storage_in(temp_dir.path()).await;
+        storage
+            .save_user(&oidc_user("oidc-1"))
+            .await
+            .unwrap();
+        storage
+            .delete_user("oidc-1")
+            .await
+            .unwrap();
+
+        for (role, status) in [(None, Some(UserStatus::Approved)), (Some(UserRole::PowerUser), None)] {
+            let refused = storage
+                .update_user("oidc-1", role, status, false, &LimitsConfig::default())
+                .await
+                .unwrap_err();
+            assert!(
+                refused
+                    .downcast_ref::<DeletedDuringUpdate>()
+                    .is_some(),
+                "{refused:?}"
+            );
+        }
+
+        let kept = storage
+            .load_user_by_id("oidc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.status, UserStatus::Disabled);
+        assert_eq!(kept.role, UserRole::User);
+        assert!(kept.deleted_at.is_some());
     }
 
     #[tokio::test]
@@ -1267,7 +1318,7 @@ mod tests {
             .unwrap();
 
         storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &LimitsConfig::default())
+            .update_user("oidc-1", None, Some(UserStatus::Approved), true, &LimitsConfig::default())
             .await
             .unwrap();
 
@@ -1361,7 +1412,7 @@ mod tests {
         let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
 
         let refused = storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &users_limit(1))
+            .update_user("oidc-1", None, Some(UserStatus::Approved), true, &users_limit(1))
             .await
             .unwrap_err();
 
@@ -1386,7 +1437,7 @@ mod tests {
         let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
 
         storage
-            .update_user("oidc-1", None, Some(UserStatus::Approved), &users_limit(2))
+            .update_user("oidc-1", None, Some(UserStatus::Approved), true, &users_limit(2))
             .await
             .unwrap();
 
@@ -1405,11 +1456,11 @@ mod tests {
         let storage = storage_with_a_kept_record_and_one_other_user(temp_dir.path()).await;
 
         storage
-            .update_user("oidc-1", Some(UserRole::PowerUser), Some(UserStatus::Disabled), &users_limit(1))
+            .update_user("oidc-1", Some(UserRole::PowerUser), Some(UserStatus::Disabled), true, &users_limit(1))
             .await
             .unwrap();
         storage
-            .update_user("plain", None, Some(UserStatus::Approved), &users_limit(1))
+            .update_user("plain", None, Some(UserStatus::Approved), false, &users_limit(1))
             .await
             .unwrap();
     }
@@ -1434,8 +1485,8 @@ mod tests {
         let limits = users_limit(2);
 
         let (first, other) = tokio::join!(
-            storage.update_user("oidc-1", None, Some(UserStatus::Approved), &limits),
-            storage.update_user("oidc-2", None, Some(UserStatus::Approved), &limits)
+            storage.update_user("oidc-1", None, Some(UserStatus::Approved), true, &limits),
+            storage.update_user("oidc-2", None, Some(UserStatus::Approved), true, &limits)
         );
 
         let refused: Vec<anyhow::Error> = [first, other]
@@ -1471,7 +1522,13 @@ mod tests {
         }
 
         storage
-            .update_user("second", Some(UserRole::PowerUser), Some(UserStatus::Approved), &LimitsConfig::default())
+            .update_user(
+                "second",
+                Some(UserRole::PowerUser),
+                Some(UserStatus::Approved),
+                false,
+                &LimitsConfig::default(),
+            )
             .await
             .unwrap();
 

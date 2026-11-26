@@ -18,7 +18,10 @@ fn unusable_rules(
     surface: &PipeConfig,
     compiles: &dyn Fn(&str) -> bool,
 ) -> Vec<UnusableSurfaceRule> {
-    let surface_owner = format!("Surface {:?} ({})", surface.name, surface.id);
+    if !surface.status.is_enabled() {
+        return Vec::new();
+    }
+    let surface_owner = format!("Surface {:?} ({})", surface.name, surface.id.escape_debug());
     let own = surface
         .prompt_guard
         .iter()
@@ -37,15 +40,13 @@ fn unusable_rules(
     own.chain(variants)
         .filter(|(_, guard): &(String, &PromptGuardConfig)| guard.enabled)
         .flat_map(|(owner, guard)| {
-            rule_issues(guard, compiles)
-                .map(|issue| UnusableSurfaceRule { owner: owner.clone(), issue })
-                .collect::<Vec<_>>()
+            rule_issues(guard, compiles).map(move |issue| UnusableSurfaceRule { owner: owner.clone(), issue })
         })
         .collect()
 }
 
-/// Log one `ERROR` for each enabled Prompt Guard regex rule of `surface` or of
-/// one of its enabled Variants that cannot be evaluated, naming the Surface and the
+/// Log one `ERROR` for each enabled Prompt Guard regex rule of an enabled
+/// `surface` or of one of its enabled Variants that cannot be evaluated, naming the Surface and the
 /// rule, and count it in `agent_stream_prompt_guard_unusable_rules_total`.
 /// Requests that rule guards are refused with `502`. Returns how many were
 /// found.
@@ -189,6 +190,37 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_surface_is_not_reported_because_no_request_reaches_it() {
+        let mut disabled = surface(Some(guard(true, json!([{ "builtin": "broken" }]), json!([]))));
+        disabled.status = crate::entity_status::EntityStatus::Disabled;
+
+        assert_eq!(found(&disabled), Vec::new());
+    }
+
+    #[test]
+    fn a_rule_name_from_stored_configuration_cannot_forge_a_log_line() {
+        let forged = surface(Some(guard(
+            true,
+            json!([{ "pattern": "(?!x)y", "label": "lookahead\nERROR forged line" }]),
+            json!([]),
+        )));
+
+        let found = found(&forged);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].1.description,
+            "custom pattern 'lookahead\\nERROR forged line' does not compile on the request side"
+        );
+        assert!(
+            !found[0]
+                .1
+                .description
+                .contains('\n')
+        );
+    }
+
+    #[test]
     fn a_disabled_variant_is_not_reported_because_no_request_reaches_it() {
         let mut variant =
             with_variant(surface(None), "canary", guard(true, json!([{ "builtin": "broken" }]), json!([])));
@@ -260,6 +292,6 @@ mod tests {
 
         assert_eq!(report_unusable_rules(&broken), 2);
         assert_eq!(report_unusable_rules(&surface(None)), 0);
-        assert!(counter() - before >= 2, "counted {}", counter() - before);
+        assert_eq!(counter() - before, 2);
     }
 }

@@ -56,6 +56,7 @@ const changedFields = (loaded: UserForm, edited: UserForm): Partial<UserForm> =>
 const EditUserPage: React.FC = () => {
   const navigate = useNavigate();
   const { userId } = useParams<{ userId: string }>();
+  const userPath = `/users/${encodeURIComponent(userId ?? '')}`;
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -77,7 +78,7 @@ const EditUserPage: React.FC = () => {
   const fetchUser = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await apiClient.get(`/users/${userId}`);
+      const response = await apiClient.get(userPath);
       setUser(response.data);
       const loaded: UserForm = {
         role: response.data.role,
@@ -97,18 +98,21 @@ const EditUserPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userPath]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
       setError('');
+      if (!loadedForm) {
+        return;
+      }
 
       try {
         setSaving(true);
-        const changes = loadedForm ? changedFields(loadedForm, form) : form;
+        const changes = changedFields(loadedForm, form);
         if (Object.keys(changes).length > 0) {
-          await apiClient.put(`/users/${userId}`, changes);
+          await apiClient.put(userPath, changes);
         }
         navigate('/settings?tab=users');
       } catch (error: any) {
@@ -117,7 +121,7 @@ const EditUserPage: React.FC = () => {
         setSaving(false);
       }
     },
-    [form, loadedForm, navigate, userId]
+    [form, loadedForm, navigate, userPath]
   );
 
   useEffect(() => {
@@ -146,7 +150,7 @@ const EditUserPage: React.FC = () => {
   const handleDelete = async () => {
     try {
       setSaving(true);
-      const { data } = await apiClient.delete<{ outcome?: DeleteOutcome }>(`/users/${userId}`);
+      const { data } = await apiClient.delete<{ outcome?: DeleteOutcome }>(userPath);
       showToast('success', deleteSuccessMessage(data?.outcome, user ?? {}));
       navigate('/settings?tab=users');
     } catch (error: any) {
@@ -382,7 +386,12 @@ const EditUserPage: React.FC = () => {
             </div>
 
             <div className="d-flex gap-2">
-              <button type="submit" className="btn btn-primary" disabled={saving}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={saving || !loadedForm}
+                data-testid="edit-user-save-button"
+              >
                 {saving ? (
                   <>
                     <span
@@ -399,6 +408,7 @@ const EditUserPage: React.FC = () => {
                 )}
               </button>
               {user &&
+                user.user_id === userId &&
                 form.role !== 'administrator' &&
                 !user.is_primary &&
                 !isDeletedKeptUser(user) && (

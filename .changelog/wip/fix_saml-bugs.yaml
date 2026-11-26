@@ -24,6 +24,7 @@ changes:
         Guard rule of a stored Surface or enabled Variant that cannot be evaluated is logged
         at ERROR naming the Surface, the rule and its side, and counted in the new
         agent_stream_prompt_guard_unusable_rules_total metric (labels side and reason).
+        Disabled Surfaces and Variants are skipped, since no request reaches them.
         Requests those rules guard are refused with 502, so administrators now see them
         before callers do. An unlabelled custom pattern is named by its position, never its
         regex.
@@ -39,18 +40,20 @@ changes:
         button.
   fixed:
     - timestamp: '2026-11-26T09:00:00.000Z'
-      title: Stop a stale Edit User page from approving a user deleted meanwhile
+      title: Stop a stale or racing user update from approving a user deleted meanwhile
       description: >-
-        The Edit User page sent the whole form on save, including the status it loaded, so
-        saving a page opened before another administrator deleted the user approved the
-        kept record again. It now sends only the fields the administrator changed, and
-        nothing when nothing changed.
+        PUT /v1/users/{user_id} with status approved restored a kept record when a delete
+        landed after the request was authorised against the live user, so a stale Edit User
+        page, a quick approve or an API client could let a deleted user sign in again
+        without the approval checks. Such an update is now refused with 409 and changes
+        nothing. The Edit User page also sends only the fields the administrator changed,
+        nothing when nothing changed, and nothing at all when the user did not load.
     - timestamp: '2026-11-26T09:00:01.000Z'
-      title: Answer a repeated delete of a removed user with removed, not an error
+      title: Answer a concurrent delete of a passkey user with removed, not 500
       description: >-
         When two deletes of a passkey user ran at once, the second answered 500 because the
         record was already gone. It now answers 200 with outcome removed and sends no second
-        user.deleted event, like a repeated delete of a kept record.
+        user.deleted event. A delete sent after the user is gone still answers 404.
   removed: []
   security:
     - timestamp: '2026-11-25T12:30:00.000Z'
@@ -72,3 +75,5 @@ changes:
         user's kept record, and now contain sign_in_method (and deleted_at on a kept record).
         An integration that read the provider account from them must identify the user by
         USER_ID or user_id instead, and read sign_in_method to tell how the user signs in.
+        Every user event now also sets the OUTCOME value (empty except on user.deleted),
+        which replaces a custom trigger variable named OUTCOME; rename such a variable.

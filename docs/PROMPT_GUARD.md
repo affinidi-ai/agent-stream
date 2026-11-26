@@ -248,8 +248,8 @@ compile. Prompt Guard fails closed on such a rule:
   of every stored Surface and its enabled Variants is checked, and each rule
   that cannot be evaluated is logged at `ERROR` naming the Surface, the Variant when the
   rule is in its override, the rule and its side; an unlabelled custom pattern is named by
-  its position, never by its regex. A disabled Prompt Guard or Variant is not checked,
-  since no request reaches its rules. With `cache_refresh_interval_secs` above `0`, a
+  its position, never by its regex. A disabled Surface, Prompt Guard or Variant is not
+  checked, since no request reaches its rules. With `cache_refresh_interval_secs` above `0`, a
   Surface changed on disk, such as a hand-edited `_storage/` file or a save on another
   node, is checked the same way within one refresh interval. Each rule found is counted in
   `agent_stream_prompt_guard_unusable_rules_total`. Requests those rules guard keep failing
