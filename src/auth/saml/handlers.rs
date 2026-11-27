@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use super::service::{SamlService, assertion_attributes};
-use super::user_provisioning::{UserNotApproved, UsernameTaken, provision_user_from_saml};
+use super::user_provisioning::{RoleUnmapped, UserNotApproved, UsernameTaken, provision_user_from_saml};
 use crate::auth::session::SessionManager;
 use crate::auth::session_cookie::{
     SAML_CORRELATION_COOKIE_NAME, build_saml_correlation_cookie, clear_saml_correlation_cookie,
@@ -142,6 +142,20 @@ pub async fn saml_acs(
         Ok(user) => user,
         Err(e) => {
             error!("Failed to provision user from SAML: {}", e);
+            if let Some(user_id) = e
+                .downcast_ref::<RoleUnmapped>()
+                .and_then(|unmapped| {
+                    unmapped
+                        .existing_user_id
+                        .as_deref()
+                })
+            {
+                let ended = saml_state
+                    .session_manager
+                    .remove_sessions_for_user(user_id)
+                    .await;
+                info!(user_id, ended, "Ended the sessions of a user whose SAML sign-in has no mapped role");
+            }
             return match provisioning_refusal(&e) {
                 Some(response) => Ok(response),
                 None => Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
@@ -337,6 +351,9 @@ fn provisioning_refusal(error: &anyhow::Error) -> Option<Response> {
         || error
             .downcast_ref::<UsernameTaken>()
             .is_some()
+        || error
+            .downcast_ref::<RoleUnmapped>()
+            .is_some()
     {
         "This account is not allowed to sign in.".to_string()
     } else {
@@ -350,8 +367,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_user_who_is_not_approved_or_whose_username_is_taken_gets_a_403_page_and_no_session() {
-        for refusal in [anyhow::Error::new(UserNotApproved), anyhow::Error::new(UsernameTaken)] {
+    fn a_user_who_is_not_approved_has_a_taken_username_or_no_mapped_role_gets_a_403_page_and_no_session() {
+        for refusal in [
+            anyhow::Error::new(UserNotApproved),
+            anyhow::Error::new(UsernameTaken),
+            anyhow::Error::new(RoleUnmapped { existing_user_id: None }),
+        ] {
             let response = provisioning_refusal(&refusal).expect("a refusal has a page");
 
             assert_eq!(response.status(), StatusCode::FORBIDDEN);

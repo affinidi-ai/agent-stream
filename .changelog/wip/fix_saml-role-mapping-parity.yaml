@@ -1,0 +1,17 @@
+branch: fix/saml-role-mapping-parity
+changes:
+  added:
+    - timestamp: '2026-11-27T15:01:33.000Z'
+      title: Add default_role to saml.json for sign-ins with no mapped role
+      description: 'With `auth_mode = "saml"`, the optional `default_role` (`administrator`, `poweruser` or `user`) is the role of a sign-in whose role attribute has no `role_mapping` entry. Set it to `user` to keep the earlier behaviour for every account at the identity provider.'
+  changed: []
+  fixed:
+    - timestamp: '2026-11-27T15:01:33.000Z'
+      title: Refuse unknown role names in saml.json at startup
+      description: 'With `auth_mode = "saml"`, a `role_mapping` target or `default_role` that is not `administrator`, `poweruser` or `user` now stops startup and names the entry, where it used to sign the person in as `user` with only a warning.'
+  removed: []
+  security: []
+  breaking:
+    - timestamp: '2026-11-27T15:01:33.000Z'
+      title: Refuse SAML sign-in when no role is mapped and default_role is unset
+      description: 'With `auth_mode = "saml"`, a person whose role attribute has no `role_mapping` entry, or who sends no role attribute, used to sign in as `user`. They now get a `403` page and no session, and the log records the reason `saml_role_unmapped`. The primary administrator and the first user are never refused. To keep the earlier behaviour add `"default_role": "user"` to saml.json before taking this release.'
