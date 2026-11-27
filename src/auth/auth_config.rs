@@ -57,6 +57,10 @@ pub struct SamlConfig {
     #[serde(default)]
     pub role_mapping: HashMap<String, String>,
 
+    /// Role for a sign-in whose role attribute has no `role_mapping` entry; without it that sign-in is refused
+    #[serde(default)]
+    pub default_role: Option<String>,
+
     /// Must be `false` or absent; `true` refuses startup because assertions are not decrypted.
     #[serde(default)]
     pub require_encrypted_assertions: bool,
@@ -211,8 +215,9 @@ impl SamlConfig {
         Self::from_json(&content)
     }
 
-    /// Parses SAML configuration JSON. `"require_encrypted_assertions": true` and a
-    /// non-null `"idp_slo_url"` are refused. Keys Agent Stream does not read log one warning.
+    /// Parses SAML configuration JSON. `"require_encrypted_assertions": true`, a
+    /// non-null `"idp_slo_url"` and a role name that is not `administrator`, `poweruser` or `user`
+    /// in `role_mapping` or `default_role` are refused. Keys Agent Stream does not read log one warning.
     pub(crate) fn from_json(content: &str) -> Result<Self, String> {
         let config: Self =
             serde_json::from_str(content).map_err(|e| format!("Failed to parse SAML config JSON: {}", e))?;
@@ -230,6 +235,8 @@ impl SamlConfig {
                 .to_string());
         }
 
+        config.validate_roles()?;
+
         let unread = unread_saml_keys(&config, content);
         if !unread.is_empty() {
             tracing::warn!(
@@ -240,6 +247,33 @@ impl SamlConfig {
         }
 
         Ok(config)
+    }
+}
+
+impl SamlConfig {
+    fn validate_roles(&self) -> Result<(), String> {
+        let mut entries: Vec<(&String, &String)> = self
+            .role_mapping
+            .iter()
+            .collect();
+        entries.sort();
+        for (value, role) in entries {
+            if crate::auth::types::UserRole::from_config_name(role).is_none() {
+                return Err(format!(
+                    "role_mapping entry {value:?} names the unknown role {role:?}: expected administrator, poweruser \
+                     or user. See docs/CONFIGURATION_REFERENCE.md#samljson"
+                ));
+            }
+        }
+        if let Some(role) = &self.default_role
+            && crate::auth::types::UserRole::from_config_name(role).is_none()
+        {
+            return Err(format!(
+                "default_role names the unknown role {role:?}: expected administrator, poweruser or user. See \
+                 docs/CONFIGURATION_REFERENCE.md#samljson"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -407,6 +441,33 @@ mod tests {
         assert_eq!(config.idp_slo_url, None);
     }
 
+    #[test]
+    fn a_role_mapping_entry_naming_an_unknown_role_refuses_the_file_and_names_the_entry() {
+        let content = saml_json(r#", "role_mapping": {"ops": "poweruser", "staff": "root"}"#);
+
+        let error = SamlConfig::from_json(&content).unwrap_err();
+
+        assert!(error.starts_with(r#"role_mapping entry "staff" names the unknown role "root""#), "{error}");
+    }
+
+    #[test]
+    fn a_default_role_naming_an_unknown_role_refuses_the_file() {
+        let content = saml_json(r#", "default_role": "root""#);
+
+        let error = SamlConfig::from_json(&content).unwrap_err();
+
+        assert!(error.starts_with(r#"default_role names the unknown role "root""#), "{error}");
+    }
+
+    #[test]
+    fn role_names_are_read_whatever_their_case() {
+        let content = saml_json(r#", "role_mapping": {"ops": "PowerUser"}, "default_role": "User""#);
+
+        let config = SamlConfig::from_json(&content).unwrap();
+
+        assert_eq!(config.default_role.as_deref(), Some("User"));
+    }
+
     fn unread_keys_of(content: &str) -> Vec<String> {
         let config = SamlConfig::from_json(content).unwrap();
 
@@ -450,7 +511,7 @@ mod tests {
         let content = saml_json(
             r#", "idp_slo_url": null, "require_encrypted_assertions": false, "sign_requests": false,
                 "sp_key_path": "k.pem", "sp_cert_path": "c.pem",
-                "role_mapping": {"any-idp-role": "user"},
+                "role_mapping": {"any-idp-role": "user"}, "default_role": "user",
                 "attribute_mapping": {"user_id": "u", "username": "n", "email": "e", "first_name": "f",
                     "last_name": "l", "role": "r", "department": "d", "job_title": "j"},
                 "graph_api": {"tenant_id": "t", "client_id": "c", "client_secret": "s", "fetch_avatar": true}"#,

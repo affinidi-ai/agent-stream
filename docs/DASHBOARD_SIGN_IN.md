@@ -88,13 +88,14 @@ SAML mode uses SP-initiated sign-in against the identity provider configured in
 - A response that does not validate answers `401`.
 - The first SAML sign-in provisions the user. SAML users are approved at once; the very
   first user on the appliance is the primary `administrator`, and anyone else takes the role
-  `role_mapping` maps their role value to, or `user` when it has no entry. Every value of a
+  `role_mapping` maps their role value to. A person with no mapped value takes `default_role`
+  when `saml.json` sets it and is otherwise refused with a `403` page and no session. Every value of a
   multi-valued role attribute, such as a groups list, is checked across all attribute
   statements, and the highest mapped role wins whatever the order, so any one mapped value
   grants its role: map only groups or app roles the identity provider controls, never ones
   people can create or join themselves. An identity provider
   that caps the groups it sends (Microsoft Entra ID past 150) sends no group values at all
-  for a person over the cap, so that person gets `user`; map app roles or a filtered groups
+  for a person over the cap, so that person gets `default_role`, or is refused when it is not set; map app roles or a filtered groups
   claim instead. Other attributes, the user ID among them, use the first value in the first
   attribute statement. The subject's `NameID` is available as the attribute `NameID`,
   replacing any attribute of that name, so it can be the role source and is the user ID when

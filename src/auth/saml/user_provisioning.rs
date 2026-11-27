@@ -20,10 +20,22 @@ pub struct UserNotApproved;
 #[error("the username is held by another user")]
 pub struct UsernameTaken;
 
+/// None of the values of the role attribute has a `role_mapping` entry, there
+/// is no `default_role`, and the user is not the primary administrator, so the
+/// sign-in is refused and nothing is created or updated.
+/// Carries the id of the existing user, so the handler can end their sessions.
+#[derive(Debug, thiserror::Error)]
+#[error("no role is mapped for the user")]
+pub struct RoleUnmapped {
+    pub existing_user_id: Option<String>,
+}
+
 /// Provision or update a user from SAML attributes. A user that exists and is
 /// not approved is refused with [`UserNotApproved`]. When another user holds
 /// the asserted username the SAML user ID is used instead, and only when that
-/// is held too is the sign-in refused with [`UsernameTaken`].
+/// is held too is the sign-in refused with [`UsernameTaken`]. A user with no
+/// mapped role and no `default_role` is refused with [`RoleUnmapped`], except
+/// the primary administrator and the very first user.
 pub async fn provision_user_from_saml(
     storage: &PasskeyStorage,
     attributes: &SamlAttributes,
@@ -84,7 +96,7 @@ pub async fn provision_user_from_saml(
         user.role = if user.is_primary {
             UserRole::Administrator
         } else {
-            role
+            role.ok_or_else(|| role_unmapped(&user.user_id, Some(user.user_id.clone())))?
         };
         user.updated_at = chrono::Utc::now();
         user.last_logged_in = Some(chrono::Utc::now());
@@ -114,7 +126,7 @@ pub async fn provision_user_from_saml(
         let final_role = if is_first_user {
             UserRole::Administrator
         } else {
-            role
+            role.ok_or_else(|| role_unmapped(user_id_attr, None))?
         };
         let status = UserStatus::Approved; // SAML users auto-approved (including first user)
 
@@ -217,16 +229,25 @@ fn name_once_granting_a_role(saml_role: &str) -> Option<UserRole> {
     }
 }
 
+fn role_unmapped(
+    user: &str,
+    existing_user_id: Option<String>,
+) -> anyhow::Error {
+    warn!(reason = "saml_role_unmapped", user, "SAML sign-in refused: no value of the role attribute is mapped");
+    anyhow::Error::new(RoleUnmapped { existing_user_id })
+}
+
 /// Determine user role from SAML attributes and role mapping: the highest role
 /// any value of the role attribute maps to, so the order the identity provider
 /// sends the values in does not matter. Only an explicit `role_mapping` entry
 /// grants a role, matched against the identity provider's value exactly: an
-/// unmapped value, whatever its name or case, is `User`, so an identity
-/// provider cannot grant administrator by naming a role `admin`.
+/// unmapped value, whatever its name or case, grants nothing, so an identity
+/// provider cannot grant administrator by naming a role `admin`. With no mapped
+/// value the role is `default_role`, or `None` when it is not set.
 fn determine_role(
     attributes: &SamlAttributes,
     config: &SamlConfig,
-) -> UserRole {
+) -> Option<UserRole> {
     let attributes = &attributes.values;
     let role_attr = &config.attribute_mapping.role;
     info!(
@@ -245,18 +266,23 @@ fn determine_role(
             .collect::<Vec<_>>()
     );
 
+    let default_role = config
+        .default_role
+        .as_deref()
+        .and_then(UserRole::from_config_name);
+
     let Some(saml_roles) = attributes.get(role_attr) else {
-        info!("determine_role: role attribute '{}' not present in SAML attributes, defaulting to User", role_attr);
-        return UserRole::User;
+        info!("determine_role: role attribute '{}' not present in SAML attributes", role_attr);
+        return default_role;
     };
 
-    let resolved = saml_roles
+    let mapped = saml_roles
         .iter()
-        .map(|saml_role| role_for_value(saml_role, config))
-        .max_by_key(UserRole::rank)
-        .unwrap_or(UserRole::User);
+        .filter_map(|saml_role| role_for_value(saml_role, config))
+        .max_by_key(UserRole::rank);
+    let resolved = mapped.or(default_role);
 
-    for (saml_role, role) in legacy_role_hints(saml_roles, config, &resolved) {
+    for (saml_role, role) in legacy_role_hints(saml_roles, config, resolved.as_ref()) {
         warn!(
             "determine_role: no role_mapping entry for {:?}; earlier versions granted {} for this name, so add {:?}: \"{}\" to role_mapping to keep it",
             saml_role, role, saml_role, role
@@ -273,8 +299,9 @@ fn determine_role(
 fn legacy_role_hints<'a>(
     saml_roles: &'a [String],
     config: &SamlConfig,
-    resolved: &UserRole,
+    resolved: Option<&UserRole>,
 ) -> Vec<(&'a str, UserRole)> {
+    let resolved_rank = resolved.map(UserRole::rank);
     let mut seen = std::collections::HashSet::new();
     saml_roles
         .iter()
@@ -285,41 +312,23 @@ fn legacy_role_hints<'a>(
         })
         .filter_map(|saml_role| {
             name_once_granting_a_role(saml_role)
-                .filter(|role| role.rank() > resolved.rank())
+                .filter(|role| resolved_rank.is_none_or(|rank| role.rank() > rank))
                 .map(|role| (saml_role.as_str(), role))
         })
         .filter(|(_, role)| seen.insert(role.rank()))
         .collect()
 }
 
-/// The role one value of the role attribute maps to, or `User` when
+/// The role one value of the role attribute maps to, or `None` when
 /// `role_mapping` has no entry for it.
 fn role_for_value(
     saml_role: &str,
     config: &SamlConfig,
-) -> UserRole {
-    let Some(mapped_role) = config
+) -> Option<UserRole> {
+    let mapped_role = config
         .role_mapping
-        .get(saml_role)
-    else {
-        return UserRole::User;
-    };
-
-    let resolved = match mapped_role
-        .to_lowercase()
-        .as_str()
-    {
-        "administrator" => UserRole::Administrator,
-        "poweruser" => UserRole::PowerUser,
-        "user" => UserRole::User,
-        _ => {
-            warn!(
-                "determine_role: role_mapping maps {:?} to unknown role {:?}; expected administrator, poweruser or user",
-                saml_role, mapped_role
-            );
-            UserRole::User
-        }
-    };
+        .get(saml_role)?;
+    let resolved = UserRole::from_config_name(mapped_role);
     debug!("determine_role: matched explicit role_mapping {:?} -> '{}' -> {:?}", saml_role, mapped_role, resolved);
     resolved
 }
@@ -381,6 +390,7 @@ mod tests {
                 ..Default::default()
             },
             role_mapping: HashMap::new(),
+            default_role: Some("user".to_string()),
             require_encrypted_assertions: false,
             sign_requests: false,
             sp_key_path: None,
@@ -423,6 +433,7 @@ mod tests {
                 .iter()
                 .map(|(from, to)| (from.to_string(), to.to_string()))
                 .collect(),
+            default_role: None,
             ..config()
         }
     }
@@ -443,10 +454,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unmapped_role_value_is_user_whatever_its_name() {
+    fn an_unmapped_role_value_grants_nothing_whatever_its_name() {
         let config = config_mapping(&[]);
         for value in ["admin", "Admin", "administrator", "ADMINISTRATOR", "poweruser", "power_user", "power-user"] {
-            assert_eq!(determine_role(&attributes_with_role("alice", value), &config), UserRole::User, "{value}");
+            assert_eq!(determine_role(&attributes_with_role("alice", value), &config), None, "{value}");
         }
     }
 
@@ -476,47 +487,47 @@ mod tests {
         let unmapped = config_mapping(&[]);
         let admin_roles = roles(&["admin"]);
         assert_eq!(
-            legacy_role_hints(&admin_roles, &unmapped, &UserRole::User),
+            legacy_role_hints(&admin_roles, &unmapped, Some(&UserRole::User)),
             vec![("admin", UserRole::Administrator)]
         );
 
         let ops_mapped = config_mapping(&[("ops", "poweruser")]);
         let admin_and_ops = roles(&["admin", "ops"]);
         assert_eq!(
-            legacy_role_hints(&admin_and_ops, &ops_mapped, &UserRole::PowerUser),
+            legacy_role_hints(&admin_and_ops, &ops_mapped, Some(&UserRole::PowerUser)),
             vec![("admin", UserRole::Administrator)]
         );
 
         let admins_mapped = config_mapping(&[("admins", "administrator")]);
         let poweruser_and_admins = roles(&["poweruser", "admins"]);
         assert_eq!(
-            legacy_role_hints(&poweruser_and_admins, &admins_mapped, &UserRole::Administrator),
+            legacy_role_hints(&poweruser_and_admins, &admins_mapped, Some(&UserRole::Administrator)),
             Vec::<(&str, UserRole)>::new()
         );
 
         let admin_mapped = config_mapping(&[("admin", "administrator")]);
         assert_eq!(
-            legacy_role_hints(&admin_roles, &admin_mapped, &UserRole::Administrator),
+            legacy_role_hints(&admin_roles, &admin_mapped, Some(&UserRole::Administrator)),
             Vec::<(&str, UserRole)>::new()
         );
 
         let admin_and_admins = roles(&["admin", "admins"]);
         assert_eq!(
-            legacy_role_hints(&admin_and_admins, &admins_mapped, &UserRole::Administrator),
+            legacy_role_hints(&admin_and_admins, &admins_mapped, Some(&UserRole::Administrator)),
             Vec::<(&str, UserRole)>::new(),
             "a name granting the role already resolved is not hinted"
         );
         assert_eq!(
-            legacy_role_hints(&roles(&["poweruser"]), &unmapped, &UserRole::PowerUser),
+            legacy_role_hints(&roles(&["poweruser"]), &unmapped, Some(&UserRole::PowerUser)),
             Vec::<(&str, UserRole)>::new()
         );
         assert_eq!(
-            legacy_role_hints(&roles(&["admin", "Admin", "ADMIN"]), &unmapped, &UserRole::User),
+            legacy_role_hints(&roles(&["admin", "Admin", "ADMIN"]), &unmapped, Some(&UserRole::User)),
             vec![("admin", UserRole::Administrator)],
             "every spelling of a role is hinted once, as the first spelling sent"
         );
         assert_eq!(
-            legacy_role_hints(&roles(&["Admin", "poweruser"]), &unmapped, &UserRole::User),
+            legacy_role_hints(&roles(&["Admin", "poweruser"]), &unmapped, Some(&UserRole::User)),
             vec![("Admin", UserRole::Administrator), ("poweruser", UserRole::PowerUser)]
         );
     }
@@ -527,7 +538,7 @@ mod tests {
         for (value, expected) in
             [("admin", UserRole::Administrator), ("ops", UserRole::PowerUser), ("staff", UserRole::User)]
         {
-            assert_eq!(determine_role(&attributes_with_role("alice", value), &config), expected, "{value}");
+            assert_eq!(determine_role(&attributes_with_role("alice", value), &config), Some(expected), "{value}");
         }
     }
 
@@ -535,22 +546,22 @@ mod tests {
     fn a_role_value_matches_its_mapping_exactly() {
         let config = config_mapping(&[("admin", "administrator")]);
         for value in ["Admin", "ADMIN", " admin", "admin "] {
-            assert_eq!(determine_role(&attributes_with_role("alice", value), &config), UserRole::User, "{value:?}");
+            assert_eq!(determine_role(&attributes_with_role("alice", value), &config), None, "{value:?}");
         }
     }
 
     #[test]
     fn a_mapping_target_is_read_whatever_its_case() {
         let config = config_mapping(&[("admin", "Administrator"), ("ops", "PowerUser")]);
-        assert_eq!(determine_role(&attributes_with_role("alice", "admin"), &config), UserRole::Administrator);
-        assert_eq!(determine_role(&attributes_with_role("alice", "ops"), &config), UserRole::PowerUser);
+        assert_eq!(determine_role(&attributes_with_role("alice", "admin"), &config), Some(UserRole::Administrator));
+        assert_eq!(determine_role(&attributes_with_role("alice", "ops"), &config), Some(UserRole::PowerUser));
     }
 
     #[test]
-    fn a_mapping_to_an_unknown_role_or_a_missing_role_attribute_is_user() {
+    fn a_mapping_to_an_unknown_role_or_a_missing_role_attribute_grants_nothing() {
         let config = config_mapping(&[("admin", "root")]);
-        assert_eq!(determine_role(&attributes_with_role("alice", "admin"), &config), UserRole::User);
-        assert_eq!(determine_role(&attributes("alice"), &config), UserRole::User);
+        assert_eq!(determine_role(&attributes_with_role("alice", "admin"), &config), None);
+        assert_eq!(determine_role(&attributes("alice"), &config), None);
     }
 
     #[test]
@@ -565,13 +576,13 @@ mod tests {
         };
         assert_eq!(
             determine_role(&with_name_id("alice@example.com"), &config),
-            UserRole::User,
+            None,
             "the NameID grants nothing unless it is the role attribute"
         );
 
         config.attribute_mapping.role = "NameID".to_string();
-        assert_eq!(determine_role(&with_name_id("alice@example.com"), &config), UserRole::Administrator);
-        assert_eq!(determine_role(&with_name_id("bob@example.com"), &config), UserRole::User);
+        assert_eq!(determine_role(&with_name_id("alice@example.com"), &config), Some(UserRole::Administrator));
+        assert_eq!(determine_role(&with_name_id("bob@example.com"), &config), None);
     }
 
     #[tokio::test]
@@ -581,7 +592,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let storage = storage(&temp).await;
-        let mut config = config_mapping(&[("alice@example.com", "administrator")]);
+        let mut config = config_with_default(&[("alice@example.com", "administrator")], "user");
         config.attribute_mapping.role = "NameID".to_string();
         let sign_in = |name_id: &'static str, id: &'static str| {
             let attributes =
@@ -607,14 +618,14 @@ mod tests {
         for roles in [["staff", "admins"], ["admins", "staff"]] {
             assert_eq!(
                 determine_role(&attributes_with_roles("alice", &roles), &config),
-                UserRole::Administrator,
+                Some(UserRole::Administrator),
                 "{roles:?}"
             );
         }
         for roles in [["staff", "ops"], ["ops", "staff"]] {
             assert_eq!(
                 determine_role(&attributes_with_roles("alice", &roles), &config),
-                UserRole::PowerUser,
+                Some(UserRole::PowerUser),
                 "{roles:?}"
             );
         }
@@ -625,10 +636,10 @@ mod tests {
         let config = config_mapping(&[("ops", "poweruser")]);
         assert_eq!(
             determine_role(&attributes_with_roles("alice", &["admin", "ops", "other"]), &config),
-            UserRole::PowerUser
+            Some(UserRole::PowerUser)
         );
-        assert_eq!(determine_role(&attributes_with_roles("alice", &["admin", "other"]), &config), UserRole::User);
-        assert_eq!(determine_role(&attributes_with_roles("alice", &[]), &config), UserRole::User);
+        assert_eq!(determine_role(&attributes_with_roles("alice", &["admin", "other"]), &config), None);
+        assert_eq!(determine_role(&attributes_with_roles("alice", &[]), &config), None);
     }
 
     #[tokio::test]
@@ -647,6 +658,123 @@ mod tests {
             assert_eq!(bob.role, UserRole::Administrator, "{roles:?}");
             assert_eq!(bob.saml_id.as_deref(), Some("bob"));
         }
+    }
+
+    fn config_with_default(
+        mapping: &[(&str, &str)],
+        default_role: &str,
+    ) -> SamlConfig {
+        SamlConfig {
+            default_role: Some(default_role.to_string()),
+            ..config_mapping(mapping)
+        }
+    }
+
+    #[test]
+    fn the_default_role_applies_only_when_no_value_is_mapped() {
+        let config = config_with_default(&[("ops", "poweruser")], "User");
+        assert_eq!(determine_role(&attributes_with_role("alice", "other"), &config), Some(UserRole::User));
+        assert_eq!(determine_role(&attributes("alice"), &config), Some(UserRole::User));
+        assert_eq!(determine_role(&attributes_with_role("alice", "ops"), &config), Some(UserRole::PowerUser));
+    }
+
+    #[test]
+    fn an_old_fallback_name_is_still_hinted_when_the_default_role_is_lower() {
+        let config = config_with_default(&[], "user");
+        let roles = vec!["admin".to_string()];
+        assert_eq!(legacy_role_hints(&roles, &config, Some(&UserRole::User)), vec![("admin", UserRole::Administrator)]);
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_with_no_mapped_role_and_no_default_is_refused_and_creates_nobody() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let config = config_mapping(&[("admins", "administrator")]);
+        provision_user_from_saml(&storage, &attributes("primary"), &config, "")
+            .await
+            .unwrap();
+
+        let refused = provision_user_from_saml(&storage, &attributes_with_role("bob", "other"), &config, "")
+            .await
+            .unwrap_err();
+
+        assert!(
+            refused
+                .downcast_ref::<RoleUnmapped>()
+                .is_some(),
+            "{refused:?}"
+        );
+        assert_eq!(
+            storage
+                .list_users()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_returning_user_who_loses_every_mapped_role_is_refused_and_keeps_the_stored_role() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let config = config_mapping(&[("ops", "poweruser")]);
+        provision_user_from_saml(&storage, &attributes("primary"), &config, "")
+            .await
+            .unwrap();
+        let bob = provision_user_from_saml(&storage, &attributes_with_role("bob", "ops"), &config, "")
+            .await
+            .unwrap();
+        assert_eq!(bob.role, UserRole::PowerUser);
+
+        let refused = provision_user_from_saml(&storage, &attributes_with_role("bob", "other"), &config, "")
+            .await
+            .unwrap_err();
+
+        assert!(
+            refused
+                .downcast_ref::<RoleUnmapped>()
+                .is_some(),
+            "{refused:?}"
+        );
+        let stored = storage
+            .load_user_by_saml_id("bob")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.role, UserRole::PowerUser);
+    }
+
+    #[tokio::test]
+    async fn the_first_user_and_the_primary_administrator_sign_in_without_a_mapped_role() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let config = config_mapping(&[]);
+
+        let first = provision_user_from_saml(&storage, &attributes("primary"), &config, "")
+            .await
+            .unwrap();
+        assert_eq!(first.role, UserRole::Administrator);
+        let again = provision_user_from_saml(&storage, &attributes("primary"), &config, "")
+            .await
+            .unwrap();
+        assert_eq!(again.role, UserRole::Administrator);
+    }
+
+    #[tokio::test]
+    async fn a_default_role_signs_in_an_unmapped_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(&temp).await;
+        let config = config_with_default(&[], "poweruser");
+        provision_user_from_saml(&storage, &attributes("primary"), &config, "")
+            .await
+            .unwrap();
+
+        let bob = provision_user_from_saml(&storage, &attributes_with_role("bob", "other"), &config, "")
+            .await
+            .unwrap();
+
+        assert_eq!(bob.role, UserRole::PowerUser);
     }
 
     #[tokio::test]
@@ -712,7 +840,7 @@ mod tests {
             .unwrap();
         assert_eq!(bob.role, UserRole::Administrator);
 
-        let unmapped = config_mapping(&[]);
+        let unmapped = config_with_default(&[], "user");
         let bob = provision_user_from_saml(&storage, &attributes_with_role("bob", "admin"), &unmapped, "")
             .await
             .unwrap();

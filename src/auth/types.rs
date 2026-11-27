@@ -11,6 +11,17 @@ pub enum UserRole {
 }
 
 impl UserRole {
+    /// The role a configuration file names, read without regard to case, or `None` when the
+    /// name is not `administrator`, `poweruser` or `user`.
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "administrator" => Some(UserRole::Administrator),
+            "poweruser" => Some(UserRole::PowerUser),
+            "user" => Some(UserRole::User),
+            _ => None,
+        }
+    }
+
     /// Orders roles by the access they grant, so the highest of several can be chosen
     /// and the PAT scope ceiling can compare an issuer with its subject.
     pub fn rank(&self) -> u8 {
